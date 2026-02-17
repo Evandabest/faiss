@@ -78,6 +78,64 @@ TEST_F(TestMetalIndexFlat, L2_AddAndSearch) {
     compareSearchResults(numQuery, k, refDist.data(), refLab.data(), testDist.data(), testLab.data());
 }
 
+TEST_F(TestMetalIndexFlat, L2_LargeK) {
+    // Exercise heap-based top-k variant (k=512 -> topk_heap_512)
+    const int dim = 32;
+    const int numVecs = 600;
+    const int numQuery = 4;
+    const int k = 512;
+
+    std::vector<float> vecs((size_t)numVecs * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 12345);
+    std::vector<float> queries((size_t)numQuery * dim);
+    faiss::float_rand(queries.data(), queries.size(), 67890);
+
+    faiss::IndexFlatL2 cpuIndex(dim);
+    faiss::gpu_metal::MetalIndexFlat metalIndex(
+            resources_, dim, faiss::METRIC_L2, 0.0f);
+    cpuIndex.add(numVecs, vecs.data());
+    metalIndex.add(numVecs, vecs.data());
+
+    std::vector<float> refDist((size_t)numQuery * k);
+    std::vector<faiss::idx_t> refLab((size_t)numQuery * k, -1);
+    std::vector<float> testDist((size_t)numQuery * k);
+    std::vector<faiss::idx_t> testLab((size_t)numQuery * k, -1);
+
+    cpuIndex.search(numQuery, queries.data(), k, refDist.data(), refLab.data());
+    metalIndex.search(numQuery, queries.data(), k, testDist.data(), testLab.data());
+
+    compareSearchResults(numQuery, k, refDist.data(), refLab.data(), testDist.data(), testLab.data());
+}
+
+TEST_F(TestMetalIndexFlat, L2_MaxK) {
+    // Exercise largest variant (k=2048 -> topk_heap_2048)
+    const int dim = 16;
+    const int numVecs = 2500;
+    const int numQuery = 2;
+    const int k = 2048;
+
+    std::vector<float> vecs((size_t)numVecs * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 11111);
+    std::vector<float> queries((size_t)numQuery * dim);
+    faiss::float_rand(queries.data(), queries.size(), 22222);
+
+    faiss::IndexFlatL2 cpuIndex(dim);
+    faiss::gpu_metal::MetalIndexFlat metalIndex(
+            resources_, dim, faiss::METRIC_L2, 0.0f);
+    cpuIndex.add(numVecs, vecs.data());
+    metalIndex.add(numVecs, vecs.data());
+
+    std::vector<float> refDist((size_t)numQuery * k);
+    std::vector<faiss::idx_t> refLab((size_t)numQuery * k, -1);
+    std::vector<float> testDist((size_t)numQuery * k);
+    std::vector<faiss::idx_t> testLab((size_t)numQuery * k, -1);
+
+    cpuIndex.search(numQuery, queries.data(), k, refDist.data(), refLab.data());
+    metalIndex.search(numQuery, queries.data(), k, testDist.data(), testLab.data());
+
+    compareSearchResults(numQuery, k, refDist.data(), refLab.data(), testDist.data(), testLab.data());
+}
+
 TEST_F(TestMetalIndexFlat, IP_AddAndSearch) {
     const int dim = 4;
     const int numVecs = 50;

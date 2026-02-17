@@ -19,7 +19,7 @@ namespace gpu_metal {
 
 /// Runs GPU search: distance matrix (L2 or IP) then top-k. Uses shared buffers
 /// (queries, vectors, outDistances, outIndices). outIndices are int32 (0..nb-1).
-/// Maximum k supported by the GPU top-k kernel (256).
+/// Maximum k supported by the GPU top-k kernel (2048; heap in threadgroup memory).
 int getMetalFlatSearchMaxK();
 
 /// Returns true on success; false if pipeline creation failed.
