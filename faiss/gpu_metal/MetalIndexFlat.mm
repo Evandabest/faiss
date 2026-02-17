@@ -8,6 +8,7 @@
 
 #import "MetalIndexFlat.h"
 #import "MetalFlatKernels.h"
+#include <faiss/IndexFlat.h>
 #include <faiss/impl/FaissAssert.h>
 #include <cstring>
 
@@ -160,6 +161,18 @@ void MetalIndexFlat::search(
 
     resources_->deallocBuffer(outDistBuf, MetalAllocType::TemporaryMemoryBuffer);
     resources_->deallocBuffer(outIdxBuf, MetalAllocType::TemporaryMemoryBuffer);
+}
+
+void MetalIndexFlat::copyTo(faiss::IndexFlat* index) const {
+    FAISS_THROW_IF_NOT(index != nullptr);
+    FAISS_THROW_IF_NOT(index->d == d);
+    FAISS_THROW_IF_NOT(index->metric_type == metric_type);
+    if (ntotal == 0 || vectorsBuffer_ == nil) {
+        return;
+    }
+    std::vector<float> host((size_t)ntotal * (size_t)d);
+    std::memcpy(host.data(), [vectorsBuffer_ contents], host.size() * sizeof(float));
+    index->add(ntotal, host.data());
 }
 
 } // namespace gpu_metal

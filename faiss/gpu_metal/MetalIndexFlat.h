@@ -14,6 +14,10 @@
 
 #include <faiss/Index.h>
 #include <faiss/gpu_metal/MetalIndex.h>
+
+namespace faiss {
+struct IndexFlat;
+}
 #include <memory>
 #include <vector>
 
@@ -43,6 +47,9 @@ public:
             float* distances,
             idx_t* labels,
             const SearchParameters* params = nullptr) const override;
+
+    /// Copy vectors to a CPU IndexFlat (e.g. for index_metal_gpu_to_cpu).
+    void copyTo(::faiss::IndexFlat* index) const;
 
 private:
     /// Ensures vector buffer can hold at least \p newNtotal vectors; grows

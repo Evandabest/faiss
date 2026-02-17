@@ -9,8 +9,10 @@
  */
 
 #include <faiss/IndexFlat.h>
+#include <faiss/gpu_metal/MetalCloner.h>
 #include <faiss/gpu_metal/MetalIndexFlat.h>
 #include <faiss/gpu_metal/MetalResources.h>
+#include <faiss/gpu_metal/StandardMetalResources.h>
 #include <faiss/utils/random.h>
 #include <gtest/gtest.h>
 #import <cmath>
@@ -180,4 +182,76 @@ TEST_F(TestMetalIndexFlat, EmptySearch) {
     for (int i = 0; i < numQuery * k; ++i) {
         EXPECT_EQ(labels[i], -1);
     }
+}
+
+TEST_F(TestMetalIndexFlat, GetNumGpus) {
+    int n = faiss::gpu_metal::get_num_gpus();
+    EXPECT_GE(n, 0);
+    EXPECT_LE(n, 1);
+    if (resources_->isAvailable()) {
+        EXPECT_EQ(n, 1);
+    }
+}
+
+TEST_F(TestMetalIndexFlat, IndexCpuToMetalGpu) {
+    const int dim = 4;
+    const int numVecs = 30;
+    const int numQuery = 3;
+    const int k = 2;
+
+    std::vector<float> vecs((size_t)numVecs * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 200);
+    std::vector<float> queries((size_t)numQuery * dim);
+    faiss::float_rand(queries.data(), queries.size(), 201);
+
+    faiss::IndexFlatL2 cpuIndex(dim);
+    cpuIndex.add(numVecs, vecs.data());
+
+    faiss::gpu_metal::StandardMetalResources res;
+    faiss::Index* metalIndex = faiss::gpu_metal::index_cpu_to_metal_gpu(&res, 0, &cpuIndex);
+    ASSERT_NE(metalIndex, nullptr);
+    EXPECT_EQ(metalIndex->ntotal, numVecs);
+
+    std::vector<float> refDist((size_t)numQuery * k);
+    std::vector<faiss::idx_t> refLab((size_t)numQuery * k, -1);
+    std::vector<float> testDist((size_t)numQuery * k);
+    std::vector<faiss::idx_t> testLab((size_t)numQuery * k, -1);
+    cpuIndex.search(numQuery, queries.data(), k, refDist.data(), refLab.data());
+    metalIndex->search(numQuery, queries.data(), k, testDist.data(), testLab.data());
+    compareSearchResults(numQuery, k, refDist.data(), refLab.data(), testDist.data(), testLab.data());
+
+    delete metalIndex;
+}
+
+TEST_F(TestMetalIndexFlat, IndexMetalGpuToCpu) {
+    const int dim = 4;
+    const int numVecs = 20;
+    const int numQuery = 2;
+    const int k = 2;
+
+    std::vector<float> vecs((size_t)numVecs * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 300);
+    std::vector<float> queries((size_t)numQuery * dim);
+    faiss::float_rand(queries.data(), queries.size(), 301);
+
+    faiss::IndexFlatL2 cpuOrig(dim);
+    cpuOrig.add(numVecs, vecs.data());
+
+    faiss::gpu_metal::StandardMetalResources res;
+    faiss::Index* metalIndex = faiss::gpu_metal::index_cpu_to_metal_gpu(&res, 0, &cpuOrig);
+    ASSERT_NE(metalIndex, nullptr);
+    faiss::Index* cpuBack = faiss::gpu_metal::index_metal_gpu_to_cpu(metalIndex);
+    ASSERT_NE(cpuBack, nullptr);
+    EXPECT_EQ(cpuBack->ntotal, numVecs);
+
+    std::vector<float> refDist((size_t)numQuery * k);
+    std::vector<faiss::idx_t> refLab((size_t)numQuery * k, -1);
+    std::vector<float> testDist((size_t)numQuery * k);
+    std::vector<faiss::idx_t> testLab((size_t)numQuery * k, -1);
+    cpuOrig.search(numQuery, queries.data(), k, refDist.data(), refLab.data());
+    cpuBack->search(numQuery, queries.data(), k, testDist.data(), testLab.data());
+    compareSearchResults(numQuery, k, refDist.data(), refLab.data(), testDist.data(), testLab.data());
+
+    delete cpuBack;
+    delete metalIndex;
 }

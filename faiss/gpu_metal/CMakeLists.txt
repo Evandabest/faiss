@@ -14,6 +14,8 @@ set(FAISS_METAL_SRC
   MetalIndex.mm
   MetalFlatKernels.mm
   MetalIndexFlat.mm
+  StandardMetalResources.mm
+  MetalCloner.mm
 )
 
 add_library(faiss_metal STATIC ${FAISS_METAL_SRC})
