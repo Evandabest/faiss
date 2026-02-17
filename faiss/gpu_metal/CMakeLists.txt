@@ -11,6 +11,7 @@
 set(FAISS_METAL_SRC
   MetalStub.mm
   MetalResources.mm
+  MetalIndex.mm
 )
 
 add_library(faiss_metal STATIC ${FAISS_METAL_SRC})
