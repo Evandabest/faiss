@@ -22,3 +22,8 @@ faiss/python/swigfaiss_avx2.swig
 faiss/python/swigfaiss_avx512.swig
 faiss/python/swigfaiss_avx512_spr.swig
 faiss/python/swigfaiss_sve.swig
+# CMake build artifacts
+CMakeCache.txt
+CMakeFiles/
+*.cmake
+!CMakeLists.txt

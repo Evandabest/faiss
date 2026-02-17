@@ -348,12 +348,12 @@ namespace std {
 %include <faiss/utils/hamming.h>
 %include <faiss/utils/hamming_distance/common.h>
 
+#ifdef GPU_WRAPPER
+
 int get_num_gpus();
 void gpu_profiler_start();
 void gpu_profiler_stop();
 void gpu_sync_all_devices();
-
-#ifdef GPU_WRAPPER
 
 %shared_ptr(faiss::gpu::GpuResources);
 %shared_ptr(faiss::gpu::StandardGpuResourcesImpl);

@@ -15,6 +15,7 @@
 #include <faiss/gpu_metal/StandardMetalResources.h>
 #include <faiss/utils/random.h>
 #include <gtest/gtest.h>
+#include <algorithm>
 #import <cmath>
 #import <memory>
 #import <vector>
@@ -34,6 +35,61 @@ void compareSearchResults(
         EXPECT_NEAR(refDist[i], testDist[i], kTolerance * (std::fabs(refDist[i]) + 1.0f))
                 << "i=" << i;
         EXPECT_EQ(refLab[i], testLab[i]) << "i=" << i;
+    }
+}
+
+// Compare results allowing tie-breaking / fp order: same set of (dist, label) per query; distances with tolerance.
+void compareSearchResultsAllowTieBreak(
+        int nq,
+        int k,
+        const float* refDist,
+        const faiss::idx_t* refLab,
+        const float* testDist,
+        const faiss::idx_t* testLab) {
+    std::vector<std::pair<float, faiss::idx_t>> refPairs((size_t)k), testPairs((size_t)k);
+    for (int q = 0; q < nq; ++q) {
+        for (int i = 0; i < k; ++i) {
+            refPairs[i] = {refDist[q * k + i], refLab[q * k + i]};
+            testPairs[i] = {testDist[q * k + i], testLab[q * k + i]};
+        }
+        std::sort(refPairs.begin(), refPairs.end());
+        std::sort(testPairs.begin(), testPairs.end());
+        for (int i = 0; i < k; ++i) {
+            EXPECT_NEAR(refPairs[i].first, testPairs[i].first,
+                        kTolerance * (std::fabs(refPairs[i].first) + 1.0f))
+                    << "q=" << q << " i=" << i;
+            EXPECT_EQ(refPairs[i].second, testPairs[i].second) << "q=" << q << " i=" << i;
+        }
+    }
+}
+
+// Compare results when both row and column tiling: require same set of labels per query and distances match (with tolerance).
+void compareSearchResultsTiled(
+        int nq,
+        int k,
+        const float* refDist,
+        const faiss::idx_t* refLab,
+        const float* testDist,
+        const faiss::idx_t* testLab) {
+    std::vector<faiss::idx_t> refLabSorted((size_t)k), testLabSorted((size_t)k);
+    std::vector<float> refDistSorted((size_t)k), testDistSorted((size_t)k);
+    for (int q = 0; q < nq; ++q) {
+        for (int i = 0; i < k; ++i) {
+            refLabSorted[i] = refLab[q * k + i];
+            refDistSorted[i] = refDist[q * k + i];
+            testLabSorted[i] = testLab[q * k + i];
+            testDistSorted[i] = testDist[q * k + i];
+        }
+        std::sort(refLabSorted.begin(), refLabSorted.end());
+        std::sort(testLabSorted.begin(), testLabSorted.end());
+        std::sort(refDistSorted.begin(), refDistSorted.end());
+        std::sort(testDistSorted.begin(), testDistSorted.end());
+        for (int i = 0; i < k; ++i) {
+            EXPECT_EQ(refLabSorted[i], testLabSorted[i]) << "q=" << q << " i=" << i << " (set of labels must match)";
+            EXPECT_NEAR(refDistSorted[i], testDistSorted[i],
+                        kTolerance * (std::fabs(refDistSorted[i]) + 1.0f))
+                    << "q=" << q << " i=" << i;
+        }
     }
 }
 
@@ -122,6 +178,156 @@ TEST_F(TestMetalIndexFlat, L2_MaxK) {
     faiss::IndexFlatL2 cpuIndex(dim);
     faiss::gpu_metal::MetalIndexFlat metalIndex(
             resources_, dim, faiss::METRIC_L2, 0.0f);
+    cpuIndex.add(numVecs, vecs.data());
+    metalIndex.add(numVecs, vecs.data());
+
+    std::vector<float> refDist((size_t)numQuery * k);
+    std::vector<faiss::idx_t> refLab((size_t)numQuery * k, -1);
+    std::vector<float> testDist((size_t)numQuery * k);
+    std::vector<faiss::idx_t> testLab((size_t)numQuery * k, -1);
+
+    cpuIndex.search(numQuery, queries.data(), k, refDist.data(), refLab.data());
+    metalIndex.search(numQuery, queries.data(), k, testDist.data(), testLab.data());
+
+    compareSearchResults(numQuery, k, refDist.data(), refLab.data(), testDist.data(), testLab.data());
+}
+
+// --- Tiling tests (Step 6): force two-level tiling path ---
+// chooseTileSize uses ~256MB element budget; for d>32, preferredTileRows=512 so tileCols=131072.
+// So nb > 131072 triggers vector tiling; nq > 512 triggers query tiling.
+
+TEST_F(TestMetalIndexFlat, L2_TiledManyVectors) {
+    // Force vector tiling: nb > tileCols (131072) -> multiple column tiles, merge path
+    const int dim = 64;
+    const int numVecs = 132000;  // > 131072
+    const int numQuery = 20;
+    const int k = 10;
+
+    std::vector<float> vecs((size_t)numVecs * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 4001);
+    std::vector<float> queries((size_t)numQuery * dim);
+    faiss::float_rand(queries.data(), queries.size(), 4002);
+
+    faiss::IndexFlatL2 cpuIndex(dim);
+    faiss::gpu_metal::MetalIndexFlat metalIndex(
+            resources_, dim, faiss::METRIC_L2, 0.0f);
+    cpuIndex.add(numVecs, vecs.data());
+    metalIndex.add(numVecs, vecs.data());
+
+    std::vector<float> refDist((size_t)numQuery * k);
+    std::vector<faiss::idx_t> refLab((size_t)numQuery * k, -1);
+    std::vector<float> testDist((size_t)numQuery * k);
+    std::vector<faiss::idx_t> testLab((size_t)numQuery * k, -1);
+
+    cpuIndex.search(numQuery, queries.data(), k, refDist.data(), refLab.data());
+    metalIndex.search(numQuery, queries.data(), k, testDist.data(), testLab.data());
+
+    compareSearchResults(numQuery, k, refDist.data(), refLab.data(), testDist.data(), testLab.data());
+}
+
+TEST_F(TestMetalIndexFlat, L2_TiledManyQueries) {
+    // Force query tiling: nq > 512 -> multiple row tiles
+    const int dim = 64;
+    const int numVecs = 500;
+    const int numQuery = 600;  // > 512
+    const int k = 10;
+
+    std::vector<float> vecs((size_t)numVecs * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 5001);
+    std::vector<float> queries((size_t)numQuery * dim);
+    faiss::float_rand(queries.data(), queries.size(), 5002);
+
+    faiss::IndexFlatL2 cpuIndex(dim);
+    faiss::gpu_metal::MetalIndexFlat metalIndex(
+            resources_, dim, faiss::METRIC_L2, 0.0f);
+    cpuIndex.add(numVecs, vecs.data());
+    metalIndex.add(numVecs, vecs.data());
+
+    std::vector<float> refDist((size_t)numQuery * k);
+    std::vector<faiss::idx_t> refLab((size_t)numQuery * k, -1);
+    std::vector<float> testDist((size_t)numQuery * k);
+    std::vector<faiss::idx_t> testLab((size_t)numQuery * k, -1);
+
+    cpuIndex.search(numQuery, queries.data(), k, refDist.data(), refLab.data());
+    metalIndex.search(numQuery, queries.data(), k, testDist.data(), testLab.data());
+
+    compareSearchResults(numQuery, k, refDist.data(), refLab.data(), testDist.data(), testLab.data());
+}
+
+TEST_F(TestMetalIndexFlat, L2_TiledBoth) {
+    // Force both query and vector tiling
+    const int dim = 64;
+    const int numVecs = 132000;
+    const int numQuery = 600;
+    const int k = 32;
+
+    std::vector<float> vecs((size_t)numVecs * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 6001);
+    std::vector<float> queries((size_t)numQuery * dim);
+    faiss::float_rand(queries.data(), queries.size(), 6002);
+
+    faiss::IndexFlatL2 cpuIndex(dim);
+    faiss::gpu_metal::MetalIndexFlat metalIndex(
+            resources_, dim, faiss::METRIC_L2, 0.0f);
+    cpuIndex.add(numVecs, vecs.data());
+    metalIndex.add(numVecs, vecs.data());
+
+    std::vector<float> refDist((size_t)numQuery * k);
+    std::vector<faiss::idx_t> refLab((size_t)numQuery * k, -1);
+    std::vector<float> testDist((size_t)numQuery * k);
+    std::vector<faiss::idx_t> testLab((size_t)numQuery * k, -1);
+
+    cpuIndex.search(numQuery, queries.data(), k, refDist.data(), refLab.data());
+    metalIndex.search(numQuery, queries.data(), k, testDist.data(), testLab.data());
+
+    // Tiled both: require same set of labels and same set of distances per query (order may differ)
+    compareSearchResultsTiled(numQuery, k, refDist.data(), refLab.data(), testDist.data(), testLab.data());
+}
+
+TEST_F(TestMetalIndexFlat, L2_SingleColumnTile) {
+    // One column tile (numColTiles==1) but multiple row tiles -> exercises copy path, no merge
+    const int dim = 64;
+    const int numVecs = 50000;   // < 131072 -> single column tile
+    const int numQuery = 600;    // > 512 -> two row tiles
+    const int k = 10;
+
+    std::vector<float> vecs((size_t)numVecs * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 7001);
+    std::vector<float> queries((size_t)numQuery * dim);
+    faiss::float_rand(queries.data(), queries.size(), 7002);
+
+    faiss::IndexFlatL2 cpuIndex(dim);
+    faiss::gpu_metal::MetalIndexFlat metalIndex(
+            resources_, dim, faiss::METRIC_L2, 0.0f);
+    cpuIndex.add(numVecs, vecs.data());
+    metalIndex.add(numVecs, vecs.data());
+
+    std::vector<float> refDist((size_t)numQuery * k);
+    std::vector<faiss::idx_t> refLab((size_t)numQuery * k, -1);
+    std::vector<float> testDist((size_t)numQuery * k);
+    std::vector<faiss::idx_t> testLab((size_t)numQuery * k, -1);
+
+    cpuIndex.search(numQuery, queries.data(), k, refDist.data(), refLab.data());
+    metalIndex.search(numQuery, queries.data(), k, testDist.data(), testLab.data());
+
+    compareSearchResults(numQuery, k, refDist.data(), refLab.data(), testDist.data(), testLab.data());
+}
+
+TEST_F(TestMetalIndexFlat, IP_TiledManyVectors) {
+    // Inner product with vector tiling
+    const int dim = 64;
+    const int numVecs = 132000;
+    const int numQuery = 20;
+    const int k = 10;
+
+    std::vector<float> vecs((size_t)numVecs * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 8001);
+    std::vector<float> queries((size_t)numQuery * dim);
+    faiss::float_rand(queries.data(), queries.size(), 8002);
+
+    faiss::IndexFlatIP cpuIndex(dim);
+    faiss::gpu_metal::MetalIndexFlat metalIndex(
+            resources_, dim, faiss::METRIC_INNER_PRODUCT, 0.0f);
     cpuIndex.add(numVecs, vecs.data());
     metalIndex.add(numVecs, vecs.data());
 

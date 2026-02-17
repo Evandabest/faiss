@@ -63,6 +63,63 @@ class TestMetalPython(unittest.TestCase):
         np.testing.assert_array_almost_equal(D_gpu, D_cpu)
         np.testing.assert_array_equal(I_gpu, I_cpu)
 
+    def test_tiled_many_vectors(self):
+        """Force vector tiling (nb > 131072): compare Metal vs CPU."""
+        if faiss.get_num_gpus() == 0:
+            self.skipTest("No Metal device")
+        d, nb, nq, k = 64, 132_000, 20, 10  # nb > 131072 triggers vector tiling
+        np.random.seed(9000)
+        xb = np.random.randn(nb, d).astype(np.float32)
+        xq = np.random.randn(nq, d).astype(np.float32)
+        cpu_index = faiss.IndexFlatL2(d)
+        cpu_index.add(xb)
+        res = faiss.StandardGpuResources()
+        gpu_index = faiss.index_cpu_to_gpu(res, 0, cpu_index)
+        D_gpu, I_gpu = gpu_index.search(xq, k)
+        D_cpu, I_cpu = cpu_index.search(xq, k)
+        # Allow small floating-point differences (GPU vs CPU precision)
+        np.testing.assert_allclose(D_gpu, D_cpu, rtol=1e-5, atol=1e-5)
+        # Labels should match (same nearest neighbors)
+        np.testing.assert_array_equal(I_gpu, I_cpu)
+
+    def test_tiled_many_queries(self):
+        """Force query tiling (nq > 512): compare Metal vs CPU."""
+        if faiss.get_num_gpus() == 0:
+            self.skipTest("No Metal device")
+        d, nb, nq, k = 64, 500, 600, 10  # nq > 512 triggers query tiling
+        np.random.seed(9001)
+        xb = np.random.randn(nb, d).astype(np.float32)
+        xq = np.random.randn(nq, d).astype(np.float32)
+        cpu_index = faiss.IndexFlatL2(d)
+        cpu_index.add(xb)
+        res = faiss.StandardGpuResources()
+        gpu_index = faiss.index_cpu_to_gpu(res, 0, cpu_index)
+        D_gpu, I_gpu = gpu_index.search(xq, k)
+        D_cpu, I_cpu = cpu_index.search(xq, k)
+        # Allow small floating-point differences (GPU vs CPU precision)
+        np.testing.assert_allclose(D_gpu, D_cpu, rtol=1e-5, atol=1e-5)
+        # Labels should match (same nearest neighbors)
+        np.testing.assert_array_equal(I_gpu, I_cpu)
+
+    def test_tiled_single_column_tile(self):
+        """Single column tile (nb < 131072) but multiple row tiles (nq=600)."""
+        if faiss.get_num_gpus() == 0:
+            self.skipTest("No Metal device")
+        d, nb, nq, k = 64, 50_000, 600, 10
+        np.random.seed(9002)
+        xb = np.random.randn(nb, d).astype(np.float32)
+        xq = np.random.randn(nq, d).astype(np.float32)
+        cpu_index = faiss.IndexFlatL2(d)
+        cpu_index.add(xb)
+        res = faiss.StandardGpuResources()
+        gpu_index = faiss.index_cpu_to_gpu(res, 0, cpu_index)
+        D_gpu, I_gpu = gpu_index.search(xq, k)
+        D_cpu, I_cpu = cpu_index.search(xq, k)
+        # Allow small floating-point differences (GPU vs CPU precision)
+        np.testing.assert_allclose(D_gpu, D_cpu, rtol=1e-5, atol=1e-5)
+        # Labels should match (same nearest neighbors)
+        np.testing.assert_array_equal(I_gpu, I_cpu)
+
 
 if __name__ == "__main__":
     unittest.main()
