@@ -21,7 +21,7 @@ namespace faiss {
 namespace gpu_metal {
 
 /// Flat index that stores vectors in an MTLBuffer. Supports L2 and inner
-/// product. Search uses a CPU fallback (copy from buffer, then knn_*).
+/// product. Search runs on GPU via Metal compute (distance + top-k kernels).
 class MetalIndexFlat : public MetalIndex {
 public:
     MetalIndexFlat(

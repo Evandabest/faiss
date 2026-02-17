@@ -7,9 +7,8 @@
  */
 
 #import "MetalIndexFlat.h"
+#import "MetalFlatKernels.h"
 #include <faiss/impl/FaissAssert.h>
-#include <faiss/utils/Heap.h>
-#include <faiss/utils/distances.h>
 #include <cstring>
 
 namespace faiss {
@@ -101,6 +100,7 @@ void MetalIndexFlat::search(
         float* distances,
         idx_t* labels,
         const SearchParameters* params) const {
+    (void)params;
     FAISS_THROW_IF_NOT(k > 0);
     if (ntotal == 0) {
         for (idx_t i = 0; i < n * k; ++i) {
@@ -108,29 +108,58 @@ void MetalIndexFlat::search(
         }
         return;
     }
-    IDSelector* sel = params ? params->sel : nullptr;
-    std::vector<float> hostVectors((size_t)ntotal * (size_t)d);
-    std::memcpy(
-            hostVectors.data(),
-            [vectorsBuffer_ contents],
-            (size_t)ntotal * (size_t)d * sizeof(float));
-    const float* y = hostVectors.data();
+    const int maxK = getMetalFlatSearchMaxK();
+    FAISS_THROW_IF_NOT_MSG(
+            k <= maxK,
+            "MetalIndexFlat: k exceeds GPU limit (see getMetalFlatSearchMaxK())");
 
-    if (metric_type == METRIC_INNER_PRODUCT) {
-        float_minheap_array_t res = {size_t(n), size_t(k), labels, distances};
-        knn_inner_product(x, y, d, size_t(n), size_t(ntotal), &res, sel);
-    } else if (metric_type == METRIC_L2) {
-        float_maxheap_array_t res = {size_t(n), size_t(k), labels, distances};
-        knn_L2sqr(x, y, d, size_t(n), size_t(ntotal), &res, nullptr, sel);
-    } else {
-        FAISS_THROW_MSG("MetalIndexFlat: only L2 and inner product supported");
+    id<MTLDevice> device = resources_->getDevice();
+    id<MTLCommandQueue> queue = resources_->getCommandQueue();
+    if (!device || !queue) {
+        FAISS_THROW_MSG("MetalIndexFlat: device or queue not available");
     }
 
+    const size_t queryBytes = (size_t)n * (size_t)d * sizeof(float);
+    const size_t outDistBytes = (size_t)n * (size_t)k * sizeof(float);
+    const size_t outIdxBytes = (size_t)n * (size_t)k * sizeof(int32_t);
+
+    id<MTLBuffer> queryBuf = resources_->allocBuffer(queryBytes, MetalAllocType::TemporaryMemoryBuffer);
+    id<MTLBuffer> outDistBuf = resources_->allocBuffer(outDistBytes, MetalAllocType::TemporaryMemoryBuffer);
+    id<MTLBuffer> outIdxBuf = resources_->allocBuffer(outIdxBytes, MetalAllocType::TemporaryMemoryBuffer);
+    FAISS_THROW_IF_NOT_MSG(queryBuf && outDistBuf && outIdxBuf, "MetalIndexFlat: failed to allocate temp buffers");
+
+    std::memcpy([queryBuf contents], x, queryBytes);
+
+    const bool isL2 = (metric_type == METRIC_L2);
+    const bool ok = runFlatSearchGPU(
+            device,
+            queue,
+            queryBuf,
+            vectorsBuffer_,
+            (int)n,
+            (int)ntotal,
+            d,
+            (int)k,
+            isL2,
+            outDistBuf,
+            outIdxBuf);
+
+    resources_->deallocBuffer(queryBuf, MetalAllocType::TemporaryMemoryBuffer);
+    if (!ok) {
+        resources_->deallocBuffer(outDistBuf, MetalAllocType::TemporaryMemoryBuffer);
+        resources_->deallocBuffer(outIdxBuf, MetalAllocType::TemporaryMemoryBuffer);
+        FAISS_THROW_MSG("MetalIndexFlat: GPU search failed (pipeline or dispatch error)");
+    }
+
+    std::memcpy(distances, [outDistBuf contents], outDistBytes);
+    const int32_t* idxPtr = (const int32_t*)[outIdxBuf contents];
     for (idx_t i = 0; i < n * k; ++i) {
-        if (labels[i] >= 0 && labels[i] < ntotal) {
-            labels[i] = ids_[labels[i]];
-        }
+        int32_t idx = idxPtr[i];
+        labels[i] = (idx >= 0 && idx < (int32_t)ntotal) ? ids_[idx] : -1;
     }
+
+    resources_->deallocBuffer(outDistBuf, MetalAllocType::TemporaryMemoryBuffer);
+    resources_->deallocBuffer(outIdxBuf, MetalAllocType::TemporaryMemoryBuffer);
 }
 
 } // namespace gpu_metal
