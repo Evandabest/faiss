@@ -5,7 +5,9 @@
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *
- * Objective-C++ header. Runs L2/IP distance + top-k via Metal compute.
+ * FlatIndex-specific wrapper for Metal distance computation.
+ * Mirrors faiss/gpu/impl/FlatIndex.cuh for CUDA.
+ * Delegates to MetalDistance.h for actual computation.
  */
 
 #pragma once
@@ -17,12 +19,13 @@
 namespace faiss {
 namespace gpu_metal {
 
-/// Runs GPU search: distance matrix (L2 or IP) then top-k. Uses shared buffers
-/// (queries, vectors, outDistances, outIndices). outIndices are int32 (0..nb-1).
+/// FlatIndex-specific wrapper: runs GPU search for FlatIndex.
+/// Delegates to runMetalDistance() from MetalDistance.h.
 /// Maximum k supported by the GPU top-k kernel (2048; heap in threadgroup memory).
 int getMetalFlatSearchMaxK();
 
 /// Returns true on success; false if pipeline creation failed.
+/// Thin wrapper that calls runMetalDistance() from MetalDistance.mm.
 bool runFlatSearchGPU(
         id<MTLDevice> device,
         id<MTLCommandQueue> queue,
