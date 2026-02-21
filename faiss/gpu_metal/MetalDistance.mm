@@ -228,93 +228,69 @@ kernel void topk_threadgroup_##K( \
     uint tid [[thread_position_in_threadgroup]] \
 ) { \
     constexpr uint TG_SIZE = 256; \
-    constexpr uint R = 4;  /* local candidates per thread */ \
-    constexpr uint MAX_CANDIDATES = TG_SIZE * R; \
-    threadgroup float tgDist[MAX_CANDIDATES]; \
-    threadgroup int tgIdx[MAX_CANDIDATES]; \
+    constexpr uint R = 4; \
+    constexpr uint R_out = (K + 255) / 256; \
+    constexpr uint CANDIDATES = TG_SIZE * R_out; \
+    threadgroup float tgDist[CANDIDATES]; \
+    threadgroup int tgIdx[CANDIDATES]; \
     uint nq = params[0], nb = params[1], k = params[2], want_min = params[3]; \
     if (qi >= nq || k == 0) return; \
     const device float* row = distances + qi * nb; \
     uint kk = min(k, nb); \
     uint K_out = min((uint)K, kk); \
-    \
-    /* Per-thread: strided scan, keep local top-R in registers */ \
     float localDist[R]; \
     int localIdx[R]; \
     uint localCount = 0; \
-    \
     for (uint j = tid; j < nb; j += TG_SIZE) { \
         float v = row[j]; \
-        /* Insert into local sorted list (keep best R) */ \
         if (localCount < R) { \
             uint pos = localCount; \
             while (pos > 0 && ((want_min && v < localDist[pos-1]) || (!want_min && v > localDist[pos-1]))) { \
-                localDist[pos] = localDist[pos-1]; \
-                localIdx[pos] = localIdx[pos-1]; \
-                pos--; \
+                localDist[pos] = localDist[pos-1]; localIdx[pos] = localIdx[pos-1]; pos--; \
             } \
-            localDist[pos] = v; \
-            localIdx[pos] = (int)j; \
-            localCount++; \
+            localDist[pos] = v; localIdx[pos] = (int)j; localCount++; \
         } else { \
-            /* Check if better than worst */ \
             bool better = want_min ? (v < localDist[R-1]) : (v > localDist[R-1]); \
             if (better) { \
                 uint pos = R - 1; \
                 while (pos > 0 && ((want_min && v < localDist[pos-1]) || (!want_min && v > localDist[pos-1]))) { \
-                    localDist[pos] = localDist[pos-1]; \
-                    localIdx[pos] = localIdx[pos-1]; \
-                    pos--; \
+                    localDist[pos] = localDist[pos-1]; localIdx[pos] = localIdx[pos-1]; pos--; \
                 } \
-                localDist[pos] = v; \
-                localIdx[pos] = (int)j; \
+                localDist[pos] = v; localIdx[pos] = (int)j; \
             } \
         } \
     } \
-    \
-    /* Write local candidates to threadgroup memory */ \
-    for (uint i = 0; i < R; i++) { \
-        uint idx = tid * R + i; \
-        if (i < localCount) { \
-            tgDist[idx] = localDist[i]; \
-            tgIdx[idx] = localIdx[i]; \
-        } else { \
-            tgDist[idx] = want_min ? 1e38f : -1e38f; \
-            tgIdx[idx] = -1; \
-        } \
+    for (uint i = 0; i < R_out; i++) { \
+        uint idx = tid * R_out + i; \
+        if (i < localCount) { tgDist[idx] = localDist[i]; tgIdx[idx] = localIdx[i]; } \
+        else { tgDist[idx] = want_min ? 1e38f : -1e38f; tgIdx[idx] = -1; } \
     } \
     threadgroup_barrier(mem_flags::mem_threadgroup); \
-    \
-    /* Reduction tree: compare-swap passes to get top K_out sorted */ \
-    uint activeSize = min(MAX_CANDIDATES, nb); \
-    /* Fixed number of passes: enough to get top K_out reasonably sorted */ \
-    uint numPasses = min(activeSize, 32u);  /* Limit passes for performance */ \
-    for (uint pass = 0; pass < numPasses; pass++) { \
-        uint idx = tid; \
-        if (idx >= activeSize - 1) { \
-            threadgroup_barrier(mem_flags::mem_threadgroup); \
-            continue; \
-        } \
-        /* Compare-swap pairs: even indices with next on even passes, odd on odd passes */ \
-        bool doCompare = (pass % 2 == 0) ? (idx % 2 == 0) : (idx % 2 == 1); \
-        if (doCompare && idx + 1 < activeSize) { \
-            bool swap = want_min ? (tgDist[idx + 1] < tgDist[idx]) : (tgDist[idx + 1] > tgDist[idx]); \
-            if (swap) { \
-                float td = tgDist[idx]; tgDist[idx] = tgDist[idx + 1]; tgDist[idx + 1] = td; \
-                int ti = tgIdx[idx]; tgIdx[idx] = tgIdx[idx + 1]; tgIdx[idx + 1] = ti; \
+    for (uint k2 = 2; k2 <= CANDIDATES; k2 *= 2) { \
+        for (uint j = k2 >> 1; j > 0; j >>= 1) { \
+            for (uint idx = tid; idx < CANDIDATES; idx += TG_SIZE) { \
+                uint partner = idx ^ j; \
+                if (partner < CANDIDATES && partner > idx) { \
+                    bool ascending = ((idx & k2) == 0); \
+                    bool partnerBetter = want_min ? (tgDist[partner] < tgDist[idx] || (tgDist[partner] == tgDist[idx] && tgIdx[partner] < tgIdx[idx])) \
+                                      : (tgDist[partner] > tgDist[idx] || (tgDist[partner] == tgDist[idx] && tgIdx[partner] < tgIdx[idx])); \
+                    bool idxBetter = want_min ? (tgDist[idx] < tgDist[partner] || (tgDist[idx] == tgDist[partner] && tgIdx[idx] < tgIdx[partner])) \
+                                  : (tgDist[idx] > tgDist[partner] || (tgDist[idx] == tgDist[partner] && tgIdx[idx] < tgIdx[partner])); \
+                    bool swap = ascending ? partnerBetter : idxBetter; \
+                    if (swap) { \
+                        float td = tgDist[idx]; tgDist[idx] = tgDist[partner]; tgDist[partner] = td; \
+                        int ti = tgIdx[idx]; tgIdx[idx] = tgIdx[partner]; tgIdx[partner] = ti; \
+                    } \
+                } \
             } \
+            threadgroup_barrier(mem_flags::mem_threadgroup); \
         } \
-        threadgroup_barrier(mem_flags::mem_threadgroup); \
     } \
-    \
-    /* Output: first K_out threads write results (sorted) */ \
-    if (tid < K_out) { \
-        outDistances[qi * k + tid] = tgDist[tid]; \
-        outIndices[qi * k + tid] = tgIdx[tid]; \
+    for (uint i = tid; i < K_out; i += TG_SIZE) { \
+        outDistances[qi * k + i] = tgDist[i]; outIndices[qi * k + i] = tgIdx[i]; \
     } \
-    if (tid >= K_out && tid < k) { \
-        outDistances[qi * k + tid] = want_min ? 1e38f : -1e38f; \
-        outIndices[qi * k + tid] = -1; \
+    for (uint i = tid; i < k - K_out; i += TG_SIZE) { \
+        outDistances[qi * k + K_out + i] = want_min ? 1e38f : -1e38f; outIndices[qi * k + K_out + i] = -1; \
     } \
 }
 TOPK_THREADGROUP_VARIANT(32)
@@ -341,57 +317,47 @@ kernel void topk_merge_two_sorted_##K( \
     constexpr uint K_prime = K; \
     threadgroup float tgDist[K_prime * 2]; \
     threadgroup int tgIdx[K_prime * 2]; \
-    uint nq = params[0], K_out = params[1], want_min = params[2]; \
-    if (qi >= nq || K_out == 0) return; \
-    uint K_actual = min(K_out, (uint)K_prime); \
-    \
-    /* Load both sorted lists into threadgroup memory */ \
-    if (tid < K_actual) { \
-        tgDist[tid] = inA[qi * K_out + tid]; \
-        tgIdx[tid] = inAIdx[qi * K_out + tid]; \
-        tgDist[K_actual + tid] = inB[qi * K_out + tid]; \
-        tgIdx[K_actual + tid] = inBIdx[qi * K_out + tid]; \
+    uint nq = params[0], K_actual = params[1], want_min = params[2]; \
+    if (qi >= nq || K_actual == 0) return; \
+    K_actual = min(K_actual, (uint)K_prime); \
+    constexpr uint totalSize = K_prime * 2; \
+    for (uint i = tid; i < K_prime; i += TG_SIZE) { \
+        if (i < K_actual) { \
+            tgDist[i] = inA[qi * K_prime + i]; tgIdx[i] = inAIdx[qi * K_prime + i]; \
+            tgDist[K_prime + i] = inB[qi * K_prime + i]; tgIdx[K_prime + i] = inBIdx[qi * K_prime + i]; \
+        } else { \
+            float sentinel = want_min ? 1e38f : -1e38f; \
+            tgDist[i] = sentinel; tgIdx[i] = -1; \
+            tgDist[K_prime + i] = sentinel; tgIdx[K_prime + i] = -1; \
+        } \
     } \
     threadgroup_barrier(mem_flags::mem_threadgroup); \
-    \
-    /* Bitonic merge: merge two sorted lists of size K_actual into one sorted list */ \
-    /* Use Batcher's odd-even merge network for 2K_actual → K_actual */ \
-    uint totalSize = K_actual * 2; \
-    /* Bitonic merge stages */ \
-    for (uint stage = 1; stage < totalSize; stage *= 2) { \
-        for (uint substage = stage; substage > 0; substage /= 2) { \
-            uint idx = tid; \
-            if (idx >= totalSize) { \
-                threadgroup_barrier(mem_flags::mem_threadgroup); \
-                continue; \
-            } \
-            uint partner = idx ^ substage; \
-            if (partner < totalSize && partner > idx) { \
-                bool swap = false; \
-                if ((idx & stage) == 0) { \
-                    /* Ascending merge */ \
-                    swap = want_min ? (tgDist[partner] < tgDist[idx]) : (tgDist[partner] > tgDist[idx]); \
-                } else { \
-                    /* Descending merge */ \
-                    swap = want_min ? (tgDist[idx] < tgDist[partner]) : (tgDist[idx] > tgDist[partner]); \
-                } \
-                if (swap) { \
-                    float td = tgDist[idx]; tgDist[idx] = tgDist[partner]; tgDist[partner] = td; \
-                    int ti = tgIdx[idx]; tgIdx[idx] = tgIdx[partner]; tgIdx[partner] = ti; \
+    for (uint k2 = 2; k2 <= totalSize; k2 *= 2) { \
+        for (uint j = k2 >> 1; j > 0; j >>= 1) { \
+            for (uint idx = tid; idx < totalSize; idx += TG_SIZE) { \
+                uint partner = idx ^ j; \
+                if (partner < totalSize && partner > idx) { \
+                    bool ascending = ((idx & k2) == 0); \
+                    bool partnerBetter = want_min ? (tgDist[partner] < tgDist[idx] || (tgDist[partner] == tgDist[idx] && tgIdx[partner] < tgIdx[idx])) \
+                                      : (tgDist[partner] > tgDist[idx] || (tgDist[partner] == tgDist[idx] && tgIdx[partner] < tgIdx[idx])); \
+                    bool idxBetter = want_min ? (tgDist[idx] < tgDist[partner] || (tgDist[idx] == tgDist[partner] && tgIdx[idx] < tgIdx[partner])) \
+                                  : (tgDist[idx] > tgDist[partner] || (tgDist[idx] == tgDist[partner] && tgIdx[idx] < tgIdx[partner])); \
+                    bool swap = ascending ? partnerBetter : idxBetter; \
+                    if (swap) { \
+                        float td = tgDist[idx]; tgDist[idx] = tgDist[partner]; tgDist[partner] = td; \
+                        int ti = tgIdx[idx]; tgIdx[idx] = tgIdx[partner]; tgIdx[partner] = ti; \
+                    } \
                 } \
             } \
             threadgroup_barrier(mem_flags::mem_threadgroup); \
         } \
     } \
-    \
-    /* Output: first K_actual elements (best K′) */ \
-    if (tid < K_actual) { \
-        outK[qi * K_out + tid] = tgDist[tid]; \
-        outIdx[qi * K_out + tid] = tgIdx[tid]; \
+    for (uint i = tid; i < K_actual; i += TG_SIZE) { \
+        outK[qi * K_prime + i] = tgDist[i]; outIdx[qi * K_prime + i] = tgIdx[i]; \
     } \
-    if (tid >= K_actual && tid < K_out) { \
-        outK[qi * K_out + tid] = want_min ? 1e38f : -1e38f; \
-        outIdx[qi * K_out + tid] = -1; \
+    for (uint i = tid; i < K_prime - K_actual; i += TG_SIZE) { \
+        outK[qi * K_prime + K_actual + i] = want_min ? 1e38f : -1e38f; \
+        outIdx[qi * K_prime + K_actual + i] = -1; \
     } \
 }
 BITONIC_MERGE_TWO_SORTED_VARIANT(32)
@@ -479,15 +445,16 @@ kernel void trim_K_to_k(
     device const uint* params [[buffer(4)]],
     uint qi [[thread_position_in_grid]]
 ) {
-    uint nq = params[0], K_prime = params[1], k = params[2];
+    uint nq = params[0], K_prime = params[1], k = params[2], want_min = params[3];
     if (qi >= nq || k == 0) return;
     uint kk = min(k, K_prime);
     for (uint i = 0; i < kk; i++) {
         outK[qi * k + i] = inK[qi * K_prime + i];
         outIdx[qi * k + i] = inIdx[qi * K_prime + i];
     }
+    float sentinel = want_min ? 1e38f : -1e38f;
     for (uint i = kk; i < k; i++) {
-        outK[qi * k + i] = 1e38f;
+        outK[qi * k + i] = sentinel;
         outIdx[qi * k + i] = -1;
     }
 }
@@ -575,6 +542,17 @@ static int selectTopKVariant(int k) {
     return kNumTopKVariants - 1;
 }
 
+// Section 8: K′ = nextPow2(min(2*k, 1024)) so we use 256/512 for most k, 1024 only when needed.
+static int computeKPrimeForTiling(int k) {
+    int cap = std::min(2 * k, 1024);
+    if (cap <= 0) return 32;
+    uint32_t x = (uint32_t)cap;
+    x--;
+    x |= x >> 1; x |= x >> 2; x |= x >> 4; x |= x >> 8; x |= x >> 16;
+    x++;
+    return (int)std::min(std::max(x, 32u), 1024u);
+}
+
 } // namespace
 
 void chooseTileSize(
@@ -648,9 +626,8 @@ bool runMetalDistance(
     chooseTileSize(nq, nb, d, sizeof(float), availableMem, tileRows, tileCols);
     
     bool needsTiling = (tileCols < nb || tileRows < nq);
-    // K′ = 2k strategy: keep 2k candidates per tile and through merge, then trim to k
-    // For k ≤ 256: K′ = 2k; for k > 256: K′ = 512 (generic path)
-    int K_prime = needsTiling ? (k <= 256 ? (2 * k) : 512) : k;
+    // Section 8: K′ = nextPow2(min(2k, 1024)) → 32, 64, 128, 256, 512, 1024 by k (256/512 for most k)
+    int K_prime = needsTiling ? computeKPrimeForTiling(k) : k;
     
     // Note: For k > 256, K′ = 512 (generic path), so threadgroupSelect is used.
     int variantIndexK = selectTopKVariant(K_prime);
@@ -963,7 +940,7 @@ bool runMetalDistance(
                             [enc setBuffer:final_Idx offset:srcOffset * sizeof(int32_t) atIndex:1];
                             [enc setBuffer:outDistances offset:dstOffset * sizeof(float) atIndex:2];
                             [enc setBuffer:outIndices offset:dstOffset * sizeof(int32_t) atIndex:3];
-                            uint32_t trimArgs[3] = {1u, (uint32_t)K_prime, (uint32_t)k};
+                            uint32_t trimArgs[4] = {1u, (uint32_t)K_prime, (uint32_t)k, isL2 ? 1u : 0u};
                             [enc setBytes:trimArgs length:sizeof(trimArgs) atIndex:4];
                             MTLSize gridTrim = MTLSizeMake(1, 1, 1);
                             [enc dispatchThreadgroups:gridTrim threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
@@ -1032,7 +1009,7 @@ bool runMetalDistance(
                     [enc setBuffer:outIndexBuf offset:srcOffset * sizeof(int32_t) atIndex:1];
                     [enc setBuffer:outDistances offset:dstOffset * sizeof(float) atIndex:2];
                     [enc setBuffer:outIndices offset:dstOffset * sizeof(int32_t) atIndex:3];
-                    uint32_t trimArgs[3] = {(uint32_t)curQuerySize, (uint32_t)K_prime, (uint32_t)k};
+                    uint32_t trimArgs[4] = {(uint32_t)curQuerySize, (uint32_t)K_prime, (uint32_t)k, isL2 ? 1u : 0u};
                     [enc setBytes:trimArgs length:sizeof(trimArgs) atIndex:4];
                     MTLSize gridTrim = MTLSizeMake(curQuerySize, 1, 1);
                     [enc dispatchThreadgroups:gridTrim threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
