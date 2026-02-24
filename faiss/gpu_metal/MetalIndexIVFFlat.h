@@ -68,6 +68,10 @@ public:
     /// Copy to a CPU IndexIVFFlat.
     void copyTo(faiss::IndexIVFFlat* index) const;
 
+    /// Accessors (needed by cloner and tests).
+    idx_t nlist() const;
+    size_t nprobe() const;
+
 private:
     std::unique_ptr<faiss::IndexIVFFlat> cpuIndex_;
     std::unique_ptr<MetalIVFFlatImpl> gpuIvf_;

@@ -9,7 +9,9 @@
 #import "MetalCloner.h"
 #import "StandardMetalResources.h"
 #import "MetalIndexFlat.h"
+#import "MetalIndexIVFFlat.h"
 #include <faiss/IndexFlat.h>
+#include <faiss/IndexIVFFlat.h>
 #include <faiss/impl/FaissAssert.h>
 #include <cstring>
 
@@ -30,38 +32,74 @@ faiss::Index* index_cpu_to_metal_gpu(
     FAISS_THROW_IF_NOT(res->getResources()->isAvailable());
     FAISS_THROW_IF_NOT_MSG(device == 0, "Metal backend supports only device 0");
 
-    const auto* flat = dynamic_cast<const faiss::IndexFlat*>(index);
-    if (!flat) {
-        FAISS_THROW_MSG("index_cpu_to_metal_gpu: only IndexFlat (and L2/IP) supported");
-    }
-    FAISS_THROW_IF_NOT(flat->metric_type == METRIC_L2 || flat->metric_type == METRIC_INNER_PRODUCT);
-
     MetalIndexConfig config;
     config.device = 0;
-    auto* metal = new MetalIndexFlat(
-            res->getResources(),
-            flat->d,
-            flat->metric_type,
-            flat->metric_arg,
-            config);
-    if (flat->ntotal > 0) {
-        const float* xb = flat->get_xb();
-        metal->add(flat->ntotal, xb);
+
+    // IndexIVFFlat (check before IndexFlat since IVFFlat's quantizer is IndexFlat)
+    const auto* ivfFlat = dynamic_cast<const faiss::IndexIVFFlat*>(index);
+    if (ivfFlat) {
+        FAISS_THROW_IF_NOT(
+                ivfFlat->metric_type == METRIC_L2 ||
+                ivfFlat->metric_type == METRIC_INNER_PRODUCT);
+        auto* metal = new MetalIndexIVFFlat(
+                res->getResources(), ivfFlat, config);
+        return metal;
     }
-    return metal;
+
+    const auto* flat = dynamic_cast<const faiss::IndexFlat*>(index);
+    if (flat) {
+        FAISS_THROW_IF_NOT(
+                flat->metric_type == METRIC_L2 ||
+                flat->metric_type == METRIC_INNER_PRODUCT);
+        auto* metal = new MetalIndexFlat(
+                res->getResources(),
+                flat->d,
+                flat->metric_type,
+                flat->metric_arg,
+                config);
+        if (flat->ntotal > 0) {
+            const float* xb = flat->get_xb();
+            metal->add(flat->ntotal, xb);
+        }
+        return metal;
+    }
+
+    FAISS_THROW_MSG(
+            "index_cpu_to_metal_gpu: unsupported index type "
+            "(only IndexFlat and IndexIVFFlat supported)");
 }
 
 faiss::Index* index_metal_gpu_to_cpu(const faiss::Index* index) {
-    const auto* metal = dynamic_cast<const MetalIndexFlat*>(index);
-    if (!metal) {
-        FAISS_THROW_MSG("index_metal_gpu_to_cpu: only MetalIndexFlat supported");
+    const auto* metalIVF = dynamic_cast<const MetalIndexIVFFlat*>(index);
+    if (metalIVF) {
+        faiss::IndexFlat* quantizer =
+                (metalIVF->metric_type == METRIC_INNER_PRODUCT)
+                ? (faiss::IndexFlat*)new faiss::IndexFlatIP(metalIVF->d)
+                : (faiss::IndexFlat*)new faiss::IndexFlatL2(metalIVF->d);
+        auto* cpu = new faiss::IndexIVFFlat(
+                quantizer,
+                metalIVF->d,
+                metalIVF->nlist(),
+                metalIVF->metric_type);
+        cpu->own_fields = true;
+        metalIVF->copyTo(cpu);
+        return cpu;
     }
-    faiss::IndexFlat* cpu = (metal->metric_type == METRIC_INNER_PRODUCT)
-            ? (faiss::IndexFlat*)new faiss::IndexFlatIP(metal->d)
-            : (faiss::IndexFlat*)new faiss::IndexFlatL2(metal->d);
-    cpu->metric_arg = metal->metric_arg;
-    metal->copyTo(cpu);
-    return cpu;
+
+    const auto* metalFlat = dynamic_cast<const MetalIndexFlat*>(index);
+    if (metalFlat) {
+        faiss::IndexFlat* cpu =
+                (metalFlat->metric_type == METRIC_INNER_PRODUCT)
+                ? (faiss::IndexFlat*)new faiss::IndexFlatIP(metalFlat->d)
+                : (faiss::IndexFlat*)new faiss::IndexFlatL2(metalFlat->d);
+        cpu->metric_arg = metalFlat->metric_arg;
+        metalFlat->copyTo(cpu);
+        return cpu;
+    }
+
+    FAISS_THROW_MSG(
+            "index_metal_gpu_to_cpu: unsupported index type "
+            "(only MetalIndexFlat and MetalIndexIVFFlat supported)");
 }
 
 } // namespace gpu_metal

@@ -34,6 +34,7 @@ MetalIndexIVFFlat::MetalIndexIVFFlat(
             : (faiss::IndexFlat*)new faiss::IndexFlatL2(dims);
     cpuIndex_ = std::make_unique<faiss::IndexIVFFlat>(
             quantizer, (size_t)d, (size_t)nlist, metric);
+    cpuIndex_->own_fields = true;
     gpuIvf_ = std::make_unique<MetalIVFFlatImpl>(
             resources, (int)d, nlist, metric, metricArg);
 }
@@ -48,19 +49,19 @@ MetalIndexIVFFlat::MetalIndexIVFFlat(
                   cpuIndex->metric_type,
                   cpuIndex->metric_arg,
                   config) {
-    // Shallow copy via CPU constructor: we rely on copyTo/copyFrom helpers.
-    // For now, we just build an empty IVFFlat with same params.
     faiss::IndexFlat* quantizer = (cpuIndex->metric_type == METRIC_INNER_PRODUCT)
             ? (faiss::IndexFlat*)new faiss::IndexFlatIP((int)cpuIndex->d)
             : (faiss::IndexFlat*)new faiss::IndexFlatL2((int)cpuIndex->d);
     cpuIndex_ = std::make_unique<faiss::IndexIVFFlat>(
             quantizer, cpuIndex->d, cpuIndex->nlist, cpuIndex->metric_type);
+    cpuIndex_->own_fields = true;
     gpuIvf_ = std::make_unique<MetalIVFFlatImpl>(
             resources,
             (int)cpuIndex->d,
             cpuIndex->nlist,
             cpuIndex->metric_type,
             cpuIndex->metric_arg);
+    copyFrom(cpuIndex);
 }
 
 MetalIndexIVFFlat::~MetalIndexIVFFlat() = default;
@@ -350,28 +351,121 @@ void MetalIndexIVFFlat::search(
     }
 }
 
-void MetalIndexIVFFlat::copyFrom(const faiss::IndexIVFFlat* index) {
+idx_t MetalIndexIVFFlat::nlist() const {
+    return cpuIndex_ ? cpuIndex_->nlist : 0;
+}
+
+size_t MetalIndexIVFFlat::nprobe() const {
+    return cpuIndex_ ? cpuIndex_->nprobe : 1;
+}
+
+void MetalIndexIVFFlat::copyFrom(const faiss::IndexIVFFlat* src) {
     FAISS_THROW_IF_NOT(cpuIndex_);
+    FAISS_THROW_IF_NOT(src);
+    FAISS_THROW_IF_NOT_FMT(
+            src->nlist == cpuIndex_->nlist,
+            "copyFrom: nlist mismatch (%zd vs %zd)",
+            (size_t)src->nlist,
+            (size_t)cpuIndex_->nlist);
     reset();
-    // Copy training state: if CPU index is trained, reuse its coarse quantizer centroids
-    if (!index->is_trained) {
+
+    if (!src->is_trained) {
         is_trained = false;
         return;
     }
-    is_trained = false;
+
+    // Copy quantizer centroids.
+    auto* srcQ = dynamic_cast<const faiss::IndexFlat*>(src->quantizer);
+    auto* ourQ = dynamic_cast<faiss::IndexFlat*>(cpuIndex_->quantizer);
+    FAISS_THROW_IF_NOT_MSG(srcQ, "copyFrom: source quantizer is not IndexFlat");
+    FAISS_THROW_IF_NOT_MSG(ourQ, "copyFrom: internal quantizer is not IndexFlat");
+    ourQ->reset();
+    if (srcQ->ntotal > 0) {
+        ourQ->add(srcQ->ntotal, srcQ->get_xb());
+    }
+    cpuIndex_->is_trained = true;
+    cpuIndex_->nprobe = src->nprobe;
+    is_trained = true;
+
+    // Gather all vectors from inverted lists for a single GPU upload.
+    size_t totalN = 0;
+    for (size_t l = 0; l < (size_t)src->nlist; ++l) {
+        totalN += src->invlists->list_size(l);
+    }
+
+    if (totalN > 0) {
+        std::vector<float> allCodes(totalN * (size_t)d);
+        std::vector<idx_t> allListNos(totalN);
+        std::vector<idx_t> allIds(totalN);
+        size_t pos = 0;
+
+        for (size_t l = 0; l < (size_t)src->nlist; ++l) {
+            size_t ls = src->invlists->list_size(l);
+            if (ls == 0) {
+                continue;
+            }
+            const uint8_t* codes = src->invlists->get_codes(l);
+            const idx_t* ids = src->invlists->get_ids(l);
+
+            cpuIndex_->invlists->add_entries(l, ls, ids, codes);
+
+            std::memcpy(
+                    allCodes.data() + pos * (size_t)d,
+                    codes,
+                    ls * (size_t)d * sizeof(float));
+            std::memcpy(allIds.data() + pos, ids, ls * sizeof(idx_t));
+            for (size_t i = 0; i < ls; ++i) {
+                allListNos[pos + i] = (idx_t)l;
+            }
+            pos += ls;
+        }
+
+        cpuIndex_->ntotal = (idx_t)totalN;
+        ntotal = (idx_t)totalN;
+
+        if (gpuIvf_) {
+            gpuIvf_->appendVectors(
+                    (idx_t)totalN,
+                    allCodes.data(),
+                    allListNos.data(),
+                    allIds.data());
+        }
+    }
+
+    uploadCentroids_();
 }
 
-void MetalIndexIVFFlat::copyTo(faiss::IndexIVFFlat* index) const {
+void MetalIndexIVFFlat::copyTo(faiss::IndexIVFFlat* dst) const {
     FAISS_THROW_IF_NOT(cpuIndex_);
-    // Delegate to CPU IVFFlat
-    // Note: we only copy list contents when cpuIndex_ owns its lists.
-    index->metric_type = cpuIndex_->metric_type;
-    index->metric_arg = cpuIndex_->metric_arg;
-    index->d = cpuIndex_->d;
-    index->nlist = cpuIndex_->nlist;
-    index->ntotal = cpuIndex_->ntotal;
-    index->is_trained = cpuIndex_->is_trained;
-    // Invlists and quantizer copying are left to future work.
+    FAISS_THROW_IF_NOT(dst);
+
+    auto* srcQ = dynamic_cast<faiss::IndexFlat*>(cpuIndex_->quantizer);
+    auto* dstQ = dynamic_cast<faiss::IndexFlat*>(dst->quantizer);
+    FAISS_THROW_IF_NOT_MSG(srcQ, "copyTo: internal quantizer is not IndexFlat");
+    FAISS_THROW_IF_NOT_MSG(dstQ, "copyTo: destination quantizer is not IndexFlat");
+
+    dstQ->reset();
+    if (srcQ->ntotal > 0) {
+        dstQ->add(srcQ->ntotal, srcQ->get_xb());
+    }
+
+    dst->metric_type = cpuIndex_->metric_type;
+    dst->metric_arg = cpuIndex_->metric_arg;
+    dst->d = cpuIndex_->d;
+    dst->nlist = cpuIndex_->nlist;
+    dst->nprobe = cpuIndex_->nprobe;
+    dst->is_trained = cpuIndex_->is_trained;
+
+    for (size_t l = 0; l < (size_t)cpuIndex_->nlist; ++l) {
+        size_t ls = cpuIndex_->invlists->list_size(l);
+        if (ls == 0) {
+            continue;
+        }
+        const uint8_t* codes = cpuIndex_->invlists->get_codes(l);
+        const idx_t* ids = cpuIndex_->invlists->get_ids(l);
+        dst->invlists->add_entries(l, ls, ids, codes);
+    }
+    dst->ntotal = cpuIndex_->ntotal;
 }
 
 } // namespace gpu_metal

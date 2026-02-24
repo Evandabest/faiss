@@ -20,14 +20,16 @@ class StandardMetalResources;
 /// Returns the number of Metal "devices" (1 if Metal is available, else 0).
 int get_num_gpus();
 
-/// Clone a CPU index to Metal GPU. Supports IndexFlat, IndexFlatL2, IndexFlatIP.
+/// Clone a CPU index to Metal GPU.
+/// Supports IndexFlat (L2/IP) and IndexIVFFlat (L2/IP).
 /// device must be 0. Caller owns the returned index.
 faiss::Index* index_cpu_to_metal_gpu(
         StandardMetalResources* res,
         int device,
         const faiss::Index* index);
 
-/// Copy a Metal index back to CPU. Supports MetalIndexFlat -> IndexFlat.
+/// Copy a Metal index back to CPU.
+/// Supports MetalIndexFlat -> IndexFlat, MetalIndexIVFFlat -> IndexIVFFlat.
 /// Caller owns the returned index.
 faiss::Index* index_metal_gpu_to_cpu(const faiss::Index* index);
 
