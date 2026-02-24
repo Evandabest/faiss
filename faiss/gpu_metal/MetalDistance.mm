@@ -491,7 +491,17 @@ static NSString* loadMSLSource() {
         }
     }
     
-    // 3. Try relative to executable (for installed libraries)
+    // 3. Try relative to source file at compile time (works regardless of CWD)
+    if (!metalPath) {
+        NSString* sourceFile = @(__FILE__);
+        NSString* sourceDir = [sourceFile stringByDeletingLastPathComponent];
+        NSString* relPath = [sourceDir stringByAppendingPathComponent:@"MetalDistance.metal"];
+        if ([fm fileExistsAtPath:relPath]) {
+            metalPath = relPath;
+        }
+    }
+
+    // 4. Try relative to executable (for installed libraries)
     if (!metalPath) {
         NSString* execPath = [[NSBundle mainBundle] executablePath];
         if (execPath) {
