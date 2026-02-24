@@ -89,5 +89,92 @@ bool runMetalIPDistance(
         id<MTLBuffer> outDistances,
         id<MTLBuffer> outIndices);
 
+/// @param device       Metal device
+/// @param queue        Metal command queue
+/// @param queries      (nq * d) float, row-major GPU buffer
+/// @param codes        GPU codes buffer (totalVecs * d float, list-contiguous)
+/// @param ids          GPU ids buffer  (totalVecs int64 stored as int32 pairs)
+/// @param listOffset   GPU buffer (nlist uint32): byte/element offset into codes
+/// @param listLength   GPU buffer (nlist uint32): number of vectors per list
+/// @param coarseAssign GPU buffer (nq * nprobe int32): coarse assignment list ids
+/// @param nq           Number of queries
+/// @param d            Vector dimension
+/// @param k            Number of nearest neighbors
+/// @param nprobe       Number of probed lists per query
+/// @param isL2         true = L2 squared, false = inner product
+/// @param outDistances    Output distances (nq * k float)
+/// @param outIndices      Output indices   (nq * k int32)
+/// @param perListDistBuf  Scratch buffer (nq*nprobe*k float), caller-owned
+/// @param perListIdxBuf   Scratch buffer (nq*nprobe*k int32), caller-owned
+/// @returns true on success
+bool runMetalIVFFlatScan(
+        id<MTLDevice> device,
+        id<MTLCommandQueue> queue,
+        id<MTLBuffer> queries,
+        id<MTLBuffer> codes,
+        id<MTLBuffer> ids,
+        id<MTLBuffer> listOffset,
+        id<MTLBuffer> listLength,
+        id<MTLBuffer> coarseAssign,
+        int nq,
+        int d,
+        int k,
+        int nprobe,
+        bool isL2,
+        id<MTLBuffer> outDistances,
+        id<MTLBuffer> outIndices,
+        id<MTLBuffer> perListDistBuf,
+        id<MTLBuffer> perListIdxBuf);
+
+/// Compute ||v||² norms for each vector.  Result is written to normsBuf
+/// (nb float).  Useful for caching centroid norms across searches.
+bool runMetalComputeNorms(
+        id<MTLDevice> device,
+        id<MTLCommandQueue> queue,
+        id<MTLBuffer> vectors,
+        int nb,
+        int d,
+        id<MTLBuffer> normsBuf);
+
+/// Full IVF search in a single command buffer: coarse quantisation (distance
+/// matrix + top-nprobe) followed by ivf_scan_list + ivf_merge_lists.  Avoids
+/// the GPU sync point between coarse quant and IVF scan.
+///
+/// @param centroids       Centroid vectors (nlist * d float)
+/// @param nlist           Number of centroids / inverted lists
+/// @param coarseDistBuf   Scratch (nq * nprobe float)
+/// @param coarseIdxBuf    Scratch (nq * nprobe int32)
+/// @param distMatrixBuf   Scratch (nq * nlist  float)
+/// @param centroidNormsBuf Pre-computed ||c||² per centroid (nlist float);
+///                         if non-nil and isL2, the fused l2_with_norms kernel
+///                         is used instead of l2_squared_matrix.
+/// @param avgListLen      Average inverted-list length (ntotal / nlist);
+///                         used to select the small-list (32-thread) scan
+///                         variant when lists are short.
+bool runMetalIVFFlatFullSearch(
+        id<MTLDevice> device,
+        id<MTLCommandQueue> queue,
+        id<MTLBuffer> queries,
+        int nq,
+        int d,
+        int k,
+        int nprobe,
+        bool isL2,
+        id<MTLBuffer> centroids,
+        int nlist,
+        id<MTLBuffer> codes,
+        id<MTLBuffer> ids,
+        id<MTLBuffer> listOffset,
+        id<MTLBuffer> listLength,
+        id<MTLBuffer> outDistances,
+        id<MTLBuffer> outIndices,
+        id<MTLBuffer> perListDistBuf,
+        id<MTLBuffer> perListIdxBuf,
+        id<MTLBuffer> coarseDistBuf,
+        id<MTLBuffer> coarseIdxBuf,
+        id<MTLBuffer> distMatrixBuf,
+        id<MTLBuffer> centroidNormsBuf = nil,
+        int avgListLen = 256);
+
 } // namespace gpu_metal
 } // namespace faiss

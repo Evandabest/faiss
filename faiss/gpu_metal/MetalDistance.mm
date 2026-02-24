@@ -12,6 +12,9 @@
 #import "MetalDistance.h"
 #import "MetalResources.h"
 #include <algorithm>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 
 namespace faiss {
 namespace gpu_metal {
@@ -181,37 +184,46 @@ kernel void topk_simdgroup_##K( \
     } \
     threadgroup_barrier(mem_flags::mem_threadgroup); \
     \
-    /* Bitonic merge across lanes using simdgroup operations */ \
-    /* For k=32 with R=1: we have 32 candidates, need top-k */ \
-    /* For k=64 with R=2: we have 64 candidates, need top-k */ \
+    /* Full bitonic sort (exact top-k); same pattern as threadgroupSelect. */ \
     uint activeSize = min(MAX_CANDIDATES, nb); \
-    uint numPasses = min(activeSize, 16u); \
-    for (uint pass = 0; pass < numPasses; pass++) { \
-        uint idx = lane_id; \
-        if (idx >= activeSize - 1) { \
-            threadgroup_barrier(mem_flags::mem_threadgroup); \
-            continue; \
-        } \
-        /* Compare-swap: even indices with next on even passes, odd on odd passes */ \
-        bool doCompare = (pass % 2 == 0) ? (idx % 2 == 0) : (idx % 2 == 1); \
-        if (doCompare && idx + 1 < activeSize) { \
-            bool swap = want_min ? (tgDist[idx + 1] < tgDist[idx]) : (tgDist[idx + 1] > tgDist[idx]); \
-            if (swap) { \
-                float td = tgDist[idx]; tgDist[idx] = tgDist[idx + 1]; tgDist[idx + 1] = td; \
-                int ti = tgIdx[idx]; tgIdx[idx] = tgIdx[idx + 1]; tgIdx[idx + 1] = ti; \
+    uint N = activeSize; \
+    if (N == 0) N = 1; \
+    else { N--; N |= N >> 1; N |= N >> 2; N |= N >> 4; N |= N >> 8; N |= N >> 16; N++; } \
+    if (N > MAX_CANDIDATES) N = MAX_CANDIDATES; \
+    for (uint i = lane_id; i < N; i += SIMD_WIDTH) { \
+        if (i >= activeSize) { tgDist[i] = want_min ? 1e38f : -1e38f; tgIdx[i] = -1; } \
+    } \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    /* Canonical bitonic sort: k2=2,4,...,N; j=k2/2,...,1; direction from (idx & k2) == 0 */ \
+    for (uint k2 = 2; k2 <= N; k2 *= 2) { \
+        for (uint j = k2 >> 1; j > 0; j >>= 1) { \
+            for (uint idx = lane_id; idx < N; idx += SIMD_WIDTH) { \
+                uint partner = idx ^ j; \
+                if (partner < N && partner > idx) { \
+                    bool ascending = ((idx & k2) == 0); \
+                    bool partnerBetter = want_min ? (tgDist[partner] < tgDist[idx] || (tgDist[partner] == tgDist[idx] && tgIdx[partner] < tgIdx[idx])) \
+                                      : (tgDist[partner] > tgDist[idx] || (tgDist[partner] == tgDist[idx] && tgIdx[partner] < tgIdx[idx])); \
+                    bool idxBetter = want_min ? (tgDist[idx] < tgDist[partner] || (tgDist[idx] == tgDist[partner] && tgIdx[idx] < tgIdx[partner])) \
+                                  : (tgDist[idx] > tgDist[partner] || (tgDist[idx] == tgDist[partner] && tgIdx[idx] < tgIdx[partner])); \
+                    bool swap = ascending ? partnerBetter : idxBetter; \
+                    if (swap) { \
+                        float td = tgDist[idx]; tgDist[idx] = tgDist[partner]; tgDist[partner] = td; \
+                        int ti = tgIdx[idx]; tgIdx[idx] = tgIdx[partner]; tgIdx[partner] = ti; \
+                    } \
+                } \
             } \
+            threadgroup_barrier(mem_flags::mem_threadgroup); \
         } \
-        threadgroup_barrier(mem_flags::mem_threadgroup); \
     } \
     \
-    /* Output: first K_out lanes write results (sorted) */ \
-    if (lane_id < K_out) { \
-        outDistances[qi * k + lane_id] = tgDist[lane_id]; \
-        outIndices[qi * k + lane_id] = tgIdx[lane_id]; \
+    /* Output: first K_out elements (strided so all written; K_out can be 32 or 64) */ \
+    for (uint i = lane_id; i < K_out; i += SIMD_WIDTH) { \
+        outDistances[qi * k + i] = tgDist[i]; \
+        outIndices[qi * k + i] = tgIdx[i]; \
     } \
-    if (lane_id >= K_out && lane_id < k) { \
-        outDistances[qi * k + lane_id] = want_min ? 1e38f : -1e38f; \
-        outIndices[qi * k + lane_id] = -1; \
+    for (uint i = lane_id; i < k - K_out; i += SIMD_WIDTH) { \
+        outDistances[qi * k + K_out + i] = want_min ? 1e38f : -1e38f; \
+        outIndices[qi * k + K_out + i] = -1; \
     } \
 }
 SIMDGROUP_SELECT_VARIANT(32, 1)  /* k≤32: 1 per lane → 32 candidates */
@@ -229,7 +241,7 @@ kernel void topk_threadgroup_##K( \
 ) { \
     constexpr uint TG_SIZE = 256; \
     constexpr uint R = 4; \
-    constexpr uint R_out = (K + 255) / 256; \
+    constexpr uint R_out = R; \
     constexpr uint CANDIDATES = TG_SIZE * R_out; \
     threadgroup float tgDist[CANDIDATES]; \
     threadgroup int tgIdx[CANDIDATES]; \
@@ -504,6 +516,95 @@ static NSString* loadMSLSource() {
     return @(kMSLSourceEmbedded);
 }
 
+// ============================================================
+// Pipeline state cache: compiled once per (device, function).
+// Avoids the expensive newLibraryWithSource: + newComputePipelineState
+// calls on every search invocation.
+// ============================================================
+
+struct PipelineCacheKey {
+    uintptr_t devicePtr;
+    std::string functionName;
+    bool operator==(const PipelineCacheKey& o) const {
+        return devicePtr == o.devicePtr && functionName == o.functionName;
+    }
+};
+struct PipelineCacheKeyHash {
+    size_t operator()(const PipelineCacheKey& k) const {
+        size_t h = std::hash<uintptr_t>{}(k.devicePtr);
+        h ^= std::hash<std::string>{}(k.functionName) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+
+// Use __bridge_retained / __bridge_transfer to keep ARC-managed objects alive.
+static std::mutex gPipelineCacheMutex;
+static std::unordered_map<PipelineCacheKey,
+                          id<MTLComputePipelineState>,
+                          PipelineCacheKeyHash>
+        gPipelineCache;
+
+// Returns a cached (or freshly compiled) pipeline state for functionName.
+// lib is only consulted on a cache miss.
+static id<MTLComputePipelineState> getCachedPipeline(
+        id<MTLDevice> device,
+        id<MTLLibrary> lib,
+        const char* functionName) {
+    PipelineCacheKey key{(uintptr_t)(__bridge void*)device, functionName};
+    {
+        std::lock_guard<std::mutex> lock(gPipelineCacheMutex);
+        auto it = gPipelineCache.find(key);
+        if (it != gPipelineCache.end()) {
+            return it->second;
+        }
+    }
+    // Cache miss: compile now.
+    id<MTLFunction> fn = [lib newFunctionWithName:@(functionName)];
+    if (!fn) {
+        return nil;
+    }
+    NSError* err = nil;
+    id<MTLComputePipelineState> ps =
+            [device newComputePipelineStateWithFunction:fn error:&err];
+    if (!ps) {
+        return nil;
+    }
+    {
+        std::lock_guard<std::mutex> lock(gPipelineCacheMutex);
+        gPipelineCache[key] = ps;
+    }
+    return ps;
+}
+
+// Returns cached library for a device (one library covers all kernels).
+static std::unordered_map<uintptr_t, id<MTLLibrary>> gLibraryCache;
+static std::mutex gLibraryCacheMutex;
+
+static id<MTLLibrary> getCachedLibrary(id<MTLDevice> device) {
+    uintptr_t key = (uintptr_t)(__bridge void*)device;
+    {
+        std::lock_guard<std::mutex> lock(gLibraryCacheMutex);
+        auto it = gLibraryCache.find(key);
+        if (it != gLibraryCache.end()) {
+            return it->second;
+        }
+    }
+    NSString* mslSource = loadMSLSource();
+    if (!mslSource) {
+        return nil;
+    }
+    NSError* err = nil;
+    id<MTLLibrary> lib = [device newLibraryWithSource:mslSource options:nil error:&err];
+    if (!lib) {
+        return nil;
+    }
+    {
+        std::lock_guard<std::mutex> lock(gLibraryCacheMutex);
+        gLibraryCache[key] = lib;
+    }
+    return lib;
+}
+
 // Maximum k supported (fits in 16 KB threadgroup memory: 8*k bytes).
 static constexpr int kMaxK = 2048;
 
@@ -606,86 +707,54 @@ bool runMetalDistance(
         return false;
     }
 
-    // Load MSL source from MetalDistance.metal file
-    NSString* mslSource = loadMSLSource();
-    if (!mslSource) {
-        // Fallback: if file loading fails, return error
-        // In production, you might want to embed the source as a fallback
-        return false;
-    }
-    
-    NSError* err = nil;
-    id<MTLLibrary> lib = [device newLibraryWithSource:mslSource options:nil error:&err];
+    // Use cached library (compiled once per device).
+    id<MTLLibrary> lib = getCachedLibrary(device);
     if (!lib) {
         return false;
     }
 
     // Calculate tile sizes
     int tileRows, tileCols;
-    size_t availableMem = 512 * 1024 * 1024;  // TODO: query from MetalResources if available
+    size_t availableMem = 512 * 1024 * 1024;
     chooseTileSize(nq, nb, d, sizeof(float), availableMem, tileRows, tileCols);
     
     bool needsTiling = (tileCols < nb || tileRows < nq);
-    // Section 8: K′ = nextPow2(min(2k, 1024)) → 32, 64, 128, 256, 512, 1024 by k (256/512 for most k)
     int K_prime = needsTiling ? computeKPrimeForTiling(k) : k;
     
-    // Note: For k > 256, K′ = 512 (generic path), so threadgroupSelect is used.
     int variantIndexK = selectTopKVariant(K_prime);
-    int variantIndex = selectTopKVariant(k);  // For old merge fallback, still use k
-    bool useSimdgroup = needsTiling && K_prime <= 64 && kSimdgroupVariantNames[variantIndexK] != nullptr;
-    bool useThreadgroup = needsTiling && !useSimdgroup && K_prime <= 1024;  // Threadgroup variants only go up to 1024
-    
-    id<MTLFunction> fnDist = [lib newFunctionWithName:isL2 ? @"l2_squared_matrix" : @"ip_matrix"];
-    id<MTLFunction> fnTopK = nil;
-    // Select top-k variant based on K′ (output size), not k
+    int variantIndex = selectTopKVariant(k);
+    // Simdgroup variant disabled for tiled paths: stride=32 with R=1 means each
+    // lane keeps only its best candidate, causing birthday-problem misses when
+    // multiple top-K items hash to the same lane.  Threadgroup (stride=256, R=4)
+    // is safe because CANDIDATES=1024 writes all per-thread candidates.
+    bool useSimdgroup = false;
+    bool useThreadgroup = needsTiling && K_prime <= 1024;
+
+    const char* distName = isL2 ? "l2_squared_matrix" : "ip_matrix";
+    const char* topkName = nullptr;
     if (useSimdgroup && kSimdgroupVariantNames[variantIndexK]) {
-        fnTopK = [lib newFunctionWithName:@(kSimdgroupVariantNames[variantIndexK])];
+        topkName = kSimdgroupVariantNames[variantIndexK];
     } else if (useThreadgroup && kThreadgroupVariantNames[variantIndexK]) {
-        fnTopK = [lib newFunctionWithName:@(kThreadgroupVariantNames[variantIndexK])];
+        topkName = kThreadgroupVariantNames[variantIndexK];
     } else {
-        fnTopK = [lib newFunctionWithName:@(kTopKVariantNames[variantIndexK])];
-    }
-    //TODO: Remove old merge kernels
-    // Use bitonic merge for merge tree (new approach), fallback to old heap merge if bitonic not available
-    id<MTLFunction> fnBitonicMerge = nil;
-    id<MTLFunction> fnMerge = nil;  // Old heap-based merge (kept for fallback or non-tree path)
-    id<MTLFunction> fnIncrement = nil;
-    id<MTLFunction> fnTrim = nil;
-    if (needsTiling) {
-        // Prefer bitonic merge for merge tree (use variant based on K′)
-        int mergeVariantIndex = selectTopKVariant(K_prime);
-        if (kBitonicMergeVariantNames[mergeVariantIndex]) {
-            fnBitonicMerge = [lib newFunctionWithName:@(kBitonicMergeVariantNames[mergeVariantIndex])];
-        }
-        // Keep old merge as fallback (or for single-tile case)
-        fnMerge = [lib newFunctionWithName:@(kMergeVariantNames[variantIndex])];
-        fnIncrement = [lib newFunctionWithName:@"increment_index"];
-        // Trim kernel: only needed when K′ > k
-        if (K_prime > k) {
-            fnTrim = [lib newFunctionWithName:@"trim_K_to_k"];
-        }
-    }
-    
-    if (!fnDist || !fnTopK || (needsTiling && (!fnIncrement || (!fnBitonicMerge && !fnMerge)))) {
-        return false;
+        topkName = kTopKVariantNames[variantIndexK];
     }
 
-    id<MTLComputePipelineState> psDist = [device newComputePipelineStateWithFunction:fnDist error:&err];
-    id<MTLComputePipelineState> psTopK = [device newComputePipelineStateWithFunction:fnTopK error:&err];
+    id<MTLComputePipelineState> psDist     = getCachedPipeline(device, lib, distName);
+    id<MTLComputePipelineState> psTopK     = getCachedPipeline(device, lib, topkName);
     id<MTLComputePipelineState> psBitonicMerge = nil;
-    id<MTLComputePipelineState> psMerge = nil;
+    id<MTLComputePipelineState> psMerge    = nil;
     id<MTLComputePipelineState> psIncrement = nil;
-    id<MTLComputePipelineState> psTrim = nil;
+    id<MTLComputePipelineState> psTrim     = nil;
     if (needsTiling) {
-        if (fnBitonicMerge) {
-            psBitonicMerge = [device newComputePipelineStateWithFunction:fnBitonicMerge error:&err];
+        int mergeVariantIndex = selectTopKVariant(K_prime);
+        if (kBitonicMergeVariantNames[mergeVariantIndex]) {
+            psBitonicMerge = getCachedPipeline(device, lib, kBitonicMergeVariantNames[mergeVariantIndex]);
         }
-        if (fnMerge) {
-            psMerge = [device newComputePipelineStateWithFunction:fnMerge error:&err];
-        }
-        psIncrement = [device newComputePipelineStateWithFunction:fnIncrement error:&err];
-        if (fnTrim) {
-            psTrim = [device newComputePipelineStateWithFunction:fnTrim error:&err];
+        psMerge     = getCachedPipeline(device, lib, kMergeVariantNames[variantIndex]);
+        psIncrement = getCachedPipeline(device, lib, "increment_index");
+        if (K_prime > k) {
+            psTrim = getCachedPipeline(device, lib, "trim_K_to_k");
         }
         if (!psIncrement || (!psBitonicMerge && !psMerge) || (K_prime > k && !psTrim)) {
             return false;
@@ -1065,6 +1134,278 @@ bool runMetalIPDistance(
         id<MTLBuffer> outDistances,
         id<MTLBuffer> outIndices) {
     return runMetalDistance(device, queue, queries, vectors, nq, nb, d, k, false, outDistances, outIndices);
+}
+
+bool runMetalIVFFlatScan(
+        id<MTLDevice> device,
+        id<MTLCommandQueue> queue,
+        id<MTLBuffer> queries,
+        id<MTLBuffer> codes,
+        id<MTLBuffer> ids,
+        id<MTLBuffer> listOffset,
+        id<MTLBuffer> listLength,
+        id<MTLBuffer> coarseAssign,
+        int nq,
+        int d,
+        int k,
+        int nprobe,
+        bool isL2,
+        id<MTLBuffer> outDistances,
+        id<MTLBuffer> outIndices,
+        id<MTLBuffer> perListDistBuf,
+        id<MTLBuffer> perListIdxBuf) {
+    if (!device || !queue || !queries || !codes || !ids ||
+        !listOffset || !listLength || !coarseAssign ||
+        !outDistances || !outIndices ||
+        !perListDistBuf || !perListIdxBuf) {
+        return false;
+    }
+    if (k <= 0 || nq <= 0 || nprobe <= 0) {
+        return false;
+    }
+
+    // Use cached library and pipeline states (compiled once per device).
+    id<MTLLibrary> lib = getCachedLibrary(device);
+    if (!lib) {
+        return false;
+    }
+    id<MTLComputePipelineState> psScan =
+            getCachedPipeline(device, lib, "ivf_scan_list");
+    id<MTLComputePipelineState> psMerge =
+            getCachedPipeline(device, lib, "ivf_merge_lists");
+    if (!psScan || !psMerge) {
+        return false;
+    }
+
+    // Shared params buffer for both passes.
+    uint32_t scanParams[5] = {
+        (uint32_t)nq,
+        (uint32_t)d,
+        (uint32_t)k,
+        (uint32_t)nprobe,
+        isL2 ? 1u : 0u,
+    };
+    id<MTLBuffer> paramsBuf = [device newBufferWithBytes:scanParams
+                                                  length:sizeof(scanParams)
+                                                 options:MTLResourceStorageModeShared];
+    if (!paramsBuf) {
+        return false;
+    }
+
+    id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+
+    // Pass 1: ivf_scan_list — one threadgroup per (query, probe) pair.
+    [enc setComputePipelineState:psScan];
+    [enc setBuffer:queries       offset:0 atIndex:0];
+    [enc setBuffer:codes         offset:0 atIndex:1];
+    [enc setBuffer:ids           offset:0 atIndex:2];
+    [enc setBuffer:listOffset    offset:0 atIndex:3];
+    [enc setBuffer:listLength    offset:0 atIndex:4];
+    [enc setBuffer:coarseAssign  offset:0 atIndex:5];
+    [enc setBuffer:perListDistBuf offset:0 atIndex:6];
+    [enc setBuffer:perListIdxBuf  offset:0 atIndex:7];
+    [enc setBuffer:paramsBuf     offset:0 atIndex:8];
+
+    NSUInteger totalTGs = (NSUInteger)nq * (NSUInteger)nprobe;
+    [enc dispatchThreadgroups:MTLSizeMake(totalTGs, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+
+    // Pass 2: ivf_merge_lists — one threadgroup per query.
+    [enc setComputePipelineState:psMerge];
+    [enc setBuffer:perListDistBuf offset:0 atIndex:0];
+    [enc setBuffer:perListIdxBuf  offset:0 atIndex:1];
+    [enc setBuffer:outDistances   offset:0 atIndex:2];
+    [enc setBuffer:outIndices     offset:0 atIndex:3];
+    [enc setBuffer:paramsBuf      offset:0 atIndex:4];
+
+    [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)nq, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+
+    [enc endEncoding];
+    [cmdBuf commit];
+    [cmdBuf waitUntilCompleted];
+
+    return cmdBuf.status == MTLCommandBufferStatusCompleted;
+}
+
+bool runMetalComputeNorms(
+        id<MTLDevice> device,
+        id<MTLCommandQueue> queue,
+        id<MTLBuffer> vectors,
+        int nb,
+        int d,
+        id<MTLBuffer> normsBuf) {
+    if (!device || !queue || !vectors || !normsBuf || nb <= 0 || d <= 0) {
+        return false;
+    }
+    id<MTLLibrary> lib = getCachedLibrary(device);
+    if (!lib) return false;
+    id<MTLComputePipelineState> ps = getCachedPipeline(device, lib, "compute_norms");
+    if (!ps) return false;
+
+    uint32_t args[2] = {(uint32_t)nb, (uint32_t)d};
+    id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+    [enc setComputePipelineState:ps];
+    [enc setBuffer:vectors  offset:0 atIndex:0];
+    [enc setBuffer:normsBuf offset:0 atIndex:1];
+    [enc setBytes:args length:sizeof(args) atIndex:2];
+    NSUInteger tgSize = std::min((NSUInteger)256, ps.maxTotalThreadsPerThreadgroup);
+    NSUInteger groups = ((NSUInteger)nb + tgSize - 1) / tgSize;
+    [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(tgSize, 1, 1)];
+    [enc endEncoding];
+    [cmdBuf commit];
+    [cmdBuf waitUntilCompleted];
+    return cmdBuf.status == MTLCommandBufferStatusCompleted;
+}
+
+bool runMetalIVFFlatFullSearch(
+        id<MTLDevice> device,
+        id<MTLCommandQueue> queue,
+        id<MTLBuffer> queries,
+        int nq,
+        int d,
+        int k,
+        int nprobe,
+        bool isL2,
+        id<MTLBuffer> centroids,
+        int nlist,
+        id<MTLBuffer> codes,
+        id<MTLBuffer> ids,
+        id<MTLBuffer> listOffset,
+        id<MTLBuffer> listLength,
+        id<MTLBuffer> outDistances,
+        id<MTLBuffer> outIndices,
+        id<MTLBuffer> perListDistBuf,
+        id<MTLBuffer> perListIdxBuf,
+        id<MTLBuffer> coarseDistBuf,
+        id<MTLBuffer> coarseIdxBuf,
+        id<MTLBuffer> distMatrixBuf,
+        id<MTLBuffer> centroidNormsBuf,
+        int avgListLen) {
+    if (!device || !queue || !queries || !centroids || !codes || !ids ||
+        !listOffset || !listLength || !outDistances || !outIndices ||
+        !perListDistBuf || !perListIdxBuf ||
+        !coarseDistBuf || !coarseIdxBuf || !distMatrixBuf) {
+        return false;
+    }
+    if (k <= 0 || nq <= 0 || nprobe <= 0 || nlist <= 0) {
+        return false;
+    }
+
+    id<MTLLibrary> lib = getCachedLibrary(device);
+    if (!lib) {
+        return false;
+    }
+
+    // Use fused l2_with_norms when centroid norms are available.
+    bool useFusedL2 = isL2 && centroidNormsBuf != nil;
+    const char* distKernelName = useFusedL2 ? "l2_with_norms"
+                               : (isL2 ? "l2_squared_matrix" : "ip_matrix");
+    int coarseVariantIdx = selectTopKVariant(nprobe);
+    const char* coarseTopkName = kTopKVariantNames[coarseVariantIdx];
+
+    // Pick scan kernel: small lists → 32-thread variant.
+    bool useSmallScan = (avgListLen <= 64);
+    const char* scanKernelName = useSmallScan ? "ivf_scan_list_small"
+                                              : "ivf_scan_list";
+
+    id<MTLComputePipelineState> psDist  = getCachedPipeline(device, lib, distKernelName);
+    id<MTLComputePipelineState> psTopK  = getCachedPipeline(device, lib, coarseTopkName);
+    id<MTLComputePipelineState> psScan  = getCachedPipeline(device, lib, scanKernelName);
+    id<MTLComputePipelineState> psMerge = getCachedPipeline(device, lib, "ivf_merge_lists");
+
+    if (!psDist || !psTopK || !psScan || !psMerge) {
+        return false;
+    }
+
+    id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
+
+    // ---- Step 0 (optional): blit query data to GPU asynchronously -----------
+    // Use a blit encoder to copy query data so the GPU DMA engine handles it
+    // concurrently with any prior compute work in the queue.
+    // (Queries are already in a shared buffer; this is a no-op memcpy that
+    //  ensures the buffer is committed to the command buffer dependency graph.)
+
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+
+    // ---- Step 1: coarse distance matrix (queries × centroids) ---------------
+    [enc setComputePipelineState:psDist];
+    [enc setBuffer:queries       offset:0 atIndex:0];
+    [enc setBuffer:centroids     offset:0 atIndex:1];
+    [enc setBuffer:distMatrixBuf offset:0 atIndex:2];
+    if (useFusedL2) {
+        uint32_t distArgs[3] = {(uint32_t)nq, (uint32_t)nlist, (uint32_t)d};
+        [enc setBytes:distArgs length:sizeof(distArgs) atIndex:3];
+        [enc setBuffer:centroidNormsBuf offset:0 atIndex:4];
+    } else {
+        uint32_t distArgs[3] = {(uint32_t)nq, (uint32_t)nlist, (uint32_t)d};
+        [enc setBytes:distArgs length:sizeof(distArgs) atIndex:3];
+    }
+
+    const NSUInteger w = 16, h = 16;
+    MTLSize distGrid = MTLSizeMake(((NSUInteger)nlist + w - 1) / w,
+                                    ((NSUInteger)nq   + h - 1) / h, 1);
+    [enc dispatchThreadgroups:distGrid threadsPerThreadgroup:MTLSizeMake(w, h, 1)];
+
+    // ---- Step 2: coarse top-nprobe selection --------------------------------
+    [enc setComputePipelineState:psTopK];
+    [enc setBuffer:distMatrixBuf offset:0 atIndex:0];
+    [enc setBuffer:coarseDistBuf offset:0 atIndex:1];
+    [enc setBuffer:coarseIdxBuf  offset:0 atIndex:2];
+    uint32_t topkArgs[4] = {(uint32_t)nq, (uint32_t)nlist, (uint32_t)nprobe,
+                            isL2 ? 1u : 0u};
+    [enc setBytes:topkArgs length:sizeof(topkArgs) atIndex:3];
+    [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)nq, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+
+    // ---- Step 3: IVF scan (one threadgroup per query×probe) -----------------
+    uint32_t scanParams[5] = {
+        (uint32_t)nq, (uint32_t)d, (uint32_t)k,
+        (uint32_t)nprobe, isL2 ? 1u : 0u
+    };
+    id<MTLBuffer> paramsBuf = [device newBufferWithBytes:scanParams
+                                                  length:sizeof(scanParams)
+                                                 options:MTLResourceStorageModeShared];
+    if (!paramsBuf) {
+        [enc endEncoding];
+        return false;
+    }
+
+    [enc setComputePipelineState:psScan];
+    [enc setBuffer:queries        offset:0 atIndex:0];
+    [enc setBuffer:codes          offset:0 atIndex:1];
+    [enc setBuffer:ids            offset:0 atIndex:2];
+    [enc setBuffer:listOffset     offset:0 atIndex:3];
+    [enc setBuffer:listLength     offset:0 atIndex:4];
+    [enc setBuffer:coarseIdxBuf   offset:0 atIndex:5];
+    [enc setBuffer:perListDistBuf offset:0 atIndex:6];
+    [enc setBuffer:perListIdxBuf  offset:0 atIndex:7];
+    [enc setBuffer:paramsBuf      offset:0 atIndex:8];
+
+    NSUInteger scanTGSize = useSmallScan ? 32 : 256;
+    NSUInteger totalTGs = (NSUInteger)nq * (NSUInteger)nprobe;
+    [enc dispatchThreadgroups:MTLSizeMake(totalTGs, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(scanTGSize, 1, 1)];
+
+    // ---- Step 4: merge nprobe results per query -----------------------------
+    [enc setComputePipelineState:psMerge];
+    [enc setBuffer:perListDistBuf offset:0 atIndex:0];
+    [enc setBuffer:perListIdxBuf  offset:0 atIndex:1];
+    [enc setBuffer:outDistances   offset:0 atIndex:2];
+    [enc setBuffer:outIndices     offset:0 atIndex:3];
+    [enc setBuffer:paramsBuf      offset:0 atIndex:4];
+
+    [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)nq, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+
+    [enc endEncoding];
+    [cmdBuf commit];
+    [cmdBuf waitUntilCompleted];
+
+    return cmdBuf.status == MTLCommandBufferStatusCompleted;
 }
 
 } // namespace gpu_metal

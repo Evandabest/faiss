@@ -1,0 +1,112 @@
+// @lint-ignore-every LICENSELINT
+/**
+ * Copyright (c) Meta Platforms, Inc. and its affiliates.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
+ *
+ * Minimal Metal IVFFlat wrapper.
+ *
+ */
+
+#pragma once
+
+#import <Metal/Metal.h>
+
+#include <faiss/IndexIVFFlat.h>
+#include <faiss/gpu_metal/MetalIndex.h>
+
+#include <memory>
+
+namespace faiss {
+namespace gpu_metal {
+class MetalIVFFlatImpl;
+} // namespace gpu_metal
+} // namespace faiss
+
+namespace faiss {
+namespace gpu_metal {
+
+/// IVFFlat index wrapper for Metal backend.
+/// Currently delegates to an internal CPU IndexIVFFlat; later phases
+/// may move list scanning to GPU.
+class MetalIndexIVFFlat : public MetalIndex {
+public:
+    /// Construct empty IVFFlat index with its own CPU quantizer.
+    MetalIndexIVFFlat(
+            std::shared_ptr<MetalResources> resources,
+            int dims,
+            idx_t nlist,
+            faiss::MetricType metric,
+            float metricArg = 0.0f,
+            MetalIndexConfig config = MetalIndexConfig());
+
+    /// Construct from an existing CPU IndexIVFFlat (used by cloners later).
+    MetalIndexIVFFlat(
+            std::shared_ptr<MetalResources> resources,
+            const faiss::IndexIVFFlat* cpuIndex,
+            MetalIndexConfig config = MetalIndexConfig());
+
+    ~MetalIndexIVFFlat() override;
+
+    void train(idx_t n, const float* x) override;
+    void add(idx_t n, const float* x) override;
+    void add_with_ids(idx_t n, const float* x, const idx_t* xids) override;
+    void reset() override;
+
+    void search(
+            idx_t n,
+            const float* x,
+            idx_t k,
+            float* distances,
+            idx_t* labels,
+            const SearchParameters* params = nullptr) const override;
+
+    /// Copy from a CPU IndexIVFFlat (helper for future cloner support).
+    void copyFrom(const faiss::IndexIVFFlat* index);
+
+    /// Copy to a CPU IndexIVFFlat.
+    void copyTo(faiss::IndexIVFFlat* index) const;
+
+private:
+    std::unique_ptr<faiss::IndexIVFFlat> cpuIndex_;
+    std::unique_ptr<MetalIVFFlatImpl> gpuIvf_;
+
+    // Persistent search buffers — allocated once, grown lazily.
+    // Declared mutable so search() (const) can resize them.
+    mutable id<MTLBuffer> searchQueriesBuf_ = nil;
+    mutable id<MTLBuffer> searchCoarseBuf_  = nil;
+    mutable id<MTLBuffer> searchOutDistBuf_ = nil;
+    mutable id<MTLBuffer> searchOutIdxBuf_  = nil;
+    mutable size_t searchQueriesCap_ = 0; // bytes
+    mutable size_t searchCoarseCap_  = 0;
+    mutable size_t searchOutDistCap_ = 0;
+    mutable size_t searchOutIdxCap_  = 0;
+    mutable id<MTLBuffer> searchPerListDistBuf_ = nil;
+    mutable id<MTLBuffer> searchPerListIdxBuf_  = nil;
+    mutable size_t searchPerListDistCap_ = 0;
+    mutable size_t searchPerListIdxCap_  = 0;
+
+    // GPU coarse quantizer buffers (cached, rebuilt on train)
+    mutable id<MTLBuffer> centroidBuf_          = nil;
+    mutable id<MTLBuffer> centroidNormsBuf_     = nil; // pre-computed ||c||²
+    mutable id<MTLBuffer> coarseOutDistBuf_     = nil;
+    mutable id<MTLBuffer> coarseOutIdxBuf_      = nil;
+    mutable size_t coarseOutDistCap_  = 0;
+    mutable size_t coarseOutIdxCap_   = 0;
+    mutable id<MTLBuffer> distMatrixBuf_        = nil;
+    mutable size_t distMatrixCap_     = 0;
+
+    /// Ensures buf is at least `needed` bytes, reallocating if necessary.
+    void ensureSearchBuf_(
+            id<MTLBuffer>& buf,
+            size_t& cap,
+            size_t needed) const;
+
+    /// (Re)uploads quantizer centroids to centroidBuf_.
+    void uploadCentroids_() const;
+};
+
+} // namespace gpu_metal
+} // namespace faiss
+
