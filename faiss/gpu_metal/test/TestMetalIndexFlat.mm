@@ -254,6 +254,87 @@ TEST_F(TestMetalIndexFlat, L2_TiledManyQueries) {
     compareSearchResults(numQuery, k, refDist.data(), refLab.data(), testDist.data(), testLab.data());
 }
 
+TEST_F(TestMetalIndexFlat, L2_TiledPatterns) {
+    // Additional correctness coverage for tiled path with structured distance patterns.
+    // Use dim=64 and nb>tileCols to force vector-tiling (like L2_TiledManyVectors).
+    const int dim = 64;
+    const int numVecs = 132000;  // > 131072 → vector tiling
+    const int numQuery = 4;
+    const int k = 10;
+
+    std::vector<float> vecs((size_t)numVecs * dim);
+    std::vector<float> queries((size_t)numQuery * dim);
+
+    auto runPattern = [&](const char* patternName,
+                          auto fillFn) {
+        (void)patternName;
+
+        fillFn(vecs, queries);
+
+        faiss::IndexFlatL2 cpuIndex(dim);
+        faiss::gpu_metal::MetalIndexFlat metalIndex(
+                resources_, dim, faiss::METRIC_L2, 0.0f);
+        cpuIndex.add(numVecs, vecs.data());
+        metalIndex.add(numVecs, vecs.data());
+
+        std::vector<float> refDist((size_t)numQuery * k);
+        std::vector<faiss::idx_t> refLab((size_t)numQuery * k, -1);
+        std::vector<float> testDist((size_t)numQuery * k);
+        std::vector<faiss::idx_t> testLab((size_t)numQuery * k, -1);
+
+        cpuIndex.search(numQuery, queries.data(), k, refDist.data(), refLab.data());
+        metalIndex.search(numQuery, queries.data(), k, testDist.data(), testLab.data());
+
+        compareSearchResults(numQuery, k, refDist.data(), refLab.data(), testDist.data(), testLab.data());
+    };
+
+    // Pattern 1: strictly increasing distances w.r.t. query 0.
+    runPattern("increasing", [&](auto& db, auto& qs) {
+        // Query at 0; database values 0,1,2,... replicated across dim.
+        for (int q = 0; q < numQuery; ++q) {
+            for (int d = 0; d < dim; ++d) {
+                qs[q * dim + d] = 0.0f;
+            }
+        }
+        for (int i = 0; i < numVecs; ++i) {
+            float v = (float)i;
+            for (int d = 0; d < dim; ++d) {
+                db[(size_t)i * dim + d] = v;
+            }
+        }
+    });
+
+    // Pattern 2: strictly decreasing distances w.r.t. query 0.
+    runPattern("decreasing", [&](auto& db, auto& qs) {
+        for (int q = 0; q < numQuery; ++q) {
+            for (int d = 0; d < dim; ++d) {
+                qs[q * dim + d] = 0.0f;
+            }
+        }
+        for (int i = 0; i < numVecs; ++i) {
+            float v = (float)(numVecs - 1 - i);
+            for (int d = 0; d < dim; ++d) {
+                db[(size_t)i * dim + d] = v;
+            }
+        }
+    });
+
+    // Pattern 3: many ties (all distances equal).
+    runPattern("ties", [&](auto& db, auto& qs) {
+        for (int q = 0; q < numQuery; ++q) {
+            for (int d = 0; d < dim; ++d) {
+                qs[q * dim + d] = 1.0f;
+            }
+        }
+        for (int i = 0; i < numVecs; ++i) {
+            // All vectors identical → equal distances; tie-breaking must be deterministic.
+            for (int d = 0; d < dim; ++d) {
+                db[(size_t)i * dim + d] = 0.0f;
+            }
+        }
+    });
+}
+
 TEST_F(TestMetalIndexFlat, L2_TiledBoth) {
     // Force both query and vector tiling
     const int dim = 64;
