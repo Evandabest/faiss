@@ -39,8 +39,8 @@ int main(int argc, char** argv) {
     const int d = 128;
     const int nb = 100000;   // database size
     const int nq = 1000;     // number of queries
-    const int nWarmup = 3;
-    const int nRuns = 12;
+    const int nWarmup = 2;
+    const int nRuns = 5;
 
     // Sweep over k to see behavior across small/medium/large k
     const int ks[] = {10, 20, 50, 100, 128, 256, 512};
