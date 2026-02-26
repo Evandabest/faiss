@@ -95,6 +95,15 @@ public:
         return totalVecs_;
     }
 
+    /// Interleaved codes buffer (blocks of 32 vectors, dims interleaved).
+    id<MTLBuffer> interleavedCodesBuffer() const {
+        return interleavedCodesBuf_;
+    }
+    /// Per-list float offsets into the interleaved codes buffer.
+    id<MTLBuffer> interleavedCodesOffsetBuffer() const {
+        return interleavedCodesOffsetBuf_;
+    }
+
 private:
     void uploadToGpu();
 
@@ -119,6 +128,12 @@ private:
     id<MTLBuffer> idsBuffer_;
     id<MTLBuffer> listOffsetBuf_;  // (nlist) uint32_t, list element offsets
     id<MTLBuffer> listLengthBuf_;  // (nlist) uint32_t, list sizes
+
+    // Interleaved codes layout (blocks of 32 vectors, dims interleaved)
+    id<MTLBuffer> interleavedCodesBuf_;
+    id<MTLBuffer> interleavedCodesOffsetBuf_; // (nlist) uint32_t, float offsets
+
+    static constexpr int kInterleavedGroupSize = 32;
 };
 
 } // namespace gpu_metal

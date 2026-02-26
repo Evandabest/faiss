@@ -34,7 +34,9 @@ MetalIVFFlatImpl::MetalIVFFlatImpl(
           codesBuffer_(nil),
           idsBuffer_(nil),
           listOffsetBuf_(nil),
-          listLengthBuf_(nil) {
+          listLengthBuf_(nil),
+          interleavedCodesBuf_(nil),
+          interleavedCodesOffsetBuf_(nil) {
     FAISS_THROW_IF_NOT(dim_ > 0);
     FAISS_THROW_IF_NOT(nlist_ >= 0);
 }
@@ -66,6 +68,14 @@ void MetalIVFFlatImpl::reset() {
     if (listLengthBuf_ != nil) {
         resources_->deallocBuffer(listLengthBuf_, MetalAllocType::IVFLists);
         listLengthBuf_ = nil;
+    }
+    if (interleavedCodesBuf_ != nil) {
+        resources_->deallocBuffer(interleavedCodesBuf_, MetalAllocType::IVFLists);
+        interleavedCodesBuf_ = nil;
+    }
+    if (interleavedCodesOffsetBuf_ != nil) {
+        resources_->deallocBuffer(interleavedCodesOffsetBuf_, MetalAllocType::IVFLists);
+        interleavedCodesOffsetBuf_ = nil;
     }
 }
 
@@ -237,6 +247,68 @@ void MetalIVFFlatImpl::uploadToGpu() {
 
     std::memcpy([codesBuffer_ contents], hostCodes_.data(), codesBytes);
     std::memcpy([idsBuffer_   contents], hostIds_.data(),   idsBytes);
+
+    // Build interleaved codes buffer: blocks of 32 vectors with dims interleaved.
+    // Layout per block: [v0d0 v1d0 ... v31d0] [v0d1 v1d1 ... v31d1] ...
+    if (interleavedCodesBuf_ != nil) {
+        resources_->deallocBuffer(interleavedCodesBuf_, MetalAllocType::IVFLists);
+        interleavedCodesBuf_ = nil;
+    }
+    if (interleavedCodesOffsetBuf_ != nil) {
+        resources_->deallocBuffer(interleavedCodesOffsetBuf_, MetalAllocType::IVFLists);
+        interleavedCodesOffsetBuf_ = nil;
+    }
+
+    constexpr int G = kInterleavedGroupSize; // 32
+    std::vector<uint32_t> ilOffsets((size_t)nlist_);
+    size_t totalIlFloats = 0;
+    for (size_t l = 0; l < (size_t)nlist_; ++l) {
+        ilOffsets[l] = (uint32_t)totalIlFloats;
+        size_t len = listLength_[l];
+        size_t numBlocks = (len + G - 1) / G;
+        totalIlFloats += numBlocks * G * (size_t)dim_;
+    }
+
+    if (totalIlFloats > 0) {
+        size_t ilBytes = totalIlFloats * sizeof(float);
+        interleavedCodesBuf_ = resources_->allocBuffer(ilBytes, MetalAllocType::IVFLists);
+        if (interleavedCodesBuf_) {
+            auto* dst = reinterpret_cast<float*>([interleavedCodesBuf_ contents]);
+            std::memset(dst, 0, ilBytes);
+
+            for (size_t l = 0; l < (size_t)nlist_; ++l) {
+                size_t len = listLength_[l];
+                if (len == 0) continue;
+                size_t srcOff = listOffset_[l];
+                size_t dstOff = ilOffsets[l];
+                size_t numBlocks = (len + G - 1) / G;
+
+                for (size_t b = 0; b < numBlocks; ++b) {
+                    for (int dd = 0; dd < dim_; ++dd) {
+                        for (int g = 0; g < G; ++g) {
+                            size_t vi = b * G + g;
+                            float val = (vi < len)
+                                    ? hostCodes_[(srcOff + vi) * (size_t)dim_ + dd]
+                                    : 0.0f;
+                            dst[dstOff + b * G * (size_t)dim_ + dd * G + g] = val;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (metaBytes > 0 && totalIlFloats > 0) {
+        interleavedCodesOffsetBuf_ = resources_->allocBuffer(
+                metaBytes, MetalAllocType::IVFLists);
+        if (interleavedCodesOffsetBuf_) {
+            auto* ptr = reinterpret_cast<uint32_t*>(
+                    [interleavedCodesOffsetBuf_ contents]);
+            for (size_t i = 0; i < (size_t)nlist_; ++i) {
+                ptr[i] = ilOffsets[i];
+            }
+        }
+    }
 }
 
 } // namespace gpu_metal

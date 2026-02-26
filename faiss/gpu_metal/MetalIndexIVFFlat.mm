@@ -251,9 +251,9 @@ void MetalIndexIVFFlat::search(
     // ---- Grow persistent search buffers ------------------------------------
     size_t queriesBytes    = (size_t)n * (size_t)d * sizeof(float);
     size_t outDistBytes    = (size_t)n * (size_t)k * sizeof(float);
-    size_t outIdxBytes     = (size_t)n * (size_t)k * sizeof(int32_t);
+    size_t outIdxBytes     = (size_t)n * (size_t)k * sizeof(int64_t);
     size_t perListBytes    = (size_t)n * nprobe * (size_t)k * sizeof(float);
-    size_t perListIdxB     = (size_t)n * nprobe * (size_t)k * sizeof(int32_t);
+    size_t perListIdxB     = (size_t)n * nprobe * (size_t)k * sizeof(int64_t);
     size_t coarseDistBytes = (size_t)n * nprobe * sizeof(float);
     size_t coarseIdxBytes  = (size_t)n * nprobe * sizeof(int32_t);
     size_t distMatBytes    = (size_t)n * (size_t)nlist * sizeof(float);
@@ -298,7 +298,9 @@ void MetalIndexIVFFlat::search(
                 coarseOutIdxBuf_,
                 distMatrixBuf_,
                 centroidNormsBuf_,
-                avgListLen);
+                avgListLen,
+                gpuIvf_->interleavedCodesBuffer(),
+                gpuIvf_->interleavedCodesOffsetBuffer());
     }
 
     if (!ok) {
@@ -328,7 +330,9 @@ void MetalIndexIVFFlat::search(
                 searchCoarseBuf_,
                 (int)n, d, (int)k, (int)nprobe, isL2,
                 searchOutDistBuf_, searchOutIdxBuf_,
-                searchPerListDistBuf_, searchPerListIdxBuf_);
+                searchPerListDistBuf_, searchPerListIdxBuf_,
+                gpuIvf_->interleavedCodesBuffer(),
+                gpuIvf_->interleavedCodesOffsetBuffer());
     }
 
     if (!ok) {
@@ -337,14 +341,13 @@ void MetalIndexIVFFlat::search(
     }
 
     // ---- Copy results back -----------------------------------------------
-    // The kernel writes global IDs (low 32 bits of idx_t) into outIdxBuf.
     const float*   outDistPtr = reinterpret_cast<const float*  >([searchOutDistBuf_ contents]);
-    const int32_t* outIdxPtr  = reinterpret_cast<const int32_t*>([searchOutIdxBuf_  contents]);
+    const int64_t* outIdxPtr  = reinterpret_cast<const int64_t*>([searchOutIdxBuf_  contents]);
 
     for (idx_t qi = 0; qi < n; ++qi) {
         for (idx_t j = 0; j < k; ++j) {
             size_t pos        = (size_t)qi * (size_t)k + (size_t)j;
-            int32_t globalId  = outIdxPtr[pos];
+            int64_t globalId  = outIdxPtr[pos];
             labels   [pos]    = (globalId < 0) ? -1 : (idx_t)globalId;
             distances[pos]    = outDistPtr[pos];
         }

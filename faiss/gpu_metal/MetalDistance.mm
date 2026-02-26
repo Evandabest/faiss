@@ -1163,7 +1163,9 @@ bool runMetalIVFFlatScan(
         id<MTLBuffer> outDistances,
         id<MTLBuffer> outIndices,
         id<MTLBuffer> perListDistBuf,
-        id<MTLBuffer> perListIdxBuf) {
+        id<MTLBuffer> perListIdxBuf,
+        id<MTLBuffer> interleavedCodes,
+        id<MTLBuffer> interleavedCodesOffset) {
     if (!device || !queue || !queries || !codes || !ids ||
         !listOffset || !listLength || !coarseAssign ||
         !outDistances || !outIndices ||
@@ -1174,20 +1176,23 @@ bool runMetalIVFFlatScan(
         return false;
     }
 
-    // Use cached library and pipeline states (compiled once per device).
+    bool useInterleaved = (interleavedCodes != nil && interleavedCodesOffset != nil);
+
     id<MTLLibrary> lib = getCachedLibrary(device);
     if (!lib) {
         return false;
     }
+
+    const char* scanKernelName = useInterleaved
+            ? "ivf_scan_list_interleaved" : "ivf_scan_list";
     id<MTLComputePipelineState> psScan =
-            getCachedPipeline(device, lib, "ivf_scan_list");
+            getCachedPipeline(device, lib, scanKernelName);
     id<MTLComputePipelineState> psMerge =
             getCachedPipeline(device, lib, "ivf_merge_lists");
     if (!psScan || !psMerge) {
         return false;
     }
 
-    // Shared params buffer for both passes.
     uint32_t scanParams[5] = {
         (uint32_t)nq,
         (uint32_t)d,
@@ -1205,10 +1210,10 @@ bool runMetalIVFFlatScan(
     id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
 
-    // Pass 1: ivf_scan_list — one threadgroup per (query, probe) pair.
     [enc setComputePipelineState:psScan];
     [enc setBuffer:queries       offset:0 atIndex:0];
-    [enc setBuffer:codes         offset:0 atIndex:1];
+    [enc setBuffer:(useInterleaved ? interleavedCodes : codes)
+                                 offset:0 atIndex:1];
     [enc setBuffer:ids           offset:0 atIndex:2];
     [enc setBuffer:listOffset    offset:0 atIndex:3];
     [enc setBuffer:listLength    offset:0 atIndex:4];
@@ -1216,12 +1221,14 @@ bool runMetalIVFFlatScan(
     [enc setBuffer:perListDistBuf offset:0 atIndex:6];
     [enc setBuffer:perListIdxBuf  offset:0 atIndex:7];
     [enc setBuffer:paramsBuf     offset:0 atIndex:8];
+    if (useInterleaved) {
+        [enc setBuffer:interleavedCodesOffset offset:0 atIndex:9];
+    }
 
     NSUInteger totalTGs = (NSUInteger)nq * (NSUInteger)nprobe;
     [enc dispatchThreadgroups:MTLSizeMake(totalTGs, 1, 1)
         threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 
-    // Pass 2: ivf_merge_lists — one threadgroup per query.
     [enc setComputePipelineState:psMerge];
     [enc setBuffer:perListDistBuf offset:0 atIndex:0];
     [enc setBuffer:perListIdxBuf  offset:0 atIndex:1];
@@ -1294,7 +1301,9 @@ bool runMetalIVFFlatFullSearch(
         id<MTLBuffer> coarseIdxBuf,
         id<MTLBuffer> distMatrixBuf,
         id<MTLBuffer> centroidNormsBuf,
-        int avgListLen) {
+        int avgListLen,
+        id<MTLBuffer> interleavedCodes,
+        id<MTLBuffer> interleavedCodesOffset) {
     if (!device || !queue || !queries || !centroids || !codes || !ids ||
         !listOffset || !listLength || !outDistances || !outIndices ||
         !perListDistBuf || !perListIdxBuf ||
@@ -1317,10 +1326,12 @@ bool runMetalIVFFlatFullSearch(
     int coarseVariantIdx = selectTopKVariant(nprobe);
     const char* coarseTopkName = kTopKVariantNames[coarseVariantIdx];
 
-    // Pick scan kernel: small lists → 32-thread variant.
-    bool useSmallScan = (avgListLen <= 64);
-    const char* scanKernelName = useSmallScan ? "ivf_scan_list_small"
-                                              : "ivf_scan_list";
+    // Pick scan kernel: interleaved > default > small-list.
+    bool useInterleaved = (interleavedCodes != nil && interleavedCodesOffset != nil);
+    bool useSmallScan   = (!useInterleaved && avgListLen <= 64);
+    const char* scanKernelName = useInterleaved ? "ivf_scan_list_interleaved"
+                               : useSmallScan   ? "ivf_scan_list_small"
+                                                 : "ivf_scan_list";
 
     id<MTLComputePipelineState> psDist  = getCachedPipeline(device, lib, distKernelName);
     id<MTLComputePipelineState> psTopK  = getCachedPipeline(device, lib, coarseTopkName);
@@ -1386,7 +1397,8 @@ bool runMetalIVFFlatFullSearch(
 
     [enc setComputePipelineState:psScan];
     [enc setBuffer:queries        offset:0 atIndex:0];
-    [enc setBuffer:codes          offset:0 atIndex:1];
+    [enc setBuffer:(useInterleaved ? interleavedCodes : codes)
+                                  offset:0 atIndex:1];
     [enc setBuffer:ids            offset:0 atIndex:2];
     [enc setBuffer:listOffset     offset:0 atIndex:3];
     [enc setBuffer:listLength     offset:0 atIndex:4];
@@ -1394,6 +1406,9 @@ bool runMetalIVFFlatFullSearch(
     [enc setBuffer:perListDistBuf offset:0 atIndex:6];
     [enc setBuffer:perListIdxBuf  offset:0 atIndex:7];
     [enc setBuffer:paramsBuf      offset:0 atIndex:8];
+    if (useInterleaved) {
+        [enc setBuffer:interleavedCodesOffset offset:0 atIndex:9];
+    }
 
     NSUInteger scanTGSize = useSmallScan ? 32 : 256;
     NSUInteger totalTGs = (NSUInteger)nq * (NSUInteger)nprobe;

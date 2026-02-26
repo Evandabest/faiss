@@ -124,7 +124,9 @@ bool runMetalIVFFlatScan(
         id<MTLBuffer> outDistances,
         id<MTLBuffer> outIndices,
         id<MTLBuffer> perListDistBuf,
-        id<MTLBuffer> perListIdxBuf);
+        id<MTLBuffer> perListIdxBuf,
+        id<MTLBuffer> interleavedCodes = nil,
+        id<MTLBuffer> interleavedCodesOffset = nil);
 
 /// Compute ||v||² norms for each vector.  Result is written to normsBuf
 /// (nb float).  Useful for caching centroid norms across searches.
@@ -174,7 +176,9 @@ bool runMetalIVFFlatFullSearch(
         id<MTLBuffer> coarseIdxBuf,
         id<MTLBuffer> distMatrixBuf,
         id<MTLBuffer> centroidNormsBuf = nil,
-        int avgListLen = 256);
+        int avgListLen = 256,
+        id<MTLBuffer> interleavedCodes = nil,
+        id<MTLBuffer> interleavedCodesOffset = nil);
 
 } // namespace gpu_metal
 } // namespace faiss
