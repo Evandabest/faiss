@@ -578,15 +578,15 @@ kernel void l2_with_norms(
 //   [0] nq   [1] d   [2] k   [3] nprobe   [4] want_min
 
 kernel void ivf_scan_list(
-    device const float*  queries       [[buffer(0)]],
-    device const float*  codes         [[buffer(1)]],
-    device const int2*   ids           [[buffer(2)]],
-    device const uint*   listOffset    [[buffer(3)]],
-    device const uint*   listLength    [[buffer(4)]],
-    device const int*    coarseAssign  [[buffer(5)]],
-    device       float*  perListDist   [[buffer(6)]],
-    device       int*    perListIdx    [[buffer(7)]],
-    device const uint*   params        [[buffer(8)]],
+    device const float*      queries       [[buffer(0)]],
+    device const float*      codes         [[buffer(1)]],
+    device const long*  ids           [[buffer(2)]],
+    device const uint*  listOffset    [[buffer(3)]],
+    device const uint*  listLength    [[buffer(4)]],
+    device const int*   coarseAssign  [[buffer(5)]],
+    device       float* perListDist   [[buffer(6)]],
+    device       long*  perListIdx    [[buffer(7)]],
+    device const uint*  params        [[buffer(8)]],
     uint tgid [[threadgroup_position_in_grid]],
     uint tid  [[thread_position_in_threadgroup]]
 ) {
@@ -634,6 +634,8 @@ kernel void ivf_scan_list(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
+    // Sort internally by (dist, vecIdx) using 32-bit vecIdx for speed;
+    // resolve to 64-bit ID only when writing output.
     float localDist[LOCAL_K];
     int   localIdx [LOCAL_K];
     uint  localCount = 0;
@@ -671,15 +673,14 @@ kernel void ivf_scan_list(
             }
         }
 
-        int2 idPair = ids[vecIdx];
-        int globalId = idPair.x;
+        int vi = (int)vecIdx;
 
         bool better = want_min ? (dist < localDist[LOCAL_K-1])
                                : (dist > localDist[LOCAL_K-1]);
         if (localCount < LOCAL_K || better) {
             uint pos = (localCount < LOCAL_K) ? localCount : LOCAL_K - 1;
             localDist[pos] = dist;
-            localIdx [pos] = globalId;
+            localIdx [pos] = vi;
             while (pos > 0) {
                 bool sw = want_min
                     ? (localDist[pos] < localDist[pos-1] || (localDist[pos] == localDist[pos-1] && localIdx[pos] < localIdx[pos-1]))
@@ -725,14 +726,16 @@ kernel void ivf_scan_list(
         }
     }
 
+    // Write output: resolve 32-bit vecIdx → 64-bit ID from ids buffer.
     uint kk = min(k, CAND);
     for (uint i = tid; i < kk; i += TG_SIZE) {
+        int vi = tgIdx[i];
         perListDist[outBase + i] = tgDist[i];
-        perListIdx [outBase + i] = tgIdx [i];
+        perListIdx [outBase + i] = (vi < 0) ? -1L : ids[vi];
     }
     for (uint i = tid; i < k - kk; i += TG_SIZE) {
         perListDist[outBase + kk + i] = sentinel;
-        perListIdx [outBase + kk + i] = -1;
+        perListIdx [outBase + kk + i] = -1L;
     }
 }
 
@@ -740,15 +743,15 @@ kernel void ivf_scan_list(
 // Used when avg list size ≤ 32 (most threads in 256-thread version idle).
 // Saves ~90% of bitonic sort barriers and threadgroup memory.
 kernel void ivf_scan_list_small(
-    device const float*  queries       [[buffer(0)]],
-    device const float*  codes         [[buffer(1)]],
-    device const int2*   ids           [[buffer(2)]],
-    device const uint*   listOffset    [[buffer(3)]],
-    device const uint*   listLength    [[buffer(4)]],
-    device const int*    coarseAssign  [[buffer(5)]],
-    device       float*  perListDist   [[buffer(6)]],
-    device       int*    perListIdx    [[buffer(7)]],
-    device const uint*   params        [[buffer(8)]],
+    device const float*      queries       [[buffer(0)]],
+    device const float*      codes         [[buffer(1)]],
+    device const long*  ids           [[buffer(2)]],
+    device const uint*       listOffset    [[buffer(3)]],
+    device const uint*       listLength    [[buffer(4)]],
+    device const int*        coarseAssign  [[buffer(5)]],
+    device       float*      perListDist   [[buffer(6)]],
+    device       long*  perListIdx    [[buffer(7)]],
+    device const uint*       params        [[buffer(8)]],
     uint tgid [[threadgroup_position_in_grid]],
     uint tid  [[thread_position_in_threadgroup]]
 ) {
@@ -826,15 +829,14 @@ kernel void ivf_scan_list_small(
             }
         }
 
-        int2 idPair = ids[vecIdx];
-        int globalId = idPair.x;
+        int vi = (int)vecIdx;
 
         bool better = want_min
-            ? (dist < bestDist || (dist == bestDist && globalId < bestIdx))
-            : (dist > bestDist || (dist == bestDist && globalId < bestIdx));
+            ? (dist < bestDist || (dist == bestDist && vi < bestIdx))
+            : (dist > bestDist || (dist == bestDist && vi < bestIdx));
         if (better) {
             bestDist = dist;
-            bestIdx  = globalId;
+            bestIdx  = vi;
         }
     }
 
@@ -845,7 +847,6 @@ kernel void ivf_scan_list_small(
     tgIdx [tid] = bestIdx;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Bitonic sort over 32 elements — only 5 stages.
     for (uint k2 = 2; k2 <= CAND; k2 *= 2) {
         for (uint j = k2 >> 1; j > 0; j >>= 1) {
             uint partner = tid ^ j;
@@ -868,22 +869,197 @@ kernel void ivf_scan_list_small(
 
     uint kk = min(k, CAND);
     for (uint i = tid; i < kk; i += TG_SIZE) {
+        int vi = tgIdx[i];
         perListDist[outBase + i] = tgDist[i];
-        perListIdx [outBase + i] = tgIdx [i];
+        perListIdx [outBase + i] = (vi < 0) ? -1L : ids[vi];
     }
     for (uint i = tid; i < k - kk; i += TG_SIZE) {
         perListDist[outBase + kk + i] = sentinel;
-        perListIdx [outBase + kk + i] = -1;
+        perListIdx [outBase + kk + i] = -1L;
+    }
+}
+
+// ---- Interleaved layout scan: 32-vector blocks, dimensions interleaved ----
+// Memory layout per block: [v0d0 v1d0 .. v31d0] [v0d1 v1d1 .. v31d1] ...
+// Each simdgroup (32 threads) processes one block cooperatively,
+// achieving coalesced reads: all threads read the same dimension simultaneously.
+kernel void ivf_scan_list_interleaved(
+    device const float*      queries           [[buffer(0)]],
+    device const float*      codes             [[buffer(1)]],
+    device const long*       ids               [[buffer(2)]],
+    device const uint*       listOffset        [[buffer(3)]],
+    device const uint*       listLength        [[buffer(4)]],
+    device const int*        coarseAssign      [[buffer(5)]],
+    device       float*      perListDist       [[buffer(6)]],
+    device       long*       perListIdx        [[buffer(7)]],
+    device const uint*       params            [[buffer(8)]],
+    device const uint*       ilCodesOffset     [[buffer(9)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]]
+) {
+    constexpr uint TG_SIZE   = 256;
+    constexpr uint SIMD_W    = 32;
+    constexpr uint NUM_SIMDS = TG_SIZE / SIMD_W; // 8
+    constexpr uint LOCAL_K   = 4;
+
+    uint nq       = params[0];
+    uint d        = params[1];
+    uint k        = params[2];
+    uint nprobe   = params[3];
+    uint want_min = params[4];
+
+    uint qi = tgid / nprobe;
+    uint pi = tgid % nprobe;
+    if (qi >= nq || k == 0) return;
+
+    float sentinel = want_min ? 1e38f : -1e38f;
+    uint outBase = (qi * nprobe + pi) * k;
+
+    int list_no = coarseAssign[qi * nprobe + pi];
+    if (list_no < 0) {
+        for (uint i = tid; i < k; i += TG_SIZE) {
+            perListDist[outBase + i] = sentinel;
+            perListIdx [outBase + i] = -1L;
+        }
+        return;
+    }
+
+    uint idOff = listOffset[(uint)list_no];
+    uint lLen  = listLength[(uint)list_no];
+    uint cOff  = ilCodesOffset[(uint)list_no];
+    if (lLen == 0) {
+        for (uint i = tid; i < k; i += TG_SIZE) {
+            perListDist[outBase + i] = sentinel;
+            perListIdx [outBase + i] = -1L;
+        }
+        return;
+    }
+
+    uint numBlocks = (lLen + SIMD_W - 1) / SIMD_W;
+    uint laneId    = tid % SIMD_W;
+    uint simdId    = tid / SIMD_W;
+
+    threadgroup float tgQuery[512];
+    const device float* qvecDev = queries + qi * d;
+    for (uint i = tid; i < d; i += TG_SIZE) {
+        tgQuery[i] = qvecDev[i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float localDist[LOCAL_K];
+    int   localIdx [LOCAL_K];
+    uint  localCount = 0;
+    for (uint i = 0; i < LOCAL_K; i++) {
+        localDist[i] = sentinel;
+        localIdx [i] = -1;
+    }
+
+    for (uint blk = simdId; blk < numBlocks; blk += NUM_SIMDS) {
+        uint vecInList = blk * SIMD_W + laneId;
+        bool valid = vecInList < lLen;
+
+        const device float* blockPtr = codes + cOff + blk * SIMD_W * d;
+
+        float dist = 0.0f;
+        if (want_min) {
+            for (uint dd = 0; dd < d; dd += 4) {
+                float v0 = valid ? blockPtr[(dd + 0) * SIMD_W + laneId] : 0.0f;
+                float v1 = valid ? blockPtr[(dd + 1) * SIMD_W + laneId] : 0.0f;
+                float v2 = valid ? blockPtr[(dd + 2) * SIMD_W + laneId] : 0.0f;
+                float v3 = valid ? blockPtr[(dd + 3) * SIMD_W + laneId] : 0.0f;
+                float4 diff = float4(
+                    tgQuery[dd]     - v0,
+                    tgQuery[dd + 1] - v1,
+                    tgQuery[dd + 2] - v2,
+                    tgQuery[dd + 3] - v3);
+                dist += dot(diff, diff);
+            }
+        } else {
+            for (uint dd = 0; dd < d; dd += 4) {
+                float v0 = valid ? blockPtr[(dd + 0) * SIMD_W + laneId] : 0.0f;
+                float v1 = valid ? blockPtr[(dd + 1) * SIMD_W + laneId] : 0.0f;
+                float v2 = valid ? blockPtr[(dd + 2) * SIMD_W + laneId] : 0.0f;
+                float v3 = valid ? blockPtr[(dd + 3) * SIMD_W + laneId] : 0.0f;
+                dist += tgQuery[dd]     * v0
+                      + tgQuery[dd + 1] * v1
+                      + tgQuery[dd + 2] * v2
+                      + tgQuery[dd + 3] * v3;
+            }
+        }
+
+        if (!valid) dist = sentinel;
+        int vi = valid ? (int)(idOff + vecInList) : -1;
+
+        bool better = want_min ? (dist < localDist[LOCAL_K-1])
+                               : (dist > localDist[LOCAL_K-1]);
+        if (localCount < LOCAL_K || better) {
+            uint pos = (localCount < LOCAL_K) ? localCount : LOCAL_K - 1;
+            localDist[pos] = dist;
+            localIdx [pos] = vi;
+            while (pos > 0) {
+                bool sw = want_min
+                    ? (localDist[pos] < localDist[pos-1] || (localDist[pos] == localDist[pos-1] && localIdx[pos] < localIdx[pos-1]))
+                    : (localDist[pos] > localDist[pos-1] || (localDist[pos] == localDist[pos-1] && localIdx[pos] < localIdx[pos-1]));
+                if (!sw) break;
+                float td = localDist[pos]; localDist[pos] = localDist[pos-1]; localDist[pos-1] = td;
+                int   ti = localIdx [pos]; localIdx [pos] = localIdx [pos-1]; localIdx [pos-1] = ti;
+                pos--;
+            }
+            if (localCount < LOCAL_K) localCount++;
+        }
+    }
+
+    constexpr uint CAND = TG_SIZE * LOCAL_K; // 1024
+    threadgroup float tgDist[CAND];
+    threadgroup int   tgIdx [CAND];
+
+    for (uint i = 0; i < LOCAL_K; i++) {
+        tgDist[tid * LOCAL_K + i] = (i < localCount) ? localDist[i] : sentinel;
+        tgIdx [tid * LOCAL_K + i] = (i < localCount) ? localIdx [i] : -1;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint k2 = 2; k2 <= CAND; k2 *= 2) {
+        for (uint j = k2 >> 1; j > 0; j >>= 1) {
+            for (uint idx = tid; idx < CAND; idx += TG_SIZE) {
+                uint partner = idx ^ j;
+                if (partner < CAND && partner > idx) {
+                    bool ascending = ((idx & k2) == 0);
+                    bool pB = want_min
+                        ? (tgDist[partner] < tgDist[idx] || (tgDist[partner] == tgDist[idx] && tgIdx[partner] < tgIdx[idx]))
+                        : (tgDist[partner] > tgDist[idx] || (tgDist[partner] == tgDist[idx] && tgIdx[partner] < tgIdx[idx]));
+                    bool iB = want_min
+                        ? (tgDist[idx] < tgDist[partner] || (tgDist[idx] == tgDist[partner] && tgIdx[idx] < tgIdx[partner]))
+                        : (tgDist[idx] > tgDist[partner] || (tgDist[idx] == tgDist[partner] && tgIdx[idx] < tgIdx[partner]));
+                    if (ascending ? pB : iB) {
+                        float td = tgDist[idx]; tgDist[idx] = tgDist[partner]; tgDist[partner] = td;
+                        int   ti = tgIdx [idx]; tgIdx [idx] = tgIdx [partner]; tgIdx [partner] = ti;
+                    }
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+
+    uint kk = min(k, CAND);
+    for (uint i = tid; i < kk; i += TG_SIZE) {
+        int vi = tgIdx[i];
+        perListDist[outBase + i] = tgDist[i];
+        perListIdx [outBase + i] = (vi < 0) ? -1L : ids[vi];
+    }
+    for (uint i = tid; i < k - kk; i += TG_SIZE) {
+        perListDist[outBase + kk + i] = sentinel;
+        perListIdx [outBase + kk + i] = -1L;
     }
 }
 
 // ---- Pass 2: merge nprobe per-list results per query ----
 kernel void ivf_merge_lists(
-    device const float* perListDist  [[buffer(0)]],
-    device const int*   perListIdx   [[buffer(1)]],
-    device       float* outDistances [[buffer(2)]],
-    device       int*   outIndices   [[buffer(3)]],
-    device const uint*  params       [[buffer(4)]],
+    device const float*      perListDist  [[buffer(0)]],
+    device const long*  perListIdx   [[buffer(1)]],
+    device       float*      outDistances [[buffer(2)]],
+    device       long*  outIndices   [[buffer(3)]],
+    device const uint*       params       [[buffer(4)]],
     uint qi  [[threadgroup_position_in_grid]],
     uint tid [[thread_position_in_threadgroup]]
 ) {
@@ -902,8 +1078,8 @@ kernel void ivf_merge_lists(
     uint fillCount = min(totalCand, MAX_CAND);
     uint inputBase = qi * nprobe * k;
 
-    threadgroup float tgDist[MAX_CAND];
-    threadgroup int   tgIdx [MAX_CAND];
+    threadgroup float     tgDist[MAX_CAND];
+    threadgroup long tgIdx [MAX_CAND];
 
     for (uint i = tid; i < fillCount; i += TG_SIZE) {
         tgDist[i] = perListDist[inputBase + i];
@@ -911,15 +1087,14 @@ kernel void ivf_merge_lists(
     }
     for (uint i = tid + fillCount; i < MAX_CAND; i += TG_SIZE) {
         tgDist[i] = sentinel;
-        tgIdx [i] = -1;
+        tgIdx [i] = -1L;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Overflow: if nprobe*k > MAX_CAND, insert remaining candidates.
     if (totalCand > MAX_CAND) {
         for (uint i = MAX_CAND + tid; i < totalCand; i += TG_SIZE) {
-            float d = perListDist[inputBase + i];
-            int   v = perListIdx [inputBase + i];
+            float     d = perListDist[inputBase + i];
+            long v = perListIdx [inputBase + i];
             if (v < 0) continue;
             bool better = want_min ? (d < tgDist[MAX_CAND - 1])
                                    : (d > tgDist[MAX_CAND - 1]);
@@ -944,8 +1119,8 @@ kernel void ivf_merge_lists(
                         ? (tgDist[idx] < tgDist[partner] || (tgDist[idx] == tgDist[partner] && tgIdx[idx] < tgIdx[partner]))
                         : (tgDist[idx] > tgDist[partner] || (tgDist[idx] == tgDist[partner] && tgIdx[idx] < tgIdx[partner]));
                     if (ascending ? pB : iB) {
-                        float td = tgDist[idx]; tgDist[idx] = tgDist[partner]; tgDist[partner] = td;
-                        int   ti = tgIdx [idx]; tgIdx [idx] = tgIdx [partner]; tgIdx [partner] = ti;
+                        float     td = tgDist[idx]; tgDist[idx] = tgDist[partner]; tgDist[partner] = td;
+                        long ti = tgIdx [idx]; tgIdx [idx] = tgIdx [partner]; tgIdx [partner] = ti;
                     }
                 }
             }
@@ -960,7 +1135,7 @@ kernel void ivf_merge_lists(
     }
     for (uint i = tid; i < k - kk; i += TG_SIZE) {
         outDistances[qi * k + kk + i] = sentinel;
-        outIndices  [qi * k + kk + i] = -1;
+        outIndices  [qi * k + kk + i] = -1L;
     }
 }
 

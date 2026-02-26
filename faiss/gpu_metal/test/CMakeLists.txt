@@ -25,3 +25,40 @@ set_target_properties(TestMetalIndexFlat PROPERTIES
     OBJCXX_STANDARD_REQUIRED ON
 )
 gtest_discover_tests(TestMetalIndexFlat)
+
+add_executable(TestMetalIndexIVFFlat TestMetalIndexIVFFlat.mm)
+target_link_libraries(TestMetalIndexIVFFlat PRIVATE
+    faiss_metal
+    faiss
+    GTest::gtest_main
+)
+target_include_directories(TestMetalIndexIVFFlat PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../..
+)
+set_target_properties(TestMetalIndexIVFFlat PROPERTIES
+    OBJCXX_STANDARD 17
+    OBJCXX_STANDARD_REQUIRED ON
+)
+gtest_discover_tests(TestMetalIndexIVFFlat)
+
+add_executable(PerfMetalIvfVsCpu PerfMetalIvfVsCpu.mm)
+target_link_libraries(PerfMetalIvfVsCpu PRIVATE
+  faiss_metal
+  faiss
+)
+target_include_directories(PerfMetalIvfVsCpu PRIVATE
+  ${PROJECT_SOURCE_DIR}
+)
+
+# Temporary CPU vs Metal benchmark (run from Xcode or command line)
+add_executable(PerfMetalVsCpu PerfMetalVsCpu.mm)
+target_link_libraries(PerfMetalVsCpu PRIVATE faiss_metal faiss)
+target_include_directories(PerfMetalVsCpu PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../..
+)
+set_target_properties(PerfMetalVsCpu PROPERTIES
+    OBJCXX_STANDARD 17
+    OBJCXX_STANDARD_REQUIRED ON
+)
