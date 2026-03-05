@@ -12,6 +12,7 @@ set(FAISS_METAL_SRC
   MetalStub.mm
   MetalResources.mm
   MetalIndex.mm
+  MetalKernels.mm
   MetalDistance.mm
   impl/MetalIVFFlat.mm
   MetalFlatKernels.mm
