@@ -135,7 +135,7 @@ TEST_F(TestMetalIndexFlat, L2_AddAndSearch) {
 }
 
 TEST_F(TestMetalIndexFlat, L2_LargeK) {
-    // Exercise heap-based top-k variant (k=512 -> topk_heap_512)
+    // Exercise large-k top-k variant (k=512 -> topk_threadgroup_512)
     const int dim = 32;
     const int numVecs = 600;
     const int numQuery = 4;
@@ -164,7 +164,7 @@ TEST_F(TestMetalIndexFlat, L2_LargeK) {
 }
 
 TEST_F(TestMetalIndexFlat, L2_MaxK) {
-    // Exercise largest variant (k=2048 -> topk_heap_2048)
+    // Exercise largest variant (k=2048 -> topk_threadgroup_2048)
     const int dim = 16;
     const int numVecs = 2500;
     const int numQuery = 2;
