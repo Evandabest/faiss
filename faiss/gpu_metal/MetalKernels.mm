@@ -69,15 +69,16 @@ static NSString* loadMSLSource() {
     return nil;
 }
 
-static const char* kHeapNames[] = {
-        "topk_heap_32",   "topk_heap_64",   "topk_heap_128",
-        "topk_heap_256",  "topk_heap_512",  "topk_heap_1024",
-        "topk_heap_2048"};
-
 static const char* kThreadgroupNames[] = {
         "topk_threadgroup_32",  "topk_threadgroup_64",
         "topk_threadgroup_128", "topk_threadgroup_256",
         "topk_threadgroup_512", "topk_threadgroup_1024",
+        "topk_threadgroup_2048"};
+
+static const char* kFusedDistTopKNames[] = {
+        "fused_dist_topk_32",  "fused_dist_topk_64",
+        "fused_dist_topk_128", "fused_dist_topk_256",
+        "fused_dist_topk_512", "fused_dist_topk_1024",
         nullptr};
 
 static const char* kBitonicMergeNames[] = {
@@ -85,12 +86,6 @@ static const char* kBitonicMergeNames[] = {
         "topk_merge_two_sorted_128", "topk_merge_two_sorted_256",
         "topk_merge_two_sorted_512", "topk_merge_two_sorted_1024",
         nullptr};
-
-static const char* kMergePairNames[] = {
-        "topk_merge_pair_32",  "topk_merge_pair_64",
-        "topk_merge_pair_128", "topk_merge_pair_256",
-        "topk_merge_pair_512", "topk_merge_pair_1024",
-        "topk_merge_pair_2048"};
 
 } // namespace
 
@@ -165,10 +160,10 @@ void MetalKernels::encodeL2SquaredMatrix(
     [enc setBuffer:distances offset:0              atIndex:2];
     uint32_t args[3] = {(uint32_t)nq, (uint32_t)nb, (uint32_t)d};
     [enc setBytes:args length:sizeof(args) atIndex:3];
-    const NSUInteger w = 16, h = 16;
-    MTLSize grid = MTLSizeMake(((NSUInteger)nb + w - 1) / w,
-                                ((NSUInteger)nq + h - 1) / h, 1);
-    [enc dispatchThreadgroups:grid threadsPerThreadgroup:MTLSizeMake(w, h, 1)];
+    const NSUInteger tileM = 32, tileN = 32;
+    MTLSize grid = MTLSizeMake(((NSUInteger)nb + tileN - 1) / tileN,
+                                ((NSUInteger)nq + tileM - 1) / tileM, 1);
+    [enc dispatchThreadgroups:grid threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
 }
 
 void MetalKernels::encodeIPMatrix(
@@ -184,10 +179,10 @@ void MetalKernels::encodeIPMatrix(
     [enc setBuffer:distances offset:0              atIndex:2];
     uint32_t args[3] = {(uint32_t)nq, (uint32_t)nb, (uint32_t)d};
     [enc setBytes:args length:sizeof(args) atIndex:3];
-    const NSUInteger w = 16, h = 16;
-    MTLSize grid = MTLSizeMake(((NSUInteger)nb + w - 1) / w,
-                                ((NSUInteger)nq + h - 1) / h, 1);
-    [enc dispatchThreadgroups:grid threadsPerThreadgroup:MTLSizeMake(w, h, 1)];
+    const NSUInteger tileM = 32, tileN = 32;
+    MTLSize grid = MTLSizeMake(((NSUInteger)nb + tileN - 1) / tileN,
+                                ((NSUInteger)nq + tileM - 1) / tileM, 1);
+    [enc dispatchThreadgroups:grid threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
 }
 
 void MetalKernels::encodeL2WithNorms(
@@ -229,26 +224,35 @@ void MetalKernels::encodeComputeNorms(
 }
 
 // ============================================================
-//  Top-k ops
+//  Fused distance + top-k
 // ============================================================
 
-void MetalKernels::encodeTopKHeap(
+void MetalKernels::encodeFusedDistTopK(
         id<MTLComputeCommandEncoder> enc,
-        id<MTLBuffer> distances,
+        id<MTLBuffer> queries,
+        id<MTLBuffer> vectors,
         id<MTLBuffer> outDist,
         id<MTLBuffer> outIdx,
-        int nq, int nb, int k, bool wantMin) {
+        int nq, int nb, int d, int k, bool isL2,
+        size_t queryByteOff, size_t vectorByteOff) {
     int vi = selectTopKVariantIndex(k);
-    [enc setComputePipelineState:pipeline(kHeapNames[vi])];
-    [enc setBuffer:distances offset:0 atIndex:0];
-    [enc setBuffer:outDist   offset:0 atIndex:1];
-    [enc setBuffer:outIdx    offset:0 atIndex:2];
-    uint32_t args[4] = {(uint32_t)nq, (uint32_t)nb, (uint32_t)k,
-                         wantMin ? 1u : 0u};
-    [enc setBytes:args length:sizeof(args) atIndex:3];
+    const char* name = kFusedDistTopKNames[vi];
+    if (!name) return;
+    [enc setComputePipelineState:pipeline(name)];
+    [enc setBuffer:queries offset:queryByteOff  atIndex:0];
+    [enc setBuffer:vectors offset:vectorByteOff atIndex:1];
+    [enc setBuffer:outDist offset:0             atIndex:2];
+    [enc setBuffer:outIdx  offset:0             atIndex:3];
+    uint32_t args[5] = {(uint32_t)nq, (uint32_t)nb, (uint32_t)d,
+                         (uint32_t)k, isL2 ? 0u : 1u};
+    [enc setBytes:args length:sizeof(args) atIndex:4];
     [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)nq, 1, 1)
-        threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 }
+
+// ============================================================
+//  Top-k ops
+// ============================================================
 
 void MetalKernels::encodeTopKThreadgroup(
         id<MTLComputeCommandEncoder> enc,
@@ -257,18 +261,15 @@ void MetalKernels::encodeTopKThreadgroup(
         id<MTLBuffer> outIdx,
         int nq, int nb, int k, bool wantMin) {
     int vi = selectTopKVariantIndex(k);
-    const char* name = kThreadgroupNames[vi];
-    if (!name) name = kHeapNames[vi];
-    [enc setComputePipelineState:pipeline(name)];
+    [enc setComputePipelineState:pipeline(kThreadgroupNames[vi])];
     [enc setBuffer:distances offset:0 atIndex:0];
     [enc setBuffer:outDist   offset:0 atIndex:1];
     [enc setBuffer:outIdx    offset:0 atIndex:2];
     uint32_t args[4] = {(uint32_t)nq, (uint32_t)nb, (uint32_t)k,
                          wantMin ? 1u : 0u};
     [enc setBytes:args length:sizeof(args) atIndex:3];
-    bool isTG = (kThreadgroupNames[vi] != nullptr);
     [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)nq, 1, 1)
-        threadsPerThreadgroup:MTLSizeMake(isTG ? 256 : 1, 1, 1)];
+        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 }
 
 // ============================================================
@@ -298,25 +299,6 @@ void MetalKernels::encodeMergeTwoSorted(
     [enc setBytes:args length:sizeof(args) atIndex:6];
     [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)nq, 1, 1)
         threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-}
-
-void MetalKernels::encodeMergePair(
-        id<MTLComputeCommandEncoder> enc,
-        id<MTLBuffer> inK, id<MTLBuffer> inV,
-        id<MTLBuffer> outK, id<MTLBuffer> outIdx,
-        int nq, int numTiles, int k, bool wantMin,
-        size_t inKOff, size_t inVOff) {
-    int vi = selectTopKVariantIndex(k);
-    [enc setComputePipelineState:pipeline(kMergePairNames[vi])];
-    [enc setBuffer:inK    offset:inKOff atIndex:0];
-    [enc setBuffer:inV    offset:inVOff atIndex:1];
-    [enc setBuffer:outK   offset:0      atIndex:2];
-    [enc setBuffer:outIdx offset:0      atIndex:3];
-    uint32_t args[4] = {(uint32_t)nq, (uint32_t)numTiles, (uint32_t)k,
-                         wantMin ? 1u : 0u};
-    [enc setBytes:args length:sizeof(args) atIndex:4];
-    [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)nq, 1, 1)
-        threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
 }
 
 void MetalKernels::encodeIncrementIndex(

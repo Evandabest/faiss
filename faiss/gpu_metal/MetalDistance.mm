@@ -61,12 +61,14 @@ bool runMetalDistance(
                    tileRows, tileCols);
     bool needsTiling = (tileCols < nb || tileRows < nq);
     int K_prime = needsTiling ? MetalKernels::computeKPrimeForTiling(k) : k;
-    bool useThreadgroup = needsTiling && K_prime <= 1024;
 
     id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
 
-    if (!needsTiling) {
+    if (!needsTiling && k <= 1024 && d <= 2048) {
+        K.encodeFusedDistTopK(enc, queries, vectors, outDistances, outIndices,
+                              nq, nb, d, k, isL2);
+    } else if (!needsTiling) {
         id<MTLBuffer> distMat = [device
                 newBufferWithLength:(size_t)nq * nb * sizeof(float)
                             options:MTLResourceStorageModeShared];
@@ -75,7 +77,7 @@ bool runMetalDistance(
         if (isL2) K.encodeL2SquaredMatrix(enc, queries, vectors, distMat, nq, nb, d);
         else      K.encodeIPMatrix(enc, queries, vectors, distMat, nq, nb, d);
 
-        K.encodeTopKHeap(enc, distMat, outDistances, outIndices, nq, nb, k, isL2);
+        K.encodeTopKThreadgroup(enc, distMat, outDistances, outIndices, nq, nb, k, isL2);
     } else {
         int numRowTiles = (nq + tileRows - 1) / tileRows;
         int numColTiles = (nb + tileCols - 1) / tileCols;
@@ -115,12 +117,8 @@ bool runMetalDistance(
                                     options:MTLResourceStorageModeShared];
                 if (!topDist || !topIdx) { [enc endEncoding]; return false; }
 
-                if (useThreadgroup)
-                    K.encodeTopKThreadgroup(enc, distTile, topDist, topIdx,
-                                            curQS, curVS, K_prime, isL2);
-                else
-                    K.encodeTopKHeap(enc, distTile, topDist, topIdx,
-                                     curQS, curVS, K_prime, isL2);
+                K.encodeTopKThreadgroup(enc, distTile, topDist, topIdx,
+                                        curQS, curVS, K_prime, isL2);
 
                 // Blit per-tile results into the combined buffer
                 [enc endEncoding];
@@ -420,9 +418,9 @@ bool runMetalIVFFlatFullSearch(
         K.encodeIPMatrix(enc, queries, centroids, distMatrixBuf,
                          nq, nlist, d);
 
-    // Step 2: coarse top-nprobe
-    K.encodeTopKHeap(enc, distMatrixBuf, coarseDistBuf, coarseIdxBuf,
-                     nq, nlist, nprobe, isL2);
+    // Step 2: coarse top-nprobe (parallel threadgroup select, covers up to k=2048)
+    K.encodeTopKThreadgroup(enc, distMatrixBuf, coarseDistBuf, coarseIdxBuf,
+                            nq, nlist, nprobe, isL2);
 
     // Step 3: IVF scan
     uint32_t sp[5] = {(uint32_t)nq, (uint32_t)d, (uint32_t)k,

@@ -71,17 +71,23 @@ public:
             int nb,
             int d);
 
-    // ---- Top-k ops (variant auto-selected from k) ----
+    // ---- Fused distance + top-k (single-pass, no intermediate matrix, k ≤ 1024) ----
 
-    void encodeTopKHeap(
+    void encodeFusedDistTopK(
             id<MTLComputeCommandEncoder> enc,
-            id<MTLBuffer> distances,
+            id<MTLBuffer> queries,
+            id<MTLBuffer> vectors,
             id<MTLBuffer> outDist,
             id<MTLBuffer> outIdx,
             int nq,
             int nb,
+            int d,
             int k,
-            bool wantMin);
+            bool isL2,
+            size_t queryByteOff = 0,
+            size_t vectorByteOff = 0);
+
+    // ---- Top-k ops (variant auto-selected from k, covers k ≤ 2048) ----
 
     void encodeTopKThreadgroup(
             id<MTLComputeCommandEncoder> enc,
@@ -112,19 +118,6 @@ public:
             size_t inBIdxOff = 0,
             size_t outOff = 0,
             size_t outIdxOff = 0);
-
-    void encodeMergePair(
-            id<MTLComputeCommandEncoder> enc,
-            id<MTLBuffer> inK,
-            id<MTLBuffer> inV,
-            id<MTLBuffer> outK,
-            id<MTLBuffer> outIdx,
-            int nq,
-            int numTiles,
-            int k,
-            bool wantMin,
-            size_t inKOff = 0,
-            size_t inVOff = 0);
 
     void encodeIncrementIndex(
             id<MTLComputeCommandEncoder> enc,
