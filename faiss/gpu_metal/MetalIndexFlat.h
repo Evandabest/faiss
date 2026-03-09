@@ -51,6 +51,10 @@ public:
     /// Copy vectors to a CPU IndexFlat (e.g. for index_metal_gpu_to_cpu).
     void copyTo(::faiss::IndexFlat* index) const;
 
+    /// Copy vectors from a CPU IndexFlat into this Metal index, replacing
+    /// any existing data (e.g. for index_cpu_to_metal_gpu).
+    void copyFrom(const ::faiss::IndexFlat* index);
+
 private:
     /// Ensures vector buffer can hold at least \p newNtotal vectors; grows
     /// buffer if necessary.

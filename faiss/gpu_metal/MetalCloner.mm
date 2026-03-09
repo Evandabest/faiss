@@ -57,10 +57,7 @@ faiss::Index* index_cpu_to_metal_gpu(
                 flat->metric_type,
                 flat->metric_arg,
                 config);
-        if (flat->ntotal > 0) {
-            const float* xb = flat->get_xb();
-            metal->add(flat->ntotal, xb);
-        }
+        metal->copyFrom(flat);
         return metal;
     }
 

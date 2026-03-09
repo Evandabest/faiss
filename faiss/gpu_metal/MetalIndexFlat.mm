@@ -175,5 +175,30 @@ void MetalIndexFlat::copyTo(faiss::IndexFlat* index) const {
     index->add(ntotal, host.data());
 }
 
+void MetalIndexFlat::copyFrom(const faiss::IndexFlat* index) {
+    FAISS_THROW_IF_NOT(index != nullptr);
+    FAISS_THROW_IF_NOT(index->d == d);
+    FAISS_THROW_IF_NOT(index->metric_type == metric_type);
+
+    reset();
+
+    if (index->ntotal == 0) {
+        return;
+    }
+
+    const idx_t n = index->ntotal;
+    ensureCapacity(n);
+
+    const float* src = index->get_xb();
+    float* dst = (float*)[vectorsBuffer_ contents];
+    std::memcpy(dst, src, (size_t)n * (size_t)d * sizeof(float));
+
+    ids_.resize(n);
+    for (idx_t i = 0; i < n; ++i) {
+        ids_[i] = i;
+    }
+    ntotal = n;
+}
+
 } // namespace gpu_metal
 } // namespace faiss
