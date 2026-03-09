@@ -19,7 +19,7 @@
 namespace faiss {
 namespace gpu_metal {
 
-enum class IVFScanVariant { Standard, Small, Interleaved };
+enum class IVFScanVariant { Standard, Small, Interleaved, SQ8, FP16 };
 
 class MetalKernels {
 public:
@@ -159,7 +159,8 @@ public:
             id<MTLBuffer> paramsBuf,
             int nq,
             int nprobe,
-            id<MTLBuffer> ilCodesOffset = nil);
+            id<MTLBuffer> ilCodesOffset = nil,
+            id<MTLBuffer> sqTables = nil);
 
     void encodeIVFMergeLists(
             id<MTLComputeCommandEncoder> enc,

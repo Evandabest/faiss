@@ -15,9 +15,11 @@ set(FAISS_METAL_SRC
   MetalKernels.mm
   MetalDistance.mm
   impl/MetalIVFFlat.mm
+  impl/MetalIVFSQ.mm
   MetalFlatKernels.mm
   MetalIndexFlat.mm
   MetalIndexIVFFlat.mm
+  MetalIndexIVFScalarQuantizer.mm
   StandardMetalResources.mm
   MetalCloner.mm
   MetalPythonBridge.mm

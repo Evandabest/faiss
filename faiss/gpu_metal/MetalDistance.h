@@ -131,6 +131,35 @@ bool runMetalIVFFlatScan(
         id<MTLBuffer> interleavedCodes = nil,
         id<MTLBuffer> interleavedCodesOffset = nil);
 
+/// SQ quantizer type for IVF SQ scan.
+enum class MetalSQType { SQ8, FP16 };
+
+/// IVF Scalar Quantizer scan: scans SQ-encoded inverted lists on the GPU.
+///
+/// @param sqType       Quantizer type (SQ8 or FP16)
+/// @param sqTables     SQ decode tables buffer (SQ8: vmin[d] + vdiff[d] = 2*d
+///                     floats; nil for FP16)
+bool runMetalIVFSQScan(
+        id<MTLDevice> device,
+        id<MTLCommandQueue> queue,
+        id<MTLBuffer> queries,
+        id<MTLBuffer> codes,
+        id<MTLBuffer> ids,
+        id<MTLBuffer> listOffset,
+        id<MTLBuffer> listLength,
+        id<MTLBuffer> coarseAssign,
+        int nq,
+        int d,
+        int k,
+        int nprobe,
+        bool isL2,
+        MetalSQType sqType,
+        id<MTLBuffer> sqTables,
+        id<MTLBuffer> outDistances,
+        id<MTLBuffer> outIndices,
+        id<MTLBuffer> perListDistBuf,
+        id<MTLBuffer> perListIdxBuf);
+
 /// Compute ||v||² norms for each vector.  Result is written to normsBuf
 /// (nb float).  Useful for caching centroid norms across searches.
 bool runMetalComputeNorms(

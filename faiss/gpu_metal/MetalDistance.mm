@@ -506,6 +506,59 @@ bool runMetalIVFFlatScan(
 }
 
 // ============================================================
+//  runMetalIVFSQScan
+// ============================================================
+
+bool runMetalIVFSQScan(
+        id<MTLDevice> device, id<MTLCommandQueue> queue,
+        id<MTLBuffer> queries, id<MTLBuffer> codes, id<MTLBuffer> ids,
+        id<MTLBuffer> listOffset, id<MTLBuffer> listLength,
+        id<MTLBuffer> coarseAssign,
+        int nq, int d, int k, int nprobe, bool isL2,
+        MetalSQType sqType,
+        id<MTLBuffer> sqTables,
+        id<MTLBuffer> outDistances, id<MTLBuffer> outIndices,
+        id<MTLBuffer> perListDistBuf, id<MTLBuffer> perListIdxBuf) {
+    if (!device || !queue || !queries || !codes || !ids ||
+        !listOffset || !listLength || !coarseAssign ||
+        !outDistances || !outIndices ||
+        !perListDistBuf || !perListIdxBuf)
+        return false;
+    if (k <= 0 || nq <= 0 || nprobe <= 0) return false;
+    if (sqType == MetalSQType::SQ8 && !sqTables) return false;
+
+    MetalKernels& K = getMetalKernels(device);
+    if (!K.isValid()) return false;
+
+    IVFScanVariant variant = (sqType == MetalSQType::SQ8)
+                                 ? IVFScanVariant::SQ8
+                                 : IVFScanVariant::FP16;
+
+    uint32_t sp[5] = {(uint32_t)nq, (uint32_t)d, (uint32_t)k,
+                      (uint32_t)nprobe, isL2 ? 1u : 0u};
+    id<MTLBuffer> paramsBuf = [device newBufferWithBytes:sp length:sizeof(sp)
+                                                 options:MTLResourceStorageModeShared];
+    if (!paramsBuf) return false;
+
+    id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+
+    K.encodeIVFScanList(enc, variant, queries, codes,
+                        ids, listOffset, listLength, coarseAssign,
+                        perListDistBuf, perListIdxBuf, paramsBuf,
+                        nq, nprobe,
+                        nil /* ilCodesOffset */,
+                        sqTables);
+    K.encodeIVFMergeLists(enc, perListDistBuf, perListIdxBuf,
+                          outDistances, outIndices, paramsBuf, nq);
+
+    [enc endEncoding];
+    [cmdBuf commit];
+    [cmdBuf waitUntilCompleted];
+    return cmdBuf.status == MTLCommandBufferStatusCompleted;
+}
+
+// ============================================================
 //  runMetalComputeNorms
 // ============================================================
 
