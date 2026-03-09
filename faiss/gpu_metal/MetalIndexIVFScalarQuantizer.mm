@@ -18,6 +18,15 @@
 #include <limits>
 #include <vector>
 
+namespace {
+void floatToHalf(const float* src, uint16_t* dst, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        __fp16 h = (__fp16)src[i];
+        std::memcpy(&dst[i], &h, sizeof(uint16_t));
+    }
+}
+} // namespace
+
 namespace faiss {
 namespace gpu_metal {
 
@@ -125,17 +134,26 @@ void MetalIndexIVFScalarQuantizer::uploadCentroids_() const {
         return;
     }
     size_t nCentroids = (size_t)flatQ->ntotal;
-    size_t bytes = nCentroids * (size_t)d * sizeof(float);
+    const bool fp16 = config_.useFloat16CoarseQuantizer;
+    size_t elemSize = fp16 ? sizeof(uint16_t) : sizeof(float);
+    size_t bytes = nCentroids * (size_t)d * elemSize;
     id<MTLDevice> device = resources_->getDevice();
     if (!device) return;
 
     centroidBuf_ = [device newBufferWithLength:bytes
                                        options:MTLResourceStorageModeShared];
     if (centroidBuf_) {
-        std::memcpy([centroidBuf_ contents], flatQ->get_xb(), bytes);
+        const float* src = flatQ->get_xb();
+        if (fp16) {
+            floatToHalf(src,
+                        reinterpret_cast<uint16_t*>([centroidBuf_ contents]),
+                        nCentroids * (size_t)d);
+        } else {
+            std::memcpy([centroidBuf_ contents], src, bytes);
+        }
     }
 
-    if (centroidBuf_ && metric_type == METRIC_L2) {
+    if (centroidBuf_ && metric_type == METRIC_L2 && !fp16) {
         size_t normBytes = nCentroids * sizeof(float);
         centroidNormsBuf_ = [device newBufferWithLength:normBytes
                                                options:MTLResourceStorageModeShared];

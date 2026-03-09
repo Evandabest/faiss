@@ -25,6 +25,12 @@ struct MetalIndexConfig {
     /// Halves GPU memory usage at the cost of reduced precision.
     /// Only affects MetalIndexFlat vector storage; queries remain float32.
     bool useFloat16 = false;
+
+    /// Store IVF coarse-quantizer centroids as float16.
+    /// Reduces centroid buffer memory; coarse assignment runs through
+    /// fp16 distance kernels. Applies to MetalIndexIVFFlat and
+    /// MetalIndexIVFScalarQuantizer.
+    bool useFloat16CoarseQuantizer = false;
 };
 
 /// Base class for Metal-backed indexes. Mirrors faiss::gpu::GpuIndex.

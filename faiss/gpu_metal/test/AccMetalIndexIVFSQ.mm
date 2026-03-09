@@ -168,4 +168,74 @@ INSTANTIATE_TEST_SUITE_P(
                                faiss::ScalarQuantizer::QT_fp16,
                                faiss::METRIC_INNER_PRODUCT, 0.85f}));
 
+// ============================================================
+//  Float16 coarse quantizer tests
+// ============================================================
+
+TEST(AccMetalIndexIVFSQ_FP16Coarse, SQ8_L2) {
+    auto res = std::make_shared<faiss::gpu_metal::MetalResources>();
+    if (!res->isAvailable()) {
+        GTEST_SKIP() << "Metal not available";
+    }
+
+    const int dim = 64, nlist = 16, nb = 5000, nq = 50, k = 10;
+    std::vector<float> data(nb * dim), queries(nq * dim);
+    faiss::float_rand(data.data(), data.size(), 42);
+    faiss::float_rand(queries.data(), queries.size(), 1337);
+
+    auto cpuIdx = makeCpuIVFSQ(
+            dim, nlist, faiss::ScalarQuantizer::QT_8bit,
+            faiss::METRIC_L2, nb, data.data());
+    cpuIdx->add(nb, data.data());
+    cpuIdx->nprobe = 4;
+
+    std::vector<float> cpuD(nq * k);
+    std::vector<faiss::idx_t> cpuL(nq * k);
+    cpuIdx->search(nq, queries.data(), k, cpuD.data(), cpuL.data());
+
+    faiss::gpu_metal::MetalIndexConfig config;
+    config.useFloat16CoarseQuantizer = true;
+    faiss::gpu_metal::MetalIndexIVFScalarQuantizer metalIdx(
+            res, cpuIdx.get(), config);
+
+    std::vector<float> gpuD(nq * k);
+    std::vector<faiss::idx_t> gpuL(nq * k);
+    metalIdx.search(nq, queries.data(), k, gpuD.data(), gpuL.data());
+
+    expectRecall(nq, k, 0.80f, cpuL.data(), gpuL.data());
+}
+
+TEST(AccMetalIndexIVFSQ_FP16Coarse, FP16_IP) {
+    auto res = std::make_shared<faiss::gpu_metal::MetalResources>();
+    if (!res->isAvailable()) {
+        GTEST_SKIP() << "Metal not available";
+    }
+
+    const int dim = 64, nlist = 16, nb = 5000, nq = 50, k = 10;
+    std::vector<float> data(nb * dim), queries(nq * dim);
+    faiss::float_rand(data.data(), data.size(), 42);
+    faiss::float_rand(queries.data(), queries.size(), 1337);
+
+    auto cpuIdx = makeCpuIVFSQ(
+            dim, nlist, faiss::ScalarQuantizer::QT_fp16,
+            faiss::METRIC_INNER_PRODUCT, nb, data.data());
+    cpuIdx->add(nb, data.data());
+    cpuIdx->nprobe = 4;
+
+    std::vector<float> cpuD(nq * k);
+    std::vector<faiss::idx_t> cpuL(nq * k);
+    cpuIdx->search(nq, queries.data(), k, cpuD.data(), cpuL.data());
+
+    faiss::gpu_metal::MetalIndexConfig config;
+    config.useFloat16CoarseQuantizer = true;
+    faiss::gpu_metal::MetalIndexIVFScalarQuantizer metalIdx(
+            res, cpuIdx.get(), config);
+
+    std::vector<float> gpuD(nq * k);
+    std::vector<faiss::idx_t> gpuL(nq * k);
+    metalIdx.search(nq, queries.data(), k, gpuD.data(), gpuL.data());
+
+    expectRecall(nq, k, 0.85f, cpuL.data(), gpuL.data());
+}
+
 } // namespace

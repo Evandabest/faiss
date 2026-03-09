@@ -480,3 +480,106 @@ TEST_F(AccMetalIndexIVFFlat, RoundTripClone) {
     delete backCpu;
     delete metalRaw;
 }
+
+// ============================================================
+//  Float16 coarse quantizer tests
+// ============================================================
+
+TEST_F(AccMetalIndexIVFFlat, FP16CoarseL2) {
+    const int dim = 64;
+    const int nlist = 32;
+    const int nb = 5000;
+    const int nq = 50;
+    const int k = 10;
+    const int nprobe = 4;
+
+    std::vector<float> vecs((size_t)nb * dim);
+    std::vector<float> queries((size_t)nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 42);
+    faiss::float_rand(queries.data(), queries.size(), 1337);
+
+    auto cpuIdx = makeCpuIVFFlat(dim, nlist, faiss::METRIC_L2, nb, vecs.data());
+    cpuIdx->add(nb, vecs.data());
+    cpuIdx->nprobe = nprobe;
+
+    std::vector<float> cpuD((size_t)nq * k);
+    std::vector<faiss::idx_t> cpuL((size_t)nq * k);
+    cpuIdx->search(nq, queries.data(), k, cpuD.data(), cpuL.data());
+
+    faiss::gpu_metal::MetalIndexConfig config;
+    config.useFloat16CoarseQuantizer = true;
+    faiss::gpu_metal::MetalIndexIVFFlat metalIdx(
+            resources_, cpuIdx.get(), config);
+
+    std::vector<float> gpuD((size_t)nq * k);
+    std::vector<faiss::idx_t> gpuL((size_t)nq * k);
+    metalIdx.search(nq, queries.data(), k, gpuD.data(), gpuL.data());
+
+    expectRecall(nq, k, 0.85f, cpuL.data(), gpuL.data());
+}
+
+TEST_F(AccMetalIndexIVFFlat, FP16CoarseIP) {
+    const int dim = 64;
+    const int nlist = 32;
+    const int nb = 5000;
+    const int nq = 50;
+    const int k = 10;
+    const int nprobe = 4;
+
+    std::vector<float> vecs((size_t)nb * dim);
+    std::vector<float> queries((size_t)nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 42);
+    faiss::float_rand(queries.data(), queries.size(), 1337);
+
+    auto cpuIdx = makeCpuIVFFlat(dim, nlist, faiss::METRIC_INNER_PRODUCT, nb, vecs.data());
+    cpuIdx->add(nb, vecs.data());
+    cpuIdx->nprobe = nprobe;
+
+    std::vector<float> cpuD((size_t)nq * k);
+    std::vector<faiss::idx_t> cpuL((size_t)nq * k);
+    cpuIdx->search(nq, queries.data(), k, cpuD.data(), cpuL.data());
+
+    faiss::gpu_metal::MetalIndexConfig config;
+    config.useFloat16CoarseQuantizer = true;
+    faiss::gpu_metal::MetalIndexIVFFlat metalIdx(
+            resources_, cpuIdx.get(), config);
+
+    std::vector<float> gpuD((size_t)nq * k);
+    std::vector<faiss::idx_t> gpuL((size_t)nq * k);
+    metalIdx.search(nq, queries.data(), k, gpuD.data(), gpuL.data());
+
+    expectRecall(nq, k, 0.85f, cpuL.data(), gpuL.data());
+}
+
+TEST_F(AccMetalIndexIVFFlat, FP16CoarseD128) {
+    const int dim = 128;
+    const int nlist = 64;
+    const int nb = 10000;
+    const int nq = 100;
+    const int k = 20;
+    const int nprobe = 8;
+
+    std::vector<float> vecs((size_t)nb * dim);
+    std::vector<float> queries((size_t)nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 42);
+    faiss::float_rand(queries.data(), queries.size(), 1337);
+
+    auto cpuIdx = makeCpuIVFFlat(dim, nlist, faiss::METRIC_L2, nb, vecs.data());
+    cpuIdx->add(nb, vecs.data());
+    cpuIdx->nprobe = nprobe;
+
+    std::vector<float> cpuD((size_t)nq * k);
+    std::vector<faiss::idx_t> cpuL((size_t)nq * k);
+    cpuIdx->search(nq, queries.data(), k, cpuD.data(), cpuL.data());
+
+    faiss::gpu_metal::MetalIndexConfig config;
+    config.useFloat16CoarseQuantizer = true;
+    faiss::gpu_metal::MetalIndexIVFFlat metalIdx(
+            resources_, cpuIdx.get(), config);
+
+    std::vector<float> gpuD((size_t)nq * k);
+    std::vector<faiss::idx_t> gpuL((size_t)nq * k);
+    metalIdx.search(nq, queries.data(), k, gpuD.data(), gpuL.data());
+
+    expectRecall(nq, k, 0.85f, cpuL.data(), gpuL.data());
+}

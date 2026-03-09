@@ -225,7 +225,8 @@ bool runMetalIVFFlatFullSearch(
         id<MTLBuffer> centroidNormsBuf = nil,
         int avgListLen = 256,
         id<MTLBuffer> interleavedCodes = nil,
-        id<MTLBuffer> interleavedCodesOffset = nil);
+        id<MTLBuffer> interleavedCodesOffset = nil,
+        bool centroidsAreFP16 = false);
 
 // ============================================================
 //  Public brute-force k-NN on raw CPU pointers (mirrors CUDA bfKnn)

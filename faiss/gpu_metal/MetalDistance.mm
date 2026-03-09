@@ -715,7 +715,8 @@ bool runMetalIVFFlatFullSearch(
         id<MTLBuffer> centroidNormsBuf,
         int avgListLen,
         id<MTLBuffer> interleavedCodes,
-        id<MTLBuffer> interleavedCodesOffset) {
+        id<MTLBuffer> interleavedCodesOffset,
+        bool centroidsAreFP16) {
     if (!device || !queue || !queries || !centroids || !codes || !ids ||
         !listOffset || !listLength || !outDistances || !outIndices ||
         !perListDistBuf || !perListIdxBuf ||
@@ -736,16 +737,25 @@ bool runMetalIVFFlatFullSearch(
     id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
 
     // Step 1: coarse distance matrix
-    bool fusedL2 = isL2 && centroidNormsBuf != nil;
-    if (fusedL2)
-        K.encodeL2WithNorms(enc, queries, centroids, distMatrixBuf,
-                            centroidNormsBuf, nq, nlist, d);
-    else if (isL2)
-        K.encodeL2SquaredMatrix(enc, queries, centroids, distMatrixBuf,
-                                nq, nlist, d);
-    else
-        K.encodeIPMatrix(enc, queries, centroids, distMatrixBuf,
-                         nq, nlist, d);
+    if (centroidsAreFP16) {
+        if (isL2)
+            K.encodeL2SquaredMatrixFP16(enc, queries, centroids, distMatrixBuf,
+                                         nq, nlist, d);
+        else
+            K.encodeIPMatrixFP16(enc, queries, centroids, distMatrixBuf,
+                                  nq, nlist, d);
+    } else {
+        bool fusedL2 = isL2 && centroidNormsBuf != nil;
+        if (fusedL2)
+            K.encodeL2WithNorms(enc, queries, centroids, distMatrixBuf,
+                                centroidNormsBuf, nq, nlist, d);
+        else if (isL2)
+            K.encodeL2SquaredMatrix(enc, queries, centroids, distMatrixBuf,
+                                    nq, nlist, d);
+        else
+            K.encodeIPMatrix(enc, queries, centroids, distMatrixBuf,
+                             nq, nlist, d);
+    }
 
     // Step 2: coarse top-nprobe (parallel threadgroup select, covers up to k=2048)
     K.encodeTopKThreadgroup(enc, distMatrixBuf, coarseDistBuf, coarseIdxBuf,
