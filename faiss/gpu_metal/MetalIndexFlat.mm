@@ -15,6 +15,21 @@
 namespace faiss {
 namespace gpu_metal {
 
+static void floatToHalf(const float* src, uint16_t* dst, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        __fp16 h = (__fp16)src[i];
+        std::memcpy(&dst[i], &h, sizeof(uint16_t));
+    }
+}
+
+static void halfToFloat(const uint16_t* src, float* dst, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        __fp16 h;
+        std::memcpy(&h, &src[i], sizeof(uint16_t));
+        dst[i] = (float)h;
+    }
+}
+
 MetalIndexFlat::MetalIndexFlat(
         std::shared_ptr<MetalResources> resources,
         int dims,
@@ -22,6 +37,7 @@ MetalIndexFlat::MetalIndexFlat(
         float metricArg,
         MetalIndexConfig config)
         : MetalIndex(resources, dims, metric, metricArg, config),
+          useFloat16_(config.useFloat16),
           vectorsBuffer_(nil),
           capacityVecs_(0) {
     FAISS_THROW_IF_NOT(metric_type == METRIC_L2 || metric_type == METRIC_INNER_PRODUCT);
@@ -42,7 +58,7 @@ void MetalIndexFlat::ensureCapacity(idx_t newNtotal) {
     size_t newCap = (capacityVecs_ == 0)
             ? (size_t)newNtotal
             : std::max((size_t)newNtotal, capacityVecs_ * 2);
-    size_t newSize = newCap * (size_t)d * sizeof(float);
+    size_t newSize = newCap * (size_t)d * elementSize();
     id<MTLBuffer> newBuf =
             resources_->allocBuffer(newSize, MetalAllocType::FlatData);
     FAISS_THROW_IF_NOT_MSG(newBuf != nil, "MetalIndexFlat: failed to allocate buffer");
@@ -50,7 +66,7 @@ void MetalIndexFlat::ensureCapacity(idx_t newNtotal) {
         std::memcpy(
                 [newBuf contents],
                 [vectorsBuffer_ contents],
-                (size_t)ntotal * (size_t)d * sizeof(float));
+                (size_t)ntotal * (size_t)d * elementSize());
         resources_->deallocBuffer(vectorsBuffer_, MetalAllocType::FlatData);
     }
     vectorsBuffer_ = newBuf;
@@ -62,8 +78,15 @@ void MetalIndexFlat::add(idx_t n, const float* x) {
         return;
     }
     ensureCapacity(ntotal + n);
-    float* ptr = (float*)[vectorsBuffer_ contents];
-    std::memcpy(ptr + (size_t)ntotal * (size_t)d, x, (size_t)n * (size_t)d * sizeof(float));
+    size_t count = (size_t)n * (size_t)d;
+    size_t offset = (size_t)ntotal * (size_t)d;
+    if (useFloat16_) {
+        auto* dst = reinterpret_cast<uint16_t*>([vectorsBuffer_ contents]);
+        floatToHalf(x, dst + offset, count);
+    } else {
+        auto* dst = reinterpret_cast<float*>([vectorsBuffer_ contents]);
+        std::memcpy(dst + offset, x, count * sizeof(float));
+    }
     for (idx_t i = 0; i < n; ++i) {
         ids_.push_back(ntotal + i);
     }
@@ -76,8 +99,15 @@ void MetalIndexFlat::add_with_ids(idx_t n, const float* x, const idx_t* xids) {
     }
     FAISS_THROW_IF_NOT(xids != nullptr);
     ensureCapacity(ntotal + n);
-    float* ptr = (float*)[vectorsBuffer_ contents];
-    std::memcpy(ptr + (size_t)ntotal * (size_t)d, x, (size_t)n * (size_t)d * sizeof(float));
+    size_t count = (size_t)n * (size_t)d;
+    size_t offset = (size_t)ntotal * (size_t)d;
+    if (useFloat16_) {
+        auto* dst = reinterpret_cast<uint16_t*>([vectorsBuffer_ contents]);
+        floatToHalf(x, dst + offset, count);
+    } else {
+        auto* dst = reinterpret_cast<float*>([vectorsBuffer_ contents]);
+        std::memcpy(dst + offset, x, count * sizeof(float));
+    }
     for (idx_t i = 0; i < n; ++i) {
         ids_.push_back(xids[i]);
     }
@@ -132,18 +162,18 @@ void MetalIndexFlat::search(
     std::memcpy([queryBuf contents], x, queryBytes);
 
     const bool isL2 = (metric_type == METRIC_L2);
-    const bool ok = runFlatSearchGPU(
-            device,
-            queue,
-            queryBuf,
-            vectorsBuffer_,
-            (int)n,
-            (int)ntotal,
-            d,
-            (int)k,
-            isL2,
-            outDistBuf,
-            outIdxBuf);
+    bool ok;
+    if (useFloat16_) {
+        ok = runFlatSearchGPUFP16(
+                device, queue, queryBuf, vectorsBuffer_,
+                (int)n, (int)ntotal, d, (int)k, isL2,
+                outDistBuf, outIdxBuf);
+    } else {
+        ok = runFlatSearchGPU(
+                device, queue, queryBuf, vectorsBuffer_,
+                (int)n, (int)ntotal, d, (int)k, isL2,
+                outDistBuf, outIdxBuf);
+    }
 
     resources_->deallocBuffer(queryBuf, MetalAllocType::TemporaryMemoryBuffer);
     if (!ok) {
@@ -170,8 +200,15 @@ void MetalIndexFlat::copyTo(faiss::IndexFlat* index) const {
     if (ntotal == 0 || vectorsBuffer_ == nil) {
         return;
     }
-    std::vector<float> host((size_t)ntotal * (size_t)d);
-    std::memcpy(host.data(), [vectorsBuffer_ contents], host.size() * sizeof(float));
+    size_t count = (size_t)ntotal * (size_t)d;
+    std::vector<float> host(count);
+    if (useFloat16_) {
+        halfToFloat(
+                reinterpret_cast<const uint16_t*>([vectorsBuffer_ contents]),
+                host.data(), count);
+    } else {
+        std::memcpy(host.data(), [vectorsBuffer_ contents], count * sizeof(float));
+    }
     index->add(ntotal, host.data());
 }
 
@@ -190,8 +227,14 @@ void MetalIndexFlat::copyFrom(const faiss::IndexFlat* index) {
     ensureCapacity(n);
 
     const float* src = index->get_xb();
-    float* dst = (float*)[vectorsBuffer_ contents];
-    std::memcpy(dst, src, (size_t)n * (size_t)d * sizeof(float));
+    size_t count = (size_t)n * (size_t)d;
+    if (useFloat16_) {
+        floatToHalf(src,
+                    reinterpret_cast<uint16_t*>([vectorsBuffer_ contents]),
+                    count);
+    } else {
+        std::memcpy([vectorsBuffer_ contents], src, count * sizeof(float));
+    }
 
     ids_.resize(n);
     for (idx_t i = 0; i < n; ++i) {
@@ -211,8 +254,15 @@ void MetalIndexFlat::reconstruct_n(idx_t i0, idx_t ni, float* recons) const {
             (size_t)i0, (size_t)(i0 + ni), (size_t)ntotal);
     if (ni == 0) return;
     FAISS_THROW_IF_NOT(vectorsBuffer_ != nil);
-    const float* src = (const float*)[vectorsBuffer_ contents];
-    std::memcpy(recons, src + (size_t)i0 * (size_t)d, (size_t)ni * (size_t)d * sizeof(float));
+    size_t count = (size_t)ni * (size_t)d;
+    size_t offset = (size_t)i0 * (size_t)d;
+    if (useFloat16_) {
+        const auto* src = reinterpret_cast<const uint16_t*>([vectorsBuffer_ contents]);
+        halfToFloat(src + offset, recons, count);
+    } else {
+        const auto* src = reinterpret_cast<const float*>([vectorsBuffer_ contents]);
+        std::memcpy(recons, src + offset, count * sizeof(float));
+    }
 }
 
 } // namespace gpu_metal

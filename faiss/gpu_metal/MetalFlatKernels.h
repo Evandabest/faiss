@@ -39,5 +39,19 @@ bool runFlatSearchGPU(
         id<MTLBuffer> outDistances, // (nq * k) float
         id<MTLBuffer> outIndices);  // (nq * k) int32
 
+/// Float16 variant: vectors buffer is half-precision.
+bool runFlatSearchGPUFP16(
+        id<MTLDevice> device,
+        id<MTLCommandQueue> queue,
+        id<MTLBuffer> queries,
+        id<MTLBuffer> vectors,
+        int nq,
+        int nb,
+        int d,
+        int k,
+        bool isL2,
+        id<MTLBuffer> outDistances,
+        id<MTLBuffer> outIndices);
+
 } // namespace gpu_metal
 } // namespace faiss

@@ -64,6 +64,21 @@ bool runMetalDistance(
         id<MTLBuffer> outDistances,
         id<MTLBuffer> outIndices);
 
+/// Float16 variant: vectors buffer contains half-precision data.
+/// Queries remain float32. Computation is float32; only storage is fp16.
+bool runMetalDistanceFP16(
+        id<MTLDevice> device,
+        id<MTLCommandQueue> queue,
+        id<MTLBuffer> queries,
+        id<MTLBuffer> vectors,
+        int nq,
+        int nb,
+        int d,
+        int k,
+        bool isL2,
+        id<MTLBuffer> outDistances,
+        id<MTLBuffer> outIndices);
+
 /// L2 distance computation (convenience wrapper).
 /// Computes L2 squared distance and returns top-k results.
 bool runMetalL2Distance(

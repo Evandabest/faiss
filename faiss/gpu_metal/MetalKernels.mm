@@ -81,6 +81,12 @@ static const char* kFusedDistTopKNames[] = {
         "fused_dist_topk_512", "fused_dist_topk_1024",
         nullptr};
 
+static const char* kFusedDistTopKFP16Names[] = {
+        "fused_dist_topk_fp16_32",  "fused_dist_topk_fp16_64",
+        "fused_dist_topk_fp16_128", "fused_dist_topk_fp16_256",
+        "fused_dist_topk_fp16_512", "fused_dist_topk_fp16_1024",
+        nullptr};
+
 static const char* kBitonicMergeNames[] = {
         "topk_merge_two_sorted_32",  "topk_merge_two_sorted_64",
         "topk_merge_two_sorted_128", "topk_merge_two_sorted_256",
@@ -237,6 +243,71 @@ void MetalKernels::encodeFusedDistTopK(
         size_t queryByteOff, size_t vectorByteOff) {
     int vi = selectTopKVariantIndex(k);
     const char* name = kFusedDistTopKNames[vi];
+    if (!name) return;
+    [enc setComputePipelineState:pipeline(name)];
+    [enc setBuffer:queries offset:queryByteOff  atIndex:0];
+    [enc setBuffer:vectors offset:vectorByteOff atIndex:1];
+    [enc setBuffer:outDist offset:0             atIndex:2];
+    [enc setBuffer:outIdx  offset:0             atIndex:3];
+    uint32_t args[5] = {(uint32_t)nq, (uint32_t)nb, (uint32_t)d,
+                         (uint32_t)k, isL2 ? 0u : 1u};
+    [enc setBytes:args length:sizeof(args) atIndex:4];
+    [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)nq, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+}
+
+// ============================================================
+//  Float16 vector distance + fused top-k
+// ============================================================
+
+void MetalKernels::encodeL2SquaredMatrixFP16(
+        id<MTLComputeCommandEncoder> enc,
+        id<MTLBuffer> queries,
+        id<MTLBuffer> vectors,
+        id<MTLBuffer> distances,
+        int nq, int nb, int d,
+        size_t queryByteOff, size_t vectorByteOff) {
+    [enc setComputePipelineState:pipeline("l2_squared_matrix_fp16")];
+    [enc setBuffer:queries   offset:queryByteOff  atIndex:0];
+    [enc setBuffer:vectors   offset:vectorByteOff atIndex:1];
+    [enc setBuffer:distances offset:0              atIndex:2];
+    uint32_t args[3] = {(uint32_t)nq, (uint32_t)nb, (uint32_t)d};
+    [enc setBytes:args length:sizeof(args) atIndex:3];
+    const NSUInteger tileM = 32, tileN = 32;
+    MTLSize grid = MTLSizeMake(((NSUInteger)nb + tileN - 1) / tileN,
+                                ((NSUInteger)nq + tileM - 1) / tileM, 1);
+    [enc dispatchThreadgroups:grid threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+}
+
+void MetalKernels::encodeIPMatrixFP16(
+        id<MTLComputeCommandEncoder> enc,
+        id<MTLBuffer> queries,
+        id<MTLBuffer> vectors,
+        id<MTLBuffer> distances,
+        int nq, int nb, int d,
+        size_t queryByteOff, size_t vectorByteOff) {
+    [enc setComputePipelineState:pipeline("ip_matrix_fp16")];
+    [enc setBuffer:queries   offset:queryByteOff  atIndex:0];
+    [enc setBuffer:vectors   offset:vectorByteOff atIndex:1];
+    [enc setBuffer:distances offset:0              atIndex:2];
+    uint32_t args[3] = {(uint32_t)nq, (uint32_t)nb, (uint32_t)d};
+    [enc setBytes:args length:sizeof(args) atIndex:3];
+    const NSUInteger tileM = 32, tileN = 32;
+    MTLSize grid = MTLSizeMake(((NSUInteger)nb + tileN - 1) / tileN,
+                                ((NSUInteger)nq + tileM - 1) / tileM, 1);
+    [enc dispatchThreadgroups:grid threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+}
+
+void MetalKernels::encodeFusedDistTopKFP16(
+        id<MTLComputeCommandEncoder> enc,
+        id<MTLBuffer> queries,
+        id<MTLBuffer> vectors,
+        id<MTLBuffer> outDist,
+        id<MTLBuffer> outIdx,
+        int nq, int nb, int d, int k, bool isL2,
+        size_t queryByteOff, size_t vectorByteOff) {
+    int vi = selectTopKVariantIndex(k);
+    const char* name = kFusedDistTopKFP16Names[vi];
     if (!name) return;
     [enc setComputePipelineState:pipeline(name)];
     [enc setBuffer:queries offset:queryByteOff  atIndex:0];

@@ -61,17 +61,20 @@ public:
     /// Reconstruct n contiguous stored vectors starting at i0.
     void reconstruct_n(idx_t i0, idx_t ni, float* recons) const override;
 
+    /// Whether this index stores vectors as float16 (half).
+    bool useFloat16() const { return useFloat16_; }
+
 private:
-    /// Ensures vector buffer can hold at least \p newNtotal vectors; grows
-    /// buffer if necessary.
     void ensureCapacity(idx_t newNtotal);
 
-    /// Vector storage (row-major, ntotal * d floats). Nil when empty.
+    /// Bytes per stored vector component (2 for half, 4 for float).
+    size_t elementSize() const { return useFloat16_ ? 2 : 4; }
+
+    bool useFloat16_;
+
+    /// Vector storage (row-major). float32 or half depending on useFloat16_.
     id<MTLBuffer> vectorsBuffer_;
-    /// Capacity of vectorsBuffer_ in number of vectors (0 if buffer is nil).
     size_t capacityVecs_;
-    /// Stored ids for each vector (size ntotal). Used to map internal indices
-    /// to user-facing ids in search.
     std::vector<idx_t> ids_;
 };
 

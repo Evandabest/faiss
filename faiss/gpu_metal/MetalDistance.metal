@@ -140,6 +140,246 @@ kernel void ip_matrix(
     if (r1 < nq && c1 < nb) distances[r1 * nb + c1] = acc11;
 }
 
+// ============================================================
+//  Float16 vector variants: queries are float32, vectors are half
+// ============================================================
+
+kernel void l2_squared_matrix_fp16(
+    device const float* queries [[buffer(0)]],
+    device const half*  vectors [[buffer(1)]],
+    device float* distances [[buffer(2)]],
+    device const uint* params [[buffer(3)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 ltid [[thread_position_in_threadgroup]]
+) {
+    constexpr uint TILE_M = 32;
+    constexpr uint TILE_N = 32;
+    constexpr uint TILE_K = 16;
+    constexpr uint TG_THREADS = 256;
+
+    uint nq = params[0], nb = params[1], d = params[2];
+    uint row0 = tgid.y * TILE_M;
+    uint col0 = tgid.x * TILE_N;
+    uint ty = ltid.y, tx = ltid.x;
+    uint tid = ty * 16 + tx;
+
+    float acc00 = 0.0f, acc01 = 0.0f, acc10 = 0.0f, acc11 = 0.0f;
+
+    threadgroup float tgQ[TILE_M * TILE_K];
+    threadgroup float tgV[TILE_N * TILE_K];
+
+    for (uint dk = 0; dk < d; dk += TILE_K) {
+        uint kLen = min(TILE_K, d - dk);
+        for (uint i = tid; i < TILE_M * TILE_K; i += TG_THREADS) {
+            uint mr = i / TILE_K, mk = i % TILE_K;
+            uint gRow = row0 + mr;
+            tgQ[i] = (gRow < nq && mk < kLen) ? queries[gRow * d + dk + mk] : 0.0f;
+        }
+        for (uint i = tid; i < TILE_N * TILE_K; i += TG_THREADS) {
+            uint mr = i / TILE_K, mk = i % TILE_K;
+            uint gCol = col0 + mr;
+            tgV[i] = (gCol < nb && mk < kLen) ? float(vectors[gCol * d + dk + mk]) : 0.0f;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint kk = 0; kk < TILE_K; kk++) {
+            float q0 = tgQ[(ty * 2) * TILE_K + kk];
+            float q1 = tgQ[(ty * 2 + 1) * TILE_K + kk];
+            float v0 = tgV[(tx * 2) * TILE_K + kk];
+            float v1 = tgV[(tx * 2 + 1) * TILE_K + kk];
+            float d00 = q0 - v0; acc00 += d00 * d00;
+            float d01 = q0 - v1; acc01 += d01 * d01;
+            float d10 = q1 - v0; acc10 += d10 * d10;
+            float d11 = q1 - v1; acc11 += d11 * d11;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    uint r0 = row0 + ty * 2, r1 = r0 + 1;
+    uint c0 = col0 + tx * 2, c1 = c0 + 1;
+    if (r0 < nq && c0 < nb) distances[r0 * nb + c0] = acc00;
+    if (r0 < nq && c1 < nb) distances[r0 * nb + c1] = acc01;
+    if (r1 < nq && c0 < nb) distances[r1 * nb + c0] = acc10;
+    if (r1 < nq && c1 < nb) distances[r1 * nb + c1] = acc11;
+}
+
+kernel void ip_matrix_fp16(
+    device const float* queries [[buffer(0)]],
+    device const half*  vectors [[buffer(1)]],
+    device float* distances [[buffer(2)]],
+    device const uint* params [[buffer(3)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint2 ltid [[thread_position_in_threadgroup]]
+) {
+    constexpr uint TILE_M = 32;
+    constexpr uint TILE_N = 32;
+    constexpr uint TILE_K = 16;
+    constexpr uint TG_THREADS = 256;
+
+    uint nq = params[0], nb = params[1], d = params[2];
+    uint row0 = tgid.y * TILE_M;
+    uint col0 = tgid.x * TILE_N;
+    uint ty = ltid.y, tx = ltid.x;
+    uint tid = ty * 16 + tx;
+
+    float acc00 = 0.0f, acc01 = 0.0f, acc10 = 0.0f, acc11 = 0.0f;
+
+    threadgroup float tgQ[TILE_M * TILE_K];
+    threadgroup float tgV[TILE_N * TILE_K];
+
+    for (uint dk = 0; dk < d; dk += TILE_K) {
+        uint kLen = min(TILE_K, d - dk);
+        for (uint i = tid; i < TILE_M * TILE_K; i += TG_THREADS) {
+            uint mr = i / TILE_K, mk = i % TILE_K;
+            uint gRow = row0 + mr;
+            tgQ[i] = (gRow < nq && mk < kLen) ? queries[gRow * d + dk + mk] : 0.0f;
+        }
+        for (uint i = tid; i < TILE_N * TILE_K; i += TG_THREADS) {
+            uint mr = i / TILE_K, mk = i % TILE_K;
+            uint gCol = col0 + mr;
+            tgV[i] = (gCol < nb && mk < kLen) ? float(vectors[gCol * d + dk + mk]) : 0.0f;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint kk = 0; kk < TILE_K; kk++) {
+            float q0 = tgQ[(ty * 2) * TILE_K + kk];
+            float q1 = tgQ[(ty * 2 + 1) * TILE_K + kk];
+            float v0 = tgV[(tx * 2) * TILE_K + kk];
+            float v1 = tgV[(tx * 2 + 1) * TILE_K + kk];
+            acc00 += q0 * v0; acc01 += q0 * v1;
+            acc10 += q1 * v0; acc11 += q1 * v1;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    uint r0 = row0 + ty * 2, r1 = r0 + 1;
+    uint c0 = col0 + tx * 2, c1 = c0 + 1;
+    if (r0 < nq && c0 < nb) distances[r0 * nb + c0] = acc00;
+    if (r0 < nq && c1 < nb) distances[r0 * nb + c1] = acc01;
+    if (r1 < nq && c0 < nb) distances[r1 * nb + c0] = acc10;
+    if (r1 < nq && c1 < nb) distances[r1 * nb + c1] = acc11;
+}
+
+#define FUSED_DIST_TOPK_FP16_VARIANT(K) \
+kernel void fused_dist_topk_fp16_##K( \
+    device const float* queries [[buffer(0)]], \
+    device const half*  vectors [[buffer(1)]], \
+    device float* outDistances [[buffer(2)]], \
+    device int* outIndices [[buffer(3)]], \
+    device const uint* params [[buffer(4)]], \
+    uint qi [[threadgroup_position_in_grid]], \
+    uint tid [[thread_position_in_threadgroup]] \
+) { \
+    constexpr uint TG_SIZE = 256; \
+    constexpr uint R = 4; \
+    constexpr uint CANDIDATES = TG_SIZE * R; \
+    constexpr uint MAX_DIM = 2048; \
+    \
+    threadgroup float tgQ[MAX_DIM]; \
+    threadgroup float tgDist[CANDIDATES]; \
+    threadgroup int tgIdx[CANDIDATES]; \
+    \
+    uint nq = params[0], nb = params[1], d = params[2]; \
+    uint k = params[3], metric = params[4]; \
+    bool want_min = (metric == 0); \
+    if (qi >= nq || k == 0) return; \
+    uint kk = min(k, nb); \
+    uint K_out = min((uint)K, kk); \
+    \
+    for (uint i = tid; i < d; i += TG_SIZE) \
+        tgQ[i] = queries[qi * d + i]; \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    \
+    float localDist[R]; \
+    int localIdx[R]; \
+    uint localCount = 0; \
+    \
+    for (uint j = tid; j < nb; j += TG_SIZE) { \
+        const device half* vec = vectors + j * d; \
+        float dist = 0.0f; \
+        if (metric == 0) { \
+            for (uint dd = 0; dd < d; dd++) { \
+                float diff = tgQ[dd] - float(vec[dd]); \
+                dist += diff * diff; \
+            } \
+        } else { \
+            for (uint dd = 0; dd < d; dd++) \
+                dist += tgQ[dd] * float(vec[dd]); \
+        } \
+        \
+        if (localCount < R) { \
+            uint pos = localCount; \
+            while (pos > 0 && ((want_min && dist < localDist[pos-1]) || (!want_min && dist > localDist[pos-1]))) { \
+                localDist[pos] = localDist[pos-1]; \
+                localIdx[pos] = localIdx[pos-1]; \
+                pos--; \
+            } \
+            localDist[pos] = dist; \
+            localIdx[pos] = (int)j; \
+            localCount++; \
+        } else { \
+            bool better = want_min ? (dist < localDist[R-1]) : (dist > localDist[R-1]); \
+            if (better) { \
+                uint pos = R - 1; \
+                while (pos > 0 && ((want_min && dist < localDist[pos-1]) || (!want_min && dist > localDist[pos-1]))) { \
+                    localDist[pos] = localDist[pos-1]; \
+                    localIdx[pos] = localIdx[pos-1]; \
+                    pos--; \
+                } \
+                localDist[pos] = dist; \
+                localIdx[pos] = (int)j; \
+            } \
+        } \
+    } \
+    \
+    for (uint i = 0; i < R; i++) { \
+        uint idx = tid * R + i; \
+        if (i < localCount) { \
+            tgDist[idx] = localDist[i]; \
+            tgIdx[idx] = localIdx[i]; \
+        } else { \
+            tgDist[idx] = want_min ? 1e38f : -1e38f; \
+            tgIdx[idx] = -1; \
+        } \
+    } \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    \
+    for (uint k2 = 2; k2 <= CANDIDATES; k2 *= 2) { \
+        for (uint j = k2 >> 1; j > 0; j >>= 1) { \
+            for (uint idx = tid; idx < CANDIDATES; idx += TG_SIZE) { \
+                uint partner = idx ^ j; \
+                if (partner < CANDIDATES && partner > idx) { \
+                    bool ascending = ((idx & k2) == 0); \
+                    bool partnerBetter = want_min \
+                        ? (tgDist[partner] < tgDist[idx] || (tgDist[partner] == tgDist[idx] && tgIdx[partner] < tgIdx[idx])) \
+                        : (tgDist[partner] > tgDist[idx] || (tgDist[partner] == tgDist[idx] && tgIdx[partner] < tgIdx[idx])); \
+                    bool idxBetter = want_min \
+                        ? (tgDist[idx] < tgDist[partner] || (tgDist[idx] == tgDist[partner] && tgIdx[idx] < tgIdx[partner])) \
+                        : (tgDist[idx] > tgDist[partner] || (tgDist[idx] == tgDist[partner] && tgIdx[idx] < tgIdx[partner])); \
+                    bool swap = ascending ? partnerBetter : idxBetter; \
+                    if (swap) { \
+                        float td = tgDist[idx]; tgDist[idx] = tgDist[partner]; tgDist[partner] = td; \
+                        int ti = tgIdx[idx]; tgIdx[idx] = tgIdx[partner]; tgIdx[partner] = ti; \
+                    } \
+                } \
+            } \
+            threadgroup_barrier(mem_flags::mem_threadgroup); \
+        } \
+    } \
+    \
+    for (uint i = tid; i < K_out; i += TG_SIZE) { \
+        outDistances[qi * k + i] = tgDist[i]; \
+        outIndices[qi * k + i] = tgIdx[i]; \
+    } \
+    for (uint i = tid; i < k - K_out; i += TG_SIZE) { \
+        outDistances[qi * k + K_out + i] = want_min ? 1e38f : -1e38f; \
+        outIndices[qi * k + K_out + i] = -1; \
+    } \
+}
+FUSED_DIST_TOPK_FP16_VARIANT(32)
+FUSED_DIST_TOPK_FP16_VARIANT(64)
+FUSED_DIST_TOPK_FP16_VARIANT(128)
+FUSED_DIST_TOPK_FP16_VARIANT(256)
+FUSED_DIST_TOPK_FP16_VARIANT(512)
+FUSED_DIST_TOPK_FP16_VARIANT(1024)
+#undef FUSED_DIST_TOPK_FP16_VARIANT
+
 // Fused distance + top-k: one threadgroup per query, compute distances on the fly
 // and feed directly into local top-R buffers.  Eliminates the intermediate distance
 // matrix for the non-tiled path.  Query is cached in threadgroup memory.

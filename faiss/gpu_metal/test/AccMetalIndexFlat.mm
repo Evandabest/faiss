@@ -18,6 +18,7 @@
 #include <algorithm>
 #import <cmath>
 #import <memory>
+#import <set>
 #import <vector>
 
 namespace {
@@ -599,4 +600,176 @@ TEST_F(AccMetalIndexFlat, IndexMetalGpuToCpu) {
 
     delete cpuBack;
     delete metalIndex;
+}
+
+// ============================================================
+//  Float16 storage tests
+// ============================================================
+
+float computeRecall(
+        int nq, int k,
+        const faiss::idx_t* refLab,
+        const faiss::idx_t* testLab) {
+    int hits = 0, total = 0;
+    for (int q = 0; q < nq; ++q) {
+        std::set<faiss::idx_t> refSet;
+        for (int i = 0; i < k; ++i) {
+            if (refLab[q * k + i] >= 0) refSet.insert(refLab[q * k + i]);
+        }
+        for (int i = 0; i < k; ++i) {
+            if (testLab[q * k + i] >= 0 && refSet.count(testLab[q * k + i]))
+                hits++;
+        }
+        total += (int)refSet.size();
+    }
+    return total > 0 ? (float)hits / (float)total : 1.0f;
+}
+
+TEST_F(AccMetalIndexFlat, Float16L2Basic) {
+    const int dim = 64;
+    const int nb = 5000;
+    const int nq = 50;
+    const int k = 10;
+
+    std::vector<float> vecs((size_t)nb * dim);
+    std::vector<float> queries((size_t)nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 42);
+    faiss::float_rand(queries.data(), queries.size(), 1337);
+
+    faiss::IndexFlatL2 cpuIndex(dim);
+    cpuIndex.add(nb, vecs.data());
+    std::vector<float> cpuDist((size_t)nq * k);
+    std::vector<faiss::idx_t> cpuLab((size_t)nq * k);
+    cpuIndex.search(nq, queries.data(), k, cpuDist.data(), cpuLab.data());
+
+    faiss::gpu_metal::MetalIndexConfig config;
+    config.useFloat16 = true;
+    faiss::gpu_metal::MetalIndexFlat metalIdx(
+            resources_, dim, faiss::METRIC_L2, 0.0f, config);
+    metalIdx.add(nb, vecs.data());
+
+    std::vector<float> gpuDist((size_t)nq * k);
+    std::vector<faiss::idx_t> gpuLab((size_t)nq * k);
+    metalIdx.search(nq, queries.data(), k, gpuDist.data(), gpuLab.data());
+
+    float recall = computeRecall(nq, k, cpuLab.data(), gpuLab.data());
+    EXPECT_GE(recall, 0.95f) << "Float16 L2 recall " << recall << " below 0.95";
+}
+
+TEST_F(AccMetalIndexFlat, Float16IPBasic) {
+    const int dim = 64;
+    const int nb = 5000;
+    const int nq = 50;
+    const int k = 10;
+
+    std::vector<float> vecs((size_t)nb * dim);
+    std::vector<float> queries((size_t)nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 42);
+    faiss::float_rand(queries.data(), queries.size(), 1337);
+
+    faiss::IndexFlatIP cpuIndex(dim);
+    cpuIndex.add(nb, vecs.data());
+    std::vector<float> cpuDist((size_t)nq * k);
+    std::vector<faiss::idx_t> cpuLab((size_t)nq * k);
+    cpuIndex.search(nq, queries.data(), k, cpuDist.data(), cpuLab.data());
+
+    faiss::gpu_metal::MetalIndexConfig config;
+    config.useFloat16 = true;
+    faiss::gpu_metal::MetalIndexFlat metalIdx(
+            resources_, dim, faiss::METRIC_INNER_PRODUCT, 0.0f, config);
+    metalIdx.add(nb, vecs.data());
+
+    std::vector<float> gpuDist((size_t)nq * k);
+    std::vector<faiss::idx_t> gpuLab((size_t)nq * k);
+    metalIdx.search(nq, queries.data(), k, gpuDist.data(), gpuLab.data());
+
+    float recall = computeRecall(nq, k, cpuLab.data(), gpuLab.data());
+    EXPECT_GE(recall, 0.95f) << "Float16 IP recall " << recall << " below 0.95";
+}
+
+TEST_F(AccMetalIndexFlat, Float16Reconstruct) {
+    const int dim = 32;
+    const int nb = 100;
+
+    std::vector<float> vecs((size_t)nb * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 42);
+
+    faiss::gpu_metal::MetalIndexConfig config;
+    config.useFloat16 = true;
+    faiss::gpu_metal::MetalIndexFlat metalIdx(
+            resources_, dim, faiss::METRIC_L2, 0.0f, config);
+    metalIdx.add(nb, vecs.data());
+
+    std::vector<float> recons((size_t)nb * dim);
+    metalIdx.reconstruct_n(0, nb, recons.data());
+
+    for (int i = 0; i < nb * dim; ++i) {
+        EXPECT_NEAR(vecs[i], recons[i], 0.01f)
+                << "Float16 reconstruct mismatch at i=" << i;
+    }
+}
+
+TEST_F(AccMetalIndexFlat, Float16CopyFromTo) {
+    const int dim = 32;
+    const int nb = 100;
+    const int nq = 10;
+    const int k = 5;
+
+    std::vector<float> vecs((size_t)nb * dim);
+    std::vector<float> queries((size_t)nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 42);
+    faiss::float_rand(queries.data(), queries.size(), 1337);
+
+    faiss::IndexFlatL2 cpuOrig(dim);
+    cpuOrig.add(nb, vecs.data());
+
+    faiss::gpu_metal::MetalIndexConfig config;
+    config.useFloat16 = true;
+    faiss::gpu_metal::MetalIndexFlat metalIdx(
+            resources_, dim, faiss::METRIC_L2, 0.0f, config);
+    metalIdx.copyFrom(&cpuOrig);
+    EXPECT_EQ(metalIdx.ntotal, nb);
+
+    faiss::IndexFlatL2 cpuBack(dim);
+    metalIdx.copyTo(&cpuBack);
+    EXPECT_EQ(cpuBack.ntotal, nb);
+
+    std::vector<float> origDist((size_t)nq * k), backDist((size_t)nq * k);
+    std::vector<faiss::idx_t> origLab((size_t)nq * k), backLab((size_t)nq * k);
+    cpuOrig.search(nq, queries.data(), k, origDist.data(), origLab.data());
+    cpuBack.search(nq, queries.data(), k, backDist.data(), backLab.data());
+
+    float recall = computeRecall(nq, k, origLab.data(), backLab.data());
+    EXPECT_GE(recall, 0.95f) << "Float16 copyFrom/To round-trip recall " << recall;
+}
+
+TEST_F(AccMetalIndexFlat, Float16LargeD128) {
+    const int dim = 128;
+    const int nb = 10000;
+    const int nq = 100;
+    const int k = 20;
+
+    std::vector<float> vecs((size_t)nb * dim);
+    std::vector<float> queries((size_t)nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 42);
+    faiss::float_rand(queries.data(), queries.size(), 1337);
+
+    faiss::IndexFlatL2 cpuIndex(dim);
+    cpuIndex.add(nb, vecs.data());
+    std::vector<float> cpuDist((size_t)nq * k);
+    std::vector<faiss::idx_t> cpuLab((size_t)nq * k);
+    cpuIndex.search(nq, queries.data(), k, cpuDist.data(), cpuLab.data());
+
+    faiss::gpu_metal::MetalIndexConfig config;
+    config.useFloat16 = true;
+    faiss::gpu_metal::MetalIndexFlat metalIdx(
+            resources_, dim, faiss::METRIC_L2, 0.0f, config);
+    metalIdx.add(nb, vecs.data());
+
+    std::vector<float> gpuDist((size_t)nq * k);
+    std::vector<faiss::idx_t> gpuLab((size_t)nq * k);
+    metalIdx.search(nq, queries.data(), k, gpuDist.data(), gpuLab.data());
+
+    float recall = computeRecall(nq, k, cpuLab.data(), gpuLab.data());
+    EXPECT_GE(recall, 0.95f) << "Float16 L2 d=128 recall " << recall;
 }

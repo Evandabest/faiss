@@ -20,6 +20,11 @@ namespace gpu_metal {
 /// Configuration for Metal index (mirrors GpuIndexConfig roles).
 struct MetalIndexConfig {
     int device = 0;
+
+    /// Store vectors as float16 (half) instead of float32.
+    /// Halves GPU memory usage at the cost of reduced precision.
+    /// Only affects MetalIndexFlat vector storage; queries remain float32.
+    bool useFloat16 = false;
 };
 
 /// Base class for Metal-backed indexes. Mirrors faiss::gpu::GpuIndex.

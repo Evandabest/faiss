@@ -362,6 +362,123 @@ bool runMetalDistance(
 }
 
 // ============================================================
+//  runMetalDistanceFP16
+// ============================================================
+
+bool runMetalDistanceFP16(
+        id<MTLDevice> device,
+        id<MTLCommandQueue> queue,
+        id<MTLBuffer> queries,
+        id<MTLBuffer> vectors,
+        int nq, int nb, int d, int k,
+        bool isL2,
+        id<MTLBuffer> outDistances,
+        id<MTLBuffer> outIndices) {
+    if (!device || !queue || !queries || !vectors ||
+        !outDistances || !outIndices)
+        return false;
+    if (k <= 0 || k > MetalKernels::kMaxK) return false;
+
+    MetalKernels& K = getMetalKernels(device);
+    if (!K.isValid()) return false;
+
+    size_t availableMem = getAvailableMemoryForTiling();
+    if (availableMem == 0) {
+        availableMem = kDefaultTilingBudgetBytes;
+    }
+    int tileRows, tileCols;
+    chooseTileSize(nq, nb, d, sizeof(uint16_t), availableMem,
+                   tileRows, tileCols);
+    bool needsTiling = (tileCols < nb || tileRows < nq);
+    int K_prime = needsTiling ? MetalKernels::computeKPrimeForTiling(k) : k;
+
+    id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+
+    if (!needsTiling && k <= 1024 && d <= 2048) {
+        K.encodeFusedDistTopKFP16(enc, queries, vectors, outDistances, outIndices,
+                                  nq, nb, d, k, isL2);
+    } else if (!needsTiling) {
+        id<MTLBuffer> distMat = [device
+                newBufferWithLength:(size_t)nq * nb * sizeof(float)
+                            options:MTLResourceStorageModeShared];
+        if (!distMat) { [enc endEncoding]; return false; }
+
+        if (isL2) K.encodeL2SquaredMatrixFP16(enc, queries, vectors, distMat, nq, nb, d);
+        else      K.encodeIPMatrixFP16(enc, queries, vectors, distMat, nq, nb, d);
+
+        K.encodeTopKThreadgroup(enc, distMat, outDistances, outIndices, nq, nb, k, isL2);
+    } else {
+        int numRowTiles = (nq + tileRows - 1) / tileRows;
+        int numColTiles = (nb + tileCols - 1) / tileCols;
+
+        id<MTLBuffer> tileDistBuf = [device
+                newBufferWithLength:(size_t)nq * numColTiles * K_prime * sizeof(float)
+                            options:MTLResourceStorageModeShared];
+        id<MTLBuffer> tileIdxBuf = [device
+                newBufferWithLength:(size_t)nq * numColTiles * K_prime * sizeof(int32_t)
+                            options:MTLResourceStorageModeShared];
+        if (!tileDistBuf || !tileIdxBuf) { [enc endEncoding]; return false; }
+
+        for (int tr = 0; tr < numRowTiles; tr++) {
+            int curQS = std::min(tileRows, nq - tr * tileRows);
+            size_t qBase = (size_t)(tr * tileRows) * numColTiles * K_prime;
+
+            for (int tc = 0; tc < numColTiles; tc++) {
+                int curVS = std::min(tileCols, nb - tc * tileCols);
+                size_t qOff = (size_t)(tr * tileRows) * d * sizeof(float);
+                size_t vOff = (size_t)(tc * tileCols) * d * sizeof(uint16_t);
+
+                id<MTLBuffer> distTile = [device
+                        newBufferWithLength:(size_t)curQS * curVS * sizeof(float)
+                                    options:MTLResourceStorageModeShared];
+                if (!distTile) { [enc endEncoding]; return false; }
+
+                if (isL2) K.encodeL2SquaredMatrixFP16(enc, queries, vectors, distTile,
+                                                       curQS, curVS, d, qOff, vOff);
+                else      K.encodeIPMatrixFP16(enc, queries, vectors, distTile,
+                                                curQS, curVS, d, qOff, vOff);
+
+                id<MTLBuffer> topDist = [device
+                        newBufferWithLength:(size_t)curQS * K_prime * sizeof(float)
+                                    options:MTLResourceStorageModeShared];
+                id<MTLBuffer> topIdx = [device
+                        newBufferWithLength:(size_t)curQS * K_prime * sizeof(int32_t)
+                                    options:MTLResourceStorageModeShared];
+                if (!topDist || !topIdx) { [enc endEncoding]; return false; }
+
+                K.encodeTopKThreadgroup(enc, distTile, topDist, topIdx,
+                                        curQS, curVS, K_prime, isL2);
+
+                if (numColTiles > 1) {
+                    K.encodeIncrementIndex(enc, tileIdxBuf, curQS, K_prime,
+                                           tileCols, numColTiles,
+                                           qBase * sizeof(int32_t));
+                }
+
+                size_t dstOff = (qBase + (size_t)tc * K_prime) * sizeof(float);
+                size_t dstOffIdx = (qBase + (size_t)tc * K_prime) * sizeof(int32_t);
+                K.encodeMergeTwoSorted(enc,
+                        tileDistBuf, tileIdxBuf,
+                        topDist, topIdx,
+                        tileDistBuf, tileIdxBuf,
+                        curQS, K_prime, K_prime, isL2,
+                        dstOff, dstOffIdx);
+            }
+        }
+
+        K.encodeTrimKToK(enc, tileDistBuf, tileIdxBuf,
+                          outDistances, outIndices,
+                          nq, K_prime, k, isL2);
+    }
+
+    [enc endEncoding];
+    [cmdBuf commit];
+    [cmdBuf waitUntilCompleted];
+    return true;
+}
+
+// ============================================================
 //  Convenience wrappers
 // ============================================================
 

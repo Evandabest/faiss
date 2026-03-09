@@ -71,9 +71,48 @@ public:
             int nb,
             int d);
 
+    // ---- Float16 vector distance matrix ops ----
+    // Same as above but vectors buffer contains half-precision data.
+
+    void encodeL2SquaredMatrixFP16(
+            id<MTLComputeCommandEncoder> enc,
+            id<MTLBuffer> queries,
+            id<MTLBuffer> vectors,
+            id<MTLBuffer> distances,
+            int nq,
+            int nb,
+            int d,
+            size_t queryByteOff = 0,
+            size_t vectorByteOff = 0);
+
+    void encodeIPMatrixFP16(
+            id<MTLComputeCommandEncoder> enc,
+            id<MTLBuffer> queries,
+            id<MTLBuffer> vectors,
+            id<MTLBuffer> distances,
+            int nq,
+            int nb,
+            int d,
+            size_t queryByteOff = 0,
+            size_t vectorByteOff = 0);
+
     // ---- Fused distance + top-k (single-pass, no intermediate matrix, k ≤ 1024) ----
 
     void encodeFusedDistTopK(
+            id<MTLComputeCommandEncoder> enc,
+            id<MTLBuffer> queries,
+            id<MTLBuffer> vectors,
+            id<MTLBuffer> outDist,
+            id<MTLBuffer> outIdx,
+            int nq,
+            int nb,
+            int d,
+            int k,
+            bool isL2,
+            size_t queryByteOff = 0,
+            size_t vectorByteOff = 0);
+
+    void encodeFusedDistTopKFP16(
             id<MTLComputeCommandEncoder> enc,
             id<MTLBuffer> queries,
             id<MTLBuffer> vectors,
