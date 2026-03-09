@@ -11,8 +11,10 @@
 #import "MetalIndexFlat.h"
 #import "MetalIndexIVFFlat.h"
 #import "MetalIndexIVFScalarQuantizer.h"
+#import "MetalIndexIVFPQ.h"
 #include <faiss/IndexFlat.h>
 #include <faiss/IndexIVFFlat.h>
+#include <faiss/IndexIVFPQ.h>
 #include <faiss/IndexScalarQuantizer.h>
 #include <faiss/impl/FaissAssert.h>
 #include <cstring>
@@ -36,6 +38,20 @@ faiss::Index* index_cpu_to_metal_gpu(
 
     MetalIndexConfig config;
     config.device = 0;
+
+    // IndexIVFPQ (check before IndexIVFFlat)
+    const auto* ivfPQ = dynamic_cast<const faiss::IndexIVFPQ*>(index);
+    if (ivfPQ) {
+        FAISS_THROW_IF_NOT(
+                ivfPQ->metric_type == METRIC_L2 ||
+                ivfPQ->metric_type == METRIC_INNER_PRODUCT);
+        FAISS_THROW_IF_NOT_MSG(
+                ivfPQ->pq.nbits == 8,
+                "Metal IVFPQ only supports 8-bit PQ codes");
+        auto* metal = new MetalIndexIVFPQ(
+                res->getResources(), ivfPQ, config);
+        return metal;
+    }
 
     // IndexIVFScalarQuantizer (check before IndexIVFFlat)
     const auto* ivfSQ = dynamic_cast<const faiss::IndexIVFScalarQuantizer*>(index);
@@ -76,10 +92,25 @@ faiss::Index* index_cpu_to_metal_gpu(
 
     FAISS_THROW_MSG(
             "index_cpu_to_metal_gpu: unsupported index type "
-            "(only IndexFlat, IndexIVFFlat, and IndexIVFScalarQuantizer supported)");
+            "(supported: IndexFlat, IndexIVFFlat, IndexIVFScalarQuantizer, IndexIVFPQ)");
 }
 
 faiss::Index* index_metal_gpu_to_cpu(const faiss::Index* index) {
+    const auto* metalIVFPQ = dynamic_cast<const MetalIndexIVFPQ*>(index);
+    if (metalIVFPQ) {
+        int M = metalIVFPQ->getNumSubQuantizers();
+        faiss::IndexFlat* quantizer =
+                (metalIVFPQ->metric_type == METRIC_INNER_PRODUCT)
+                ? (faiss::IndexFlat*)new faiss::IndexFlatIP(metalIVFPQ->d)
+                : (faiss::IndexFlat*)new faiss::IndexFlatL2(metalIVFPQ->d);
+        auto* cpu = new faiss::IndexIVFPQ(
+                quantizer, metalIVFPQ->d, metalIVFPQ->nlist(),
+                (size_t)M, 8);
+        cpu->own_fields = true;
+        metalIVFPQ->copyTo(cpu);
+        return cpu;
+    }
+
     const auto* metalIVFSQ =
             dynamic_cast<const MetalIndexIVFScalarQuantizer*>(index);
     if (metalIVFSQ) {
@@ -127,8 +158,8 @@ faiss::Index* index_metal_gpu_to_cpu(const faiss::Index* index) {
 
     FAISS_THROW_MSG(
             "index_metal_gpu_to_cpu: unsupported index type "
-            "(only MetalIndexFlat, MetalIndexIVFFlat, and "
-            "MetalIndexIVFScalarQuantizer supported)");
+            "(supported: MetalIndexFlat, MetalIndexIVFFlat, "
+            "MetalIndexIVFScalarQuantizer, MetalIndexIVFPQ)");
 }
 
 } // namespace gpu_metal

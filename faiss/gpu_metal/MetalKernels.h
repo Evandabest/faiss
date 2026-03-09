@@ -201,6 +201,20 @@ public:
             id<MTLBuffer> ilCodesOffset = nil,
             id<MTLBuffer> sqTables = nil);
 
+    void encodeIVFPQScanList(
+            id<MTLComputeCommandEncoder> enc,
+            id<MTLBuffer> lookupTable,
+            id<MTLBuffer> codes,
+            id<MTLBuffer> ids,
+            id<MTLBuffer> listOffset,
+            id<MTLBuffer> listLength,
+            id<MTLBuffer> coarseAssign,
+            id<MTLBuffer> perListDist,
+            id<MTLBuffer> perListIdx,
+            id<MTLBuffer> paramsBuf,
+            int nq,
+            int nprobe);
+
     void encodeIVFMergeLists(
             id<MTLComputeCommandEncoder> enc,
             id<MTLBuffer> perListDist,

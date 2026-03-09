@@ -175,6 +175,32 @@ bool runMetalIVFSQScan(
         id<MTLBuffer> perListDistBuf,
         id<MTLBuffer> perListIdxBuf);
 
+/// IVF PQ scan: scans 8-bit PQ-encoded inverted lists on the GPU.
+///
+/// @param lookupTable  Per-(query, probe) distance lookup tables,
+///                     layout (nq * nprobe * M * 256) floats.
+///                     table[m * 256 + code] = partial distance for
+///                     subquantizer m, code value `code`.
+/// @param M            Number of sub-quantizers (code_size in bytes).
+bool runMetalIVFPQScan(
+        id<MTLDevice> device,
+        id<MTLCommandQueue> queue,
+        id<MTLBuffer> lookupTable,
+        id<MTLBuffer> codes,
+        id<MTLBuffer> ids,
+        id<MTLBuffer> listOffset,
+        id<MTLBuffer> listLength,
+        id<MTLBuffer> coarseAssign,
+        int nq,
+        int M,
+        int k,
+        int nprobe,
+        bool isL2,
+        id<MTLBuffer> outDistances,
+        id<MTLBuffer> outIndices,
+        id<MTLBuffer> perListDistBuf,
+        id<MTLBuffer> perListIdxBuf);
+
 /// Compute ||v||² norms for each vector.  Result is written to normsBuf
 /// (nb float).  Useful for caching centroid norms across searches.
 bool runMetalComputeNorms(

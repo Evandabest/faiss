@@ -455,6 +455,33 @@ void MetalKernels::encodeIVFScanList(
         threadsPerThreadgroup:MTLSizeMake(tgSize, 1, 1)];
 }
 
+void MetalKernels::encodeIVFPQScanList(
+        id<MTLComputeCommandEncoder> enc,
+        id<MTLBuffer> lookupTable,
+        id<MTLBuffer> codes,
+        id<MTLBuffer> ids,
+        id<MTLBuffer> listOffset,
+        id<MTLBuffer> listLength,
+        id<MTLBuffer> coarseAssign,
+        id<MTLBuffer> perListDist,
+        id<MTLBuffer> perListIdx,
+        id<MTLBuffer> paramsBuf,
+        int nq,
+        int nprobe) {
+    [enc setComputePipelineState:pipeline("ivf_scan_list_pq8")];
+    [enc setBuffer:lookupTable  offset:0 atIndex:0];
+    [enc setBuffer:codes        offset:0 atIndex:1];
+    [enc setBuffer:ids          offset:0 atIndex:2];
+    [enc setBuffer:listOffset   offset:0 atIndex:3];
+    [enc setBuffer:listLength   offset:0 atIndex:4];
+    [enc setBuffer:coarseAssign offset:0 atIndex:5];
+    [enc setBuffer:perListDist  offset:0 atIndex:6];
+    [enc setBuffer:perListIdx   offset:0 atIndex:7];
+    [enc setBuffer:paramsBuf    offset:0 atIndex:8];
+    [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)nq * (NSUInteger)nprobe, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+}
+
 void MetalKernels::encodeIVFMergeLists(
         id<MTLComputeCommandEncoder> enc,
         id<MTLBuffer> perListDist, id<MTLBuffer> perListIdx,

@@ -698,6 +698,55 @@ bool runMetalComputeNorms(
 }
 
 // ============================================================
+//  runMetalIVFPQScan
+// ============================================================
+
+bool runMetalIVFPQScan(
+        id<MTLDevice> device, id<MTLCommandQueue> queue,
+        id<MTLBuffer> lookupTable,
+        id<MTLBuffer> codes, id<MTLBuffer> ids,
+        id<MTLBuffer> listOffset, id<MTLBuffer> listLength,
+        id<MTLBuffer> coarseAssign,
+        int nq, int M, int k, int nprobe, bool isL2,
+        id<MTLBuffer> outDistances, id<MTLBuffer> outIndices,
+        id<MTLBuffer> perListDistBuf, id<MTLBuffer> perListIdxBuf) {
+    if (!device || !queue || !lookupTable || !codes || !ids ||
+        !listOffset || !listLength || !coarseAssign ||
+        !outDistances || !outIndices ||
+        !perListDistBuf || !perListIdxBuf)
+        return false;
+    if (k <= 0 || nq <= 0 || nprobe <= 0 || M <= 0) return false;
+
+    MetalKernels& K = getMetalKernels(device);
+    if (!K.isValid()) return false;
+
+    // params: [nq, M, k, nprobe, want_min]
+    uint32_t sp[5] = {(uint32_t)nq, (uint32_t)M, (uint32_t)k,
+                      (uint32_t)nprobe, isL2 ? 1u : 0u};
+    id<MTLBuffer> paramsBuf = [device newBufferWithBytes:sp length:sizeof(sp)
+                                                 options:MTLResourceStorageModeShared];
+    if (!paramsBuf) return false;
+
+    id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+
+    K.encodeIVFPQScanList(enc, lookupTable, codes, ids,
+                           listOffset, listLength, coarseAssign,
+                           perListDistBuf, perListIdxBuf, paramsBuf,
+                           nq, nprobe);
+
+    // Reuse the IVF merge kernel. It expects params: [nq, d, k, nprobe, want_min].
+    // We overwrite params[1] (M → d is unused by merge, but nq/k/nprobe/want_min match).
+    K.encodeIVFMergeLists(enc, perListDistBuf, perListIdxBuf,
+                          outDistances, outIndices, paramsBuf, nq);
+
+    [enc endEncoding];
+    [cmdBuf commit];
+    [cmdBuf waitUntilCompleted];
+    return cmdBuf.status == MTLCommandBufferStatusCompleted;
+}
+
+// ============================================================
 //  runMetalIVFFlatFullSearch
 // ============================================================
 
