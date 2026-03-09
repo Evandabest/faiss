@@ -354,6 +354,118 @@ void MetalIndexIVFFlat::search(
     }
 }
 
+void MetalIndexIVFFlat::search_preassigned(
+        idx_t n,
+        const float* x,
+        idx_t k,
+        const idx_t* assign,
+        const float* centroid_dis,
+        float* distances,
+        idx_t* labels,
+        bool store_pairs,
+        const IVFSearchParameters* params,
+        IndexIVFStats* stats) const {
+    (void)centroid_dis;
+    (void)store_pairs;
+    (void)stats;
+
+    FAISS_THROW_IF_NOT(cpuIndex_);
+    FAISS_THROW_IF_NOT(k > 0);
+    FAISS_THROW_IF_NOT(assign);
+
+    const float inf    = std::numeric_limits<float>::infinity();
+    const float negInf = -std::numeric_limits<float>::infinity();
+    const bool isL2 = (metric_type == METRIC_L2);
+
+    if (cpuIndex_->ntotal == 0 || n == 0) {
+        for (idx_t i = 0; i < n * k; ++i) {
+            labels[i]    = -1;
+            distances[i] = isL2 ? inf : negInf;
+        }
+        return;
+    }
+
+    size_t nprobe = cpuIndex_->nprobe;
+    if (params && params->nprobe > 0) {
+        nprobe = params->nprobe;
+    }
+    nprobe = std::min(nprobe, cpuIndex_->nlist);
+
+    id<MTLDevice>       device = resources_->getDevice();
+    id<MTLCommandQueue> queue  = resources_->getCommandQueue();
+
+    const int maxK = getMetalDistanceMaxK();
+    if (!device || !queue || !gpuIvf_ || !gpuIvf_->codesBuffer() ||
+        !gpuIvf_->idsBuffer() || !gpuIvf_->listOffsetGpuBuffer() ||
+        !gpuIvf_->listLengthGpuBuffer() || k > maxK) {
+        cpuIndex_->search_preassigned(
+                n, x, k, assign, centroid_dis,
+                distances, labels, store_pairs, params, stats);
+        return;
+    }
+
+    size_t queriesBytes    = (size_t)n * (size_t)d * sizeof(float);
+    size_t outDistBytes    = (size_t)n * (size_t)k * sizeof(float);
+    size_t outIdxBytes     = (size_t)n * (size_t)k * sizeof(int64_t);
+    size_t perListBytes    = (size_t)n * nprobe * (size_t)k * sizeof(float);
+    size_t perListIdxB     = (size_t)n * nprobe * (size_t)k * sizeof(int64_t);
+    size_t coarseBytes     = (size_t)n * nprobe * sizeof(int32_t);
+
+    ensureSearchBuf_(searchQueriesBuf_,     searchQueriesCap_,     queriesBytes);
+    ensureSearchBuf_(searchOutDistBuf_,     searchOutDistCap_,     outDistBytes);
+    ensureSearchBuf_(searchOutIdxBuf_,      searchOutIdxCap_,      outIdxBytes);
+    ensureSearchBuf_(searchPerListDistBuf_, searchPerListDistCap_, perListBytes);
+    ensureSearchBuf_(searchPerListIdxBuf_,  searchPerListIdxCap_,  perListIdxB);
+    ensureSearchBuf_(searchCoarseBuf_,      searchCoarseCap_,      coarseBytes);
+
+    if (!searchQueriesBuf_ || !searchOutDistBuf_ || !searchOutIdxBuf_ ||
+        !searchPerListDistBuf_ || !searchPerListIdxBuf_ || !searchCoarseBuf_) {
+        cpuIndex_->search_preassigned(
+                n, x, k, assign, centroid_dis,
+                distances, labels, store_pairs, params, stats);
+        return;
+    }
+
+    std::memcpy([searchQueriesBuf_ contents], x, queriesBytes);
+
+    auto* coarseDst = reinterpret_cast<int32_t*>([searchCoarseBuf_ contents]);
+    for (size_t i = 0; i < (size_t)n * nprobe; ++i) {
+        coarseDst[i] = (int32_t)assign[i];
+    }
+
+    bool ok = runMetalIVFFlatScan(
+            device, queue,
+            searchQueriesBuf_,
+            gpuIvf_->codesBuffer(),
+            gpuIvf_->idsBuffer(),
+            gpuIvf_->listOffsetGpuBuffer(),
+            gpuIvf_->listLengthGpuBuffer(),
+            searchCoarseBuf_,
+            (int)n, d, (int)k, (int)nprobe, isL2,
+            searchOutDistBuf_, searchOutIdxBuf_,
+            searchPerListDistBuf_, searchPerListIdxBuf_,
+            gpuIvf_->interleavedCodesBuffer(),
+            gpuIvf_->interleavedCodesOffsetBuffer());
+
+    if (!ok) {
+        cpuIndex_->search_preassigned(
+                n, x, k, assign, centroid_dis,
+                distances, labels, store_pairs, params, stats);
+        return;
+    }
+
+    const float*   outDistPtr = reinterpret_cast<const float*  >([searchOutDistBuf_ contents]);
+    const int64_t* outIdxPtr  = reinterpret_cast<const int64_t*>([searchOutIdxBuf_  contents]);
+    for (idx_t qi = 0; qi < n; ++qi) {
+        for (idx_t j = 0; j < k; ++j) {
+            size_t pos       = (size_t)qi * (size_t)k + (size_t)j;
+            int64_t globalId = outIdxPtr[pos];
+            labels   [pos]   = (globalId < 0) ? -1 : (idx_t)globalId;
+            distances[pos]   = outDistPtr[pos];
+        }
+    }
+}
+
 void MetalIndexIVFFlat::reconstruct(idx_t key, float* recons) const {
     FAISS_THROW_IF_NOT_MSG(cpuIndex_, "MetalIndexIVFFlat: no internal index");
     cpuIndex_->reconstruct(key, recons);

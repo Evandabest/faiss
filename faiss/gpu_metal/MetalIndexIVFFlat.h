@@ -62,6 +62,23 @@ public:
             idx_t* labels,
             const SearchParameters* params = nullptr) const override;
 
+    /// Search with caller-provided coarse assignments (skips coarse quantizer).
+    /// @param assign      Coarse list assignments (n x nprobe), row-major idx_t
+    /// @param centroid_dis Distances to assigned centroids (n x nprobe); unused
+    ///                     by GPU scan but accepted for API compatibility
+    /// @param store_pairs  Ignored (always false for GPU path)
+    void search_preassigned(
+            idx_t n,
+            const float* x,
+            idx_t k,
+            const idx_t* assign,
+            const float* centroid_dis,
+            float* distances,
+            idx_t* labels,
+            bool store_pairs,
+            const IVFSearchParameters* params = nullptr,
+            IndexIVFStats* stats = nullptr) const;
+
     /// Copy from a CPU IndexIVFFlat (helper for future cloner support).
     void copyFrom(const faiss::IndexIVFFlat* index);
 
