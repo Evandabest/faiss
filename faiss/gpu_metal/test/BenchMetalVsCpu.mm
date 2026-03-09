@@ -8,9 +8,9 @@
  * CPU vs Metal GPU Flat index search benchmark.
  *
  * Usage:
- *   ./PerfMetalVsCpu               — full sweep (k=10,20,50,100), CPU then GPU each
- *   ./PerfMetalVsCpu <k>           — run only that k (e.g. 20), both CPU and GPU
- *   ./PerfMetalVsCpu <k> gpu       — run only GPU for that k (one process, then exit)
+ *   ./BenchMetalFlatVsCpu             — full sweep (k=10,20,...,2048), CPU then GPU each
+ *   ./BenchMetalFlatVsCpu <k>          — run only that k (e.g. 20), both CPU and GPU
+ *   ./BenchMetalFlatVsCpu <k> gpu      — run only GPU for that k (one process, then exit)
  */
 
 #import <chrono>

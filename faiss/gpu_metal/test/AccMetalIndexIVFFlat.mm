@@ -82,7 +82,7 @@ std::unique_ptr<faiss::IndexIVFFlat> makeCpuIVFFlat(
 
 } // namespace
 
-class TestMetalIndexIVFFlat : public ::testing::Test {
+class AccMetalIndexIVFFlat : public ::testing::Test {
 protected:
     void SetUp() override {
         resources_ = std::make_shared<faiss::gpu_metal::MetalResources>();
@@ -95,7 +95,7 @@ protected:
 
 // ---------- L2 ----------
 
-TEST_F(TestMetalIndexIVFFlat, L2_Basic) {
+TEST_F(AccMetalIndexIVFFlat, L2_Basic) {
     const int dim = 64, nb = 5000, nq = 50, nlist = 32, k = 10;
     const size_t nprobe = 8;
 
@@ -126,7 +126,7 @@ TEST_F(TestMetalIndexIVFFlat, L2_Basic) {
     expectRecall(nq, k, 0.85f, refL.data(), testL.data());
 }
 
-TEST_F(TestMetalIndexIVFFlat, L2_HighProbe) {
+TEST_F(AccMetalIndexIVFFlat, L2_HighProbe) {
     const int dim = 32, nb = 3000, nq = 30, nlist = 16, k = 20;
     const size_t nprobe = 16; // exhaustive probe
 
@@ -157,7 +157,7 @@ TEST_F(TestMetalIndexIVFFlat, L2_HighProbe) {
     expectRecall(nq, k, 0.95f, refL.data(), testL.data());
 }
 
-TEST_F(TestMetalIndexIVFFlat, L2_SmallK) {
+TEST_F(AccMetalIndexIVFFlat, L2_SmallK) {
     const int dim = 64, nb = 5000, nq = 40, nlist = 32, k = 1;
     const size_t nprobe = 8;
 
@@ -187,7 +187,7 @@ TEST_F(TestMetalIndexIVFFlat, L2_SmallK) {
     expectRecall(nq, k, 0.85f, refL.data(), testL.data());
 }
 
-TEST_F(TestMetalIndexIVFFlat, L2_LargeK) {
+TEST_F(AccMetalIndexIVFFlat, L2_LargeK) {
     const int dim = 64, nb = 5000, nq = 20, nlist = 32, k = 50;
     const size_t nprobe = 12;
 
@@ -219,7 +219,7 @@ TEST_F(TestMetalIndexIVFFlat, L2_LargeK) {
 
 // ---------- Inner product ----------
 
-TEST_F(TestMetalIndexIVFFlat, IP_Basic) {
+TEST_F(AccMetalIndexIVFFlat, IP_Basic) {
     const int dim = 64, nb = 5000, nq = 50, nlist = 32, k = 10;
     const size_t nprobe = 8;
 
@@ -251,7 +251,7 @@ TEST_F(TestMetalIndexIVFFlat, IP_Basic) {
     expectRecall(nq, k, 0.85f, refL.data(), testL.data());
 }
 
-TEST_F(TestMetalIndexIVFFlat, IP_HighProbe) {
+TEST_F(AccMetalIndexIVFFlat, IP_HighProbe) {
     const int dim = 32, nb = 3000, nq = 30, nlist = 16, k = 20;
     const size_t nprobe = 16;
 
@@ -285,7 +285,7 @@ TEST_F(TestMetalIndexIVFFlat, IP_HighProbe) {
 
 // ---------- Edge cases ----------
 
-TEST_F(TestMetalIndexIVFFlat, EmptyIndex) {
+TEST_F(AccMetalIndexIVFFlat, EmptyIndex) {
     const int dim = 32, nq = 5, nlist = 8, k = 3;
 
     std::vector<float> trainVecs((size_t)500 * dim);
@@ -306,7 +306,7 @@ TEST_F(TestMetalIndexIVFFlat, EmptyIndex) {
     }
 }
 
-TEST_F(TestMetalIndexIVFFlat, ResetThenSearch) {
+TEST_F(AccMetalIndexIVFFlat, ResetThenSearch) {
     const int dim = 32, nb = 1000, nq = 5, nlist = 8, k = 3;
 
     std::vector<float> vecs((size_t)nb * dim);
@@ -332,7 +332,7 @@ TEST_F(TestMetalIndexIVFFlat, ResetThenSearch) {
     }
 }
 
-TEST_F(TestMetalIndexIVFFlat, AddWithIds) {
+TEST_F(AccMetalIndexIVFFlat, AddWithIds) {
     const int dim = 32, nb = 2000, nq = 20, nlist = 16, k = 5;
     const size_t nprobe = 8;
 
@@ -368,7 +368,7 @@ TEST_F(TestMetalIndexIVFFlat, AddWithIds) {
 
 // ---------- Cloning ----------
 
-TEST_F(TestMetalIndexIVFFlat, CpuToMetalGpu) {
+TEST_F(AccMetalIndexIVFFlat, CpuToMetalGpu) {
     const int dim = 64, nb = 5000, nq = 30, nlist = 32, k = 10;
     const size_t nprobe = 8;
 
@@ -401,7 +401,7 @@ TEST_F(TestMetalIndexIVFFlat, CpuToMetalGpu) {
     delete metalRaw;
 }
 
-TEST_F(TestMetalIndexIVFFlat, MetalGpuToCpu) {
+TEST_F(AccMetalIndexIVFFlat, MetalGpuToCpu) {
     const int dim = 64, nb = 5000, nq = 30, nlist = 32, k = 10;
     const size_t nprobe = 8;
 
@@ -437,7 +437,7 @@ TEST_F(TestMetalIndexIVFFlat, MetalGpuToCpu) {
     delete cpuRaw;
 }
 
-TEST_F(TestMetalIndexIVFFlat, RoundTripClone) {
+TEST_F(AccMetalIndexIVFFlat, RoundTripClone) {
     const int dim = 32, nb = 3000, nq = 20, nlist = 16, k = 10;
     const size_t nprobe = 8;
 

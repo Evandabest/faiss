@@ -95,7 +95,7 @@ void compareSearchResultsTiled(
 
 } // namespace
 
-class TestMetalIndexFlat : public ::testing::Test {
+class AccMetalIndexFlat : public ::testing::Test {
 protected:
     void SetUp() override {
         resources_ = std::make_shared<faiss::gpu_metal::MetalResources>();
@@ -106,7 +106,7 @@ protected:
     std::shared_ptr<faiss::gpu_metal::MetalResources> resources_;
 };
 
-TEST_F(TestMetalIndexFlat, L2_AddAndSearch) {
+TEST_F(AccMetalIndexFlat, L2_AddAndSearch) {
     const int dim = 4;
     const int numVecs = 50;
     const int numQuery = 5;
@@ -134,7 +134,7 @@ TEST_F(TestMetalIndexFlat, L2_AddAndSearch) {
     compareSearchResults(numQuery, k, refDist.data(), refLab.data(), testDist.data(), testLab.data());
 }
 
-TEST_F(TestMetalIndexFlat, L2_LargeK) {
+TEST_F(AccMetalIndexFlat, L2_LargeK) {
     // Exercise large-k top-k variant (k=512 -> topk_threadgroup_512)
     const int dim = 32;
     const int numVecs = 600;
@@ -163,7 +163,7 @@ TEST_F(TestMetalIndexFlat, L2_LargeK) {
     compareSearchResults(numQuery, k, refDist.data(), refLab.data(), testDist.data(), testLab.data());
 }
 
-TEST_F(TestMetalIndexFlat, L2_MaxK) {
+TEST_F(AccMetalIndexFlat, L2_MaxK) {
     // Exercise largest variant (k=2048 -> topk_threadgroup_2048)
     const int dim = 16;
     const int numVecs = 2500;
@@ -196,7 +196,7 @@ TEST_F(TestMetalIndexFlat, L2_MaxK) {
 // chooseTileSize uses ~256MB element budget; for d>32, preferredTileRows=512 so tileCols=131072.
 // So nb > 131072 triggers vector tiling; nq > 512 triggers query tiling.
 
-TEST_F(TestMetalIndexFlat, L2_TiledManyVectors) {
+TEST_F(AccMetalIndexFlat, L2_TiledManyVectors) {
     // Force vector tiling: nb > tileCols (131072) -> multiple column tiles, merge path
     const int dim = 64;
     const int numVecs = 132000;  // > 131072
@@ -225,7 +225,7 @@ TEST_F(TestMetalIndexFlat, L2_TiledManyVectors) {
     compareSearchResults(numQuery, k, refDist.data(), refLab.data(), testDist.data(), testLab.data());
 }
 
-TEST_F(TestMetalIndexFlat, L2_TiledManyQueries) {
+TEST_F(AccMetalIndexFlat, L2_TiledManyQueries) {
     // Force query tiling: nq > 512 -> multiple row tiles
     const int dim = 64;
     const int numVecs = 500;
@@ -254,7 +254,7 @@ TEST_F(TestMetalIndexFlat, L2_TiledManyQueries) {
     compareSearchResults(numQuery, k, refDist.data(), refLab.data(), testDist.data(), testLab.data());
 }
 
-TEST_F(TestMetalIndexFlat, L2_TiledPatterns) {
+TEST_F(AccMetalIndexFlat, L2_TiledPatterns) {
     // Additional correctness coverage for tiled path with structured distance patterns.
     // Use dim=64 and nb>tileCols to force vector-tiling (like L2_TiledManyVectors).
     const int dim = 64;
@@ -335,7 +335,7 @@ TEST_F(TestMetalIndexFlat, L2_TiledPatterns) {
     });
 }
 
-TEST_F(TestMetalIndexFlat, L2_TiledBoth) {
+TEST_F(AccMetalIndexFlat, L2_TiledBoth) {
     // Force both query and vector tiling
     const int dim = 64;
     const int numVecs = 132000;
@@ -365,7 +365,7 @@ TEST_F(TestMetalIndexFlat, L2_TiledBoth) {
     compareSearchResultsTiled(numQuery, k, refDist.data(), refLab.data(), testDist.data(), testLab.data());
 }
 
-TEST_F(TestMetalIndexFlat, L2_SingleColumnTile) {
+TEST_F(AccMetalIndexFlat, L2_SingleColumnTile) {
     // One column tile (numColTiles==1) but multiple row tiles -> exercises copy path, no merge
     const int dim = 64;
     const int numVecs = 50000;   // < 131072 -> single column tile
@@ -394,7 +394,7 @@ TEST_F(TestMetalIndexFlat, L2_SingleColumnTile) {
     compareSearchResults(numQuery, k, refDist.data(), refLab.data(), testDist.data(), testLab.data());
 }
 
-TEST_F(TestMetalIndexFlat, IP_TiledManyVectors) {
+TEST_F(AccMetalIndexFlat, IP_TiledManyVectors) {
     // Inner product with vector tiling
     const int dim = 64;
     const int numVecs = 132000;
@@ -423,7 +423,7 @@ TEST_F(TestMetalIndexFlat, IP_TiledManyVectors) {
     compareSearchResults(numQuery, k, refDist.data(), refLab.data(), testDist.data(), testLab.data());
 }
 
-TEST_F(TestMetalIndexFlat, IP_AddAndSearch) {
+TEST_F(AccMetalIndexFlat, IP_AddAndSearch) {
     const int dim = 4;
     const int numVecs = 50;
     const int numQuery = 5;
@@ -451,7 +451,7 @@ TEST_F(TestMetalIndexFlat, IP_AddAndSearch) {
     compareSearchResults(numQuery, k, refDist.data(), refLab.data(), testDist.data(), testLab.data());
 }
 
-TEST_F(TestMetalIndexFlat, AddWithIds) {
+TEST_F(AccMetalIndexFlat, AddWithIds) {
     const int dim = 4;
     const int numVecs = 20;
     const int numQuery = 3;
@@ -486,7 +486,7 @@ TEST_F(TestMetalIndexFlat, AddWithIds) {
     }
 }
 
-TEST_F(TestMetalIndexFlat, Reset) {
+TEST_F(AccMetalIndexFlat, Reset) {
     const int dim = 4;
     const int numVecs = 10;
     const int numQuery = 2;
@@ -512,7 +512,7 @@ TEST_F(TestMetalIndexFlat, Reset) {
     }
 }
 
-TEST_F(TestMetalIndexFlat, EmptySearch) {
+TEST_F(AccMetalIndexFlat, EmptySearch) {
     const int dim = 4;
     const int numQuery = 2;
     const int k = 1;
@@ -529,7 +529,7 @@ TEST_F(TestMetalIndexFlat, EmptySearch) {
     }
 }
 
-TEST_F(TestMetalIndexFlat, GetNumGpus) {
+TEST_F(AccMetalIndexFlat, GetNumGpus) {
     int n = faiss::gpu_metal::get_num_gpus();
     EXPECT_GE(n, 0);
     EXPECT_LE(n, 1);
@@ -538,7 +538,7 @@ TEST_F(TestMetalIndexFlat, GetNumGpus) {
     }
 }
 
-TEST_F(TestMetalIndexFlat, IndexCpuToMetalGpu) {
+TEST_F(AccMetalIndexFlat, IndexCpuToMetalGpu) {
     const int dim = 4;
     const int numVecs = 30;
     const int numQuery = 3;
@@ -568,7 +568,7 @@ TEST_F(TestMetalIndexFlat, IndexCpuToMetalGpu) {
     delete metalIndex;
 }
 
-TEST_F(TestMetalIndexFlat, IndexMetalGpuToCpu) {
+TEST_F(AccMetalIndexFlat, IndexMetalGpuToCpu) {
     const int dim = 4;
     const int numVecs = 20;
     const int numQuery = 2;

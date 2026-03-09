@@ -10,55 +10,66 @@
 find_package(GTest CONFIG REQUIRED)
 include(GoogleTest)
 
-add_executable(TestMetalIndexFlat TestMetalIndexFlat.mm)
-target_link_libraries(TestMetalIndexFlat PRIVATE
+add_executable(AccMetalIndexFlat AccMetalIndexFlat.mm)
+target_link_libraries(AccMetalIndexFlat PRIVATE
     faiss_metal
     faiss
     GTest::gtest_main
 )
-target_include_directories(TestMetalIndexFlat PRIVATE
+target_include_directories(AccMetalIndexFlat PRIVATE
     ${PROJECT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../..
 )
-set_target_properties(TestMetalIndexFlat PROPERTIES
+set_target_properties(AccMetalIndexFlat PROPERTIES
     OBJCXX_STANDARD 17
     OBJCXX_STANDARD_REQUIRED ON
 )
-gtest_discover_tests(TestMetalIndexFlat)
+gtest_discover_tests(AccMetalIndexFlat)
 
-add_executable(TestMetalIndexIVFFlat TestMetalIndexIVFFlat.mm)
-target_link_libraries(TestMetalIndexIVFFlat PRIVATE
+add_executable(AccMetalIndexIVFFlat AccMetalIndexIVFFlat.mm)
+target_link_libraries(AccMetalIndexIVFFlat PRIVATE
     faiss_metal
     faiss
     GTest::gtest_main
 )
-target_include_directories(TestMetalIndexIVFFlat PRIVATE
+target_include_directories(AccMetalIndexIVFFlat PRIVATE
     ${PROJECT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../..
 )
-set_target_properties(TestMetalIndexIVFFlat PROPERTIES
+set_target_properties(AccMetalIndexIVFFlat PROPERTIES
     OBJCXX_STANDARD 17
     OBJCXX_STANDARD_REQUIRED ON
 )
-gtest_discover_tests(TestMetalIndexIVFFlat)
+gtest_discover_tests(AccMetalIndexIVFFlat)
 
-add_executable(PerfMetalIvfVsCpu PerfMetalIvfVsCpu.mm)
-target_link_libraries(PerfMetalIvfVsCpu PRIVATE
-  faiss_metal
-  faiss
-)
-target_include_directories(PerfMetalIvfVsCpu PRIVATE
-  ${PROJECT_SOURCE_DIR}
-)
-
-# Temporary CPU vs Metal benchmark (run from Xcode or command line)
-add_executable(PerfMetalVsCpu PerfMetalVsCpu.mm)
-target_link_libraries(PerfMetalVsCpu PRIVATE faiss_metal faiss)
-target_include_directories(PerfMetalVsCpu PRIVATE
+add_executable(BenchMetalFlatVsCpu BenchMetalVsCpu.mm)
+target_link_libraries(BenchMetalFlatVsCpu PRIVATE faiss_metal faiss)
+target_include_directories(BenchMetalFlatVsCpu PRIVATE
     ${PROJECT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../..
 )
-set_target_properties(PerfMetalVsCpu PROPERTIES
+set_target_properties(BenchMetalFlatVsCpu PROPERTIES
+    OBJCXX_STANDARD 17
+    OBJCXX_STANDARD_REQUIRED ON
+)
+
+add_executable(BenchMetalIvfVsCpu BenchMetalIvfVsCpu.mm)
+target_link_libraries(BenchMetalIvfVsCpu PRIVATE faiss_metal faiss)
+target_include_directories(BenchMetalIvfVsCpu PRIVATE ${PROJECT_SOURCE_DIR})
+set_target_properties(BenchMetalIvfVsCpu PROPERTIES
+    OBJCXX_STANDARD 17
+    OBJCXX_STANDARD_REQUIRED ON
+)
+add_executable(BenchRunIvf BenchRunIvf.mm)
+target_include_directories(BenchRunIvf PRIVATE ${PROJECT_SOURCE_DIR})
+set_target_properties(BenchRunIvf PROPERTIES
+    OBJCXX_STANDARD 17
+    OBJCXX_STANDARD_REQUIRED ON
+)
+
+add_executable(BenchRunFlat BenchRunFlat.mm)
+target_include_directories(BenchRunFlat PRIVATE ${PROJECT_SOURCE_DIR})
+set_target_properties(BenchRunFlat PROPERTIES
     OBJCXX_STANDARD 17
     OBJCXX_STANDARD_REQUIRED ON
 )
