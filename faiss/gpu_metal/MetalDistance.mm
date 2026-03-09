@@ -747,6 +747,41 @@ bool runMetalIVFPQScan(
 }
 
 // ============================================================
+//  runMetalHammingDistance
+// ============================================================
+
+bool runMetalHammingDistance(
+        id<MTLDevice> device, id<MTLCommandQueue> queue,
+        id<MTLBuffer> queries, id<MTLBuffer> database,
+        int nq, int nb, int code_size, int k,
+        id<MTLBuffer> outDist, id<MTLBuffer> outIdx) {
+    if (!device || !queue || !queries || !database ||
+        !outDist || !outIdx)
+        return false;
+    if (nq <= 0 || nb <= 0 || code_size <= 0 || k <= 0) return false;
+
+    MetalKernels& K = getMetalKernels(device);
+    if (!K.isValid()) return false;
+
+    uint32_t sp[4] = {(uint32_t)nq, (uint32_t)nb,
+                      (uint32_t)code_size, (uint32_t)k};
+    id<MTLBuffer> paramsBuf = [device newBufferWithBytes:sp length:sizeof(sp)
+                                                 options:MTLResourceStorageModeShared];
+    if (!paramsBuf) return false;
+
+    id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+
+    K.encodeHammingDistanceTopK(enc, queries, database,
+                                 outDist, outIdx, paramsBuf, nq);
+
+    [enc endEncoding];
+    [cmdBuf commit];
+    [cmdBuf waitUntilCompleted];
+    return cmdBuf.status == MTLCommandBufferStatusCompleted;
+}
+
+// ============================================================
 //  runMetalIVFFlatFullSearch
 // ============================================================
 

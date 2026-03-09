@@ -74,6 +74,22 @@ set_target_properties(AccMetalIndexIVFPQ PROPERTIES
 )
 gtest_discover_tests(AccMetalIndexIVFPQ)
 
+add_executable(AccMetalIndexBinaryFlat AccMetalIndexBinaryFlat.mm)
+target_link_libraries(AccMetalIndexBinaryFlat PRIVATE
+    faiss_metal
+    faiss
+    GTest::gtest_main
+)
+target_include_directories(AccMetalIndexBinaryFlat PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../..
+)
+set_target_properties(AccMetalIndexBinaryFlat PROPERTIES
+    OBJCXX_STANDARD 17
+    OBJCXX_STANDARD_REQUIRED ON
+)
+gtest_discover_tests(AccMetalIndexBinaryFlat)
+
 add_executable(BenchMetalFlatVsCpu BenchMetalVsCpu.mm)
 target_link_libraries(BenchMetalFlatVsCpu PRIVATE faiss_metal faiss)
 target_include_directories(BenchMetalFlatVsCpu PRIVATE

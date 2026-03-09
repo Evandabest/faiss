@@ -12,7 +12,9 @@
 #import "MetalIndexIVFFlat.h"
 #import "MetalIndexIVFScalarQuantizer.h"
 #import "MetalIndexIVFPQ.h"
+#import "MetalIndexBinaryFlat.h"
 #include <faiss/IndexFlat.h>
+#include <faiss/IndexBinaryFlat.h>
 #include <faiss/IndexIVFFlat.h>
 #include <faiss/IndexIVFPQ.h>
 #include <faiss/IndexScalarQuantizer.h>
@@ -160,6 +162,43 @@ faiss::Index* index_metal_gpu_to_cpu(const faiss::Index* index) {
             "index_metal_gpu_to_cpu: unsupported index type "
             "(supported: MetalIndexFlat, MetalIndexIVFFlat, "
             "MetalIndexIVFScalarQuantizer, MetalIndexIVFPQ)");
+}
+
+faiss::IndexBinary* index_binary_cpu_to_metal_gpu(
+        StandardMetalResources* res,
+        int device,
+        const faiss::IndexBinary* index) {
+    FAISS_THROW_IF_NOT(res != nullptr);
+    FAISS_THROW_IF_NOT(res->getResources() != nullptr);
+    FAISS_THROW_IF_NOT(res->getResources()->isAvailable());
+    FAISS_THROW_IF_NOT_MSG(device == 0, "Metal backend supports only device 0");
+
+    const auto* binaryFlat =
+            dynamic_cast<const faiss::IndexBinaryFlat*>(index);
+    if (binaryFlat) {
+        auto* metal = new MetalIndexBinaryFlat(
+                res->getResources(), binaryFlat);
+        return metal;
+    }
+
+    FAISS_THROW_MSG(
+            "index_binary_cpu_to_metal_gpu: unsupported index type "
+            "(supported: IndexBinaryFlat)");
+}
+
+faiss::IndexBinary* index_binary_metal_gpu_to_cpu(
+        const faiss::IndexBinary* index) {
+    const auto* metalBF =
+            dynamic_cast<const MetalIndexBinaryFlat*>(index);
+    if (metalBF) {
+        auto* cpu = new faiss::IndexBinaryFlat(metalBF->d);
+        metalBF->copyTo(cpu);
+        return cpu;
+    }
+
+    FAISS_THROW_MSG(
+            "index_binary_metal_gpu_to_cpu: unsupported index type "
+            "(supported: MetalIndexBinaryFlat)");
 }
 
 } // namespace gpu_metal

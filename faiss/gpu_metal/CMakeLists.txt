@@ -22,6 +22,7 @@ set(FAISS_METAL_SRC
   MetalIndexIVFFlat.mm
   MetalIndexIVFScalarQuantizer.mm
   MetalIndexIVFPQ.mm
+  MetalIndexBinaryFlat.mm
   StandardMetalResources.mm
   MetalCloner.mm
   MetalPythonBridge.mm

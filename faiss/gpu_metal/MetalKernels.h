@@ -224,6 +224,17 @@ public:
             id<MTLBuffer> paramsBuf,
             int nq);
 
+    // ---- Binary (Hamming) distance ----
+
+    void encodeHammingDistanceTopK(
+            id<MTLComputeCommandEncoder> enc,
+            id<MTLBuffer> queries,
+            id<MTLBuffer> database,
+            id<MTLBuffer> outDist,
+            id<MTLBuffer> outIdx,
+            id<MTLBuffer> paramsBuf,
+            int nq);
+
     // ---- Variant selection helpers (public for orchestrator) ----
 
     static int selectTopKVariantIndex(int k);

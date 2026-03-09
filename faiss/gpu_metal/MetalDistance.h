@@ -201,6 +201,25 @@ bool runMetalIVFPQScan(
         id<MTLBuffer> perListDistBuf,
         id<MTLBuffer> perListIdxBuf);
 
+/// Binary (Hamming) brute-force top-k search.
+///
+/// @param queries   Binary query vectors (nq * code_size bytes)
+/// @param database  Binary database vectors (nb * code_size bytes)
+/// @param code_size Bytes per vector (d / 8)
+/// @param outDist   Output Hamming distances (nq * k int32)
+/// @param outIdx    Output indices (nq * k int64)
+bool runMetalHammingDistance(
+        id<MTLDevice> device,
+        id<MTLCommandQueue> queue,
+        id<MTLBuffer> queries,
+        id<MTLBuffer> database,
+        int nq,
+        int nb,
+        int code_size,
+        int k,
+        id<MTLBuffer> outDist,
+        id<MTLBuffer> outIdx);
+
 /// Compute ||v||² norms for each vector.  Result is written to normsBuf
 /// (nb float).  Useful for caching centroid norms across searches.
 bool runMetalComputeNorms(

@@ -2098,3 +2098,122 @@ kernel void ivf_scan_list_pq8(
         perListIdx [outBase + kk + i] = -1L;
     }
 }
+
+// ============================================================
+//  Binary (Hamming) distance — brute-force top-k
+// ============================================================
+//
+// One threadgroup per query. Threads stride over database vectors,
+// computing Hamming distance via XOR + popcount on uint32 words.
+//
+// params: [nq, nb, code_size, k]
+
+kernel void hamming_distance_topk(
+    device const uchar* queries  [[buffer(0)]],
+    device const uchar* database [[buffer(1)]],
+    device int*         outDist  [[buffer(2)]],
+    device long*        outIdx   [[buffer(3)]],
+    device const uint*  params   [[buffer(4)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]]
+) {
+    constexpr uint TG_SIZE = 256;
+    constexpr uint LOCAL_K = 4;
+
+    uint nq        = params[0];
+    uint nb        = params[1];
+    uint code_size = params[2];
+    uint k         = params[3];
+
+    uint qi = tgid;
+    if (qi >= nq || k == 0) return;
+
+    constexpr int sentinel = 0x7FFFFFFF;
+
+    threadgroup uchar tgQuery[512];
+    device const uchar* qptr = queries + qi * code_size;
+    for (uint i = tid; i < code_size; i += TG_SIZE)
+        tgQuery[i] = qptr[i];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    int localDist[LOCAL_K];
+    int localIdx [LOCAL_K];
+    uint localCount = 0;
+    for (uint i = 0; i < LOCAL_K; i++) {
+        localDist[i] = sentinel;
+        localIdx [i] = -1;
+    }
+
+    uint code_size4 = code_size / 4;
+    uint code_tail  = code_size4 * 4;
+
+    for (uint vi = tid; vi < nb; vi += TG_SIZE) {
+        device const uchar* vptr = database + vi * code_size;
+        int dist = 0;
+
+        device const uint* v32 = (device const uint*)vptr;
+        const threadgroup uint* q32 = (const threadgroup uint*)tgQuery;
+        for (uint w = 0; w < code_size4; w++)
+            dist += popcount(q32[w] ^ v32[w]);
+
+        for (uint b = code_tail; b < code_size; b++)
+            dist += popcount(uint(tgQuery[b]) ^ uint(vptr[b]));
+
+        bool better = (dist < localDist[LOCAL_K-1]);
+        if (localCount < LOCAL_K || better) {
+            uint pos = (localCount < LOCAL_K) ? localCount : LOCAL_K - 1;
+            localDist[pos] = dist;
+            localIdx [pos] = (int)vi;
+            while (pos > 0) {
+                bool sw = (localDist[pos] < localDist[pos-1]) ||
+                          (localDist[pos] == localDist[pos-1] &&
+                           localIdx[pos] < localIdx[pos-1]);
+                if (!sw) break;
+                int td = localDist[pos]; localDist[pos] = localDist[pos-1]; localDist[pos-1] = td;
+                int ti = localIdx [pos]; localIdx [pos] = localIdx [pos-1]; localIdx [pos-1] = ti;
+                pos--;
+            }
+            if (localCount < LOCAL_K) localCount++;
+        }
+    }
+
+    constexpr uint CAND = TG_SIZE * LOCAL_K;
+    threadgroup int tgDistH[CAND];
+    threadgroup int tgIdxH [CAND];
+
+    for (uint i = 0; i < LOCAL_K; i++) {
+        tgDistH[tid * LOCAL_K + i] = (i < localCount) ? localDist[i] : sentinel;
+        tgIdxH [tid * LOCAL_K + i] = (i < localCount) ? localIdx [i] : -1;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint k2 = 2; k2 <= CAND; k2 *= 2) {
+        for (uint j = k2 >> 1; j > 0; j >>= 1) {
+            for (uint idx = tid; idx < CAND; idx += TG_SIZE) {
+                uint partner = idx ^ j;
+                if (partner < CAND && partner > idx) {
+                    bool ascending = ((idx & k2) == 0);
+                    bool pB = (tgDistH[partner] < tgDistH[idx]) ||
+                              (tgDistH[partner] == tgDistH[idx] && tgIdxH[partner] < tgIdxH[idx]);
+                    bool iB = (tgDistH[idx] < tgDistH[partner]) ||
+                              (tgDistH[idx] == tgDistH[partner] && tgIdxH[idx] < tgIdxH[partner]);
+                    if (ascending ? pB : iB) {
+                        int td = tgDistH[idx]; tgDistH[idx] = tgDistH[partner]; tgDistH[partner] = td;
+                        int ti = tgIdxH [idx]; tgIdxH [idx] = tgIdxH [partner]; tgIdxH [partner] = ti;
+                    }
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+
+    uint kk = min(k, CAND);
+    for (uint i = tid; i < kk; i += TG_SIZE) {
+        outDist[qi * k + i] = tgDistH[i];
+        outIdx [qi * k + i] = (long)tgIdxH[i];
+    }
+    for (uint i = tid; i < k - kk; i += TG_SIZE) {
+        outDist[qi * k + kk + i] = sentinel;
+        outIdx [qi * k + kk + i] = -1L;
+    }
+}

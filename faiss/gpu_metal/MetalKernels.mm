@@ -482,6 +482,24 @@ void MetalKernels::encodeIVFPQScanList(
         threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 }
 
+void MetalKernels::encodeHammingDistanceTopK(
+        id<MTLComputeCommandEncoder> enc,
+        id<MTLBuffer> queries,
+        id<MTLBuffer> database,
+        id<MTLBuffer> outDist,
+        id<MTLBuffer> outIdx,
+        id<MTLBuffer> paramsBuf,
+        int nq) {
+    [enc setComputePipelineState:pipeline("hamming_distance_topk")];
+    [enc setBuffer:queries   offset:0 atIndex:0];
+    [enc setBuffer:database  offset:0 atIndex:1];
+    [enc setBuffer:outDist   offset:0 atIndex:2];
+    [enc setBuffer:outIdx    offset:0 atIndex:3];
+    [enc setBuffer:paramsBuf offset:0 atIndex:4];
+    [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)nq, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+}
+
 void MetalKernels::encodeIVFMergeLists(
         id<MTLComputeCommandEncoder> enc,
         id<MTLBuffer> perListDist, id<MTLBuffer> perListIdx,
