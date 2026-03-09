@@ -55,6 +55,12 @@ public:
     /// any existing data (e.g. for index_cpu_to_metal_gpu).
     void copyFrom(const ::faiss::IndexFlat* index);
 
+    /// Reconstruct a single stored vector by internal key (0-based).
+    void reconstruct(idx_t key, float* recons) const override;
+
+    /// Reconstruct n contiguous stored vectors starting at i0.
+    void reconstruct_n(idx_t i0, idx_t ni, float* recons) const override;
+
 private:
     /// Ensures vector buffer can hold at least \p newNtotal vectors; grows
     /// buffer if necessary.

@@ -354,6 +354,16 @@ void MetalIndexIVFFlat::search(
     }
 }
 
+void MetalIndexIVFFlat::reconstruct(idx_t key, float* recons) const {
+    FAISS_THROW_IF_NOT_MSG(cpuIndex_, "MetalIndexIVFFlat: no internal index");
+    cpuIndex_->reconstruct(key, recons);
+}
+
+void MetalIndexIVFFlat::reconstruct_n(idx_t i0, idx_t ni, float* recons) const {
+    FAISS_THROW_IF_NOT_MSG(cpuIndex_, "MetalIndexIVFFlat: no internal index");
+    cpuIndex_->reconstruct_n(i0, ni, recons);
+}
+
 idx_t MetalIndexIVFFlat::nlist() const {
     return cpuIndex_ ? cpuIndex_->nlist : 0;
 }

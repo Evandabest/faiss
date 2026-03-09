@@ -200,5 +200,20 @@ void MetalIndexFlat::copyFrom(const faiss::IndexFlat* index) {
     ntotal = n;
 }
 
+void MetalIndexFlat::reconstruct(idx_t key, float* recons) const {
+    reconstruct_n(key, 1, recons);
+}
+
+void MetalIndexFlat::reconstruct_n(idx_t i0, idx_t ni, float* recons) const {
+    FAISS_THROW_IF_NOT_FMT(
+            i0 >= 0 && i0 + ni <= ntotal,
+            "MetalIndexFlat::reconstruct_n: range [%zd, %zd) out of bounds (ntotal=%zd)",
+            (size_t)i0, (size_t)(i0 + ni), (size_t)ntotal);
+    if (ni == 0) return;
+    FAISS_THROW_IF_NOT(vectorsBuffer_ != nil);
+    const float* src = (const float*)[vectorsBuffer_ contents];
+    std::memcpy(recons, src + (size_t)i0 * (size_t)d, (size_t)ni * (size_t)d * sizeof(float));
+}
+
 } // namespace gpu_metal
 } // namespace faiss

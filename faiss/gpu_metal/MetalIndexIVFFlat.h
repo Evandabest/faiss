@@ -68,6 +68,12 @@ public:
     /// Copy to a CPU IndexIVFFlat.
     void copyTo(faiss::IndexIVFFlat* index) const;
 
+    /// Reconstruct a single stored vector by internal key.
+    void reconstruct(idx_t key, float* recons) const override;
+
+    /// Reconstruct n contiguous stored vectors starting at i0.
+    void reconstruct_n(idx_t i0, idx_t ni, float* recons) const override;
+
     /// Accessors (needed by cloner and tests).
     idx_t nlist() const;
     size_t nprobe() const;
