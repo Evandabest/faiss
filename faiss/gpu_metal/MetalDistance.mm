@@ -12,10 +12,12 @@
 
 #import "MetalDistance.h"
 #import "MetalKernels.h"
+#import "MetalResources.h"
 #import <Foundation/Foundation.h>
 #import <mach/host_info.h>
 #import <mach/mach.h>
 #import <mach/vm_statistics.h>
+#include <faiss/impl/FaissAssert.h>
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -379,6 +381,76 @@ bool runMetalIPDistance(
         id<MTLBuffer> outDistances, id<MTLBuffer> outIndices) {
     return runMetalDistance(device, queue, queries, vectors,
                            nq, nb, d, k, false, outDistances, outIndices);
+}
+
+// ============================================================
+//  bfKnn — public brute-force k-NN on raw CPU pointers
+// ============================================================
+
+void bfKnn(
+        std::shared_ptr<MetalResources> resources,
+        const float* vectors,
+        idx_t numVectors,
+        const float* queries,
+        idx_t numQueries,
+        int dims,
+        int k,
+        faiss::MetricType metric,
+        float* outDistances,
+        idx_t* outIndices) {
+    FAISS_THROW_IF_NOT(resources && resources->isAvailable());
+    FAISS_THROW_IF_NOT(vectors);
+    FAISS_THROW_IF_NOT(queries);
+    FAISS_THROW_IF_NOT(outDistances);
+    FAISS_THROW_IF_NOT(outIndices);
+    FAISS_THROW_IF_NOT(k > 0);
+    FAISS_THROW_IF_NOT(numVectors > 0);
+    FAISS_THROW_IF_NOT(numQueries > 0);
+    FAISS_THROW_IF_NOT(dims > 0);
+    FAISS_THROW_IF_NOT(metric == METRIC_L2 || metric == METRIC_INNER_PRODUCT);
+
+    id<MTLDevice> device = resources->getDevice();
+    id<MTLCommandQueue> queue = resources->getCommandQueue();
+
+    const size_t vecBytes = (size_t)numVectors * dims * sizeof(float);
+    const size_t qBytes   = (size_t)numQueries * dims * sizeof(float);
+    const size_t distBytes = (size_t)numQueries * k * sizeof(float);
+    const size_t idxBytes  = (size_t)numQueries * k * sizeof(int32_t);
+
+    id<MTLBuffer> vecBuf  = resources->allocBuffer(vecBytes,  MetalAllocType::TemporaryMemoryBuffer);
+    id<MTLBuffer> qBuf    = resources->allocBuffer(qBytes,    MetalAllocType::TemporaryMemoryBuffer);
+    id<MTLBuffer> distBuf = resources->allocBuffer(distBytes, MetalAllocType::TemporaryMemoryBuffer);
+    id<MTLBuffer> idxBuf  = resources->allocBuffer(idxBytes,  MetalAllocType::TemporaryMemoryBuffer);
+    FAISS_THROW_IF_NOT_MSG(vecBuf && qBuf && distBuf && idxBuf,
+                           "bfKnn: failed to allocate Metal buffers");
+
+    std::memcpy([vecBuf contents], vectors, vecBytes);
+    std::memcpy([qBuf contents], queries, qBytes);
+
+    bool ok = runMetalDistance(
+            device, queue, qBuf, vecBuf,
+            (int)numQueries, (int)numVectors, dims, k,
+            (metric == METRIC_L2),
+            distBuf, idxBuf);
+
+    resources->deallocBuffer(vecBuf, MetalAllocType::TemporaryMemoryBuffer);
+    resources->deallocBuffer(qBuf,   MetalAllocType::TemporaryMemoryBuffer);
+
+    if (!ok) {
+        resources->deallocBuffer(distBuf, MetalAllocType::TemporaryMemoryBuffer);
+        resources->deallocBuffer(idxBuf,  MetalAllocType::TemporaryMemoryBuffer);
+        FAISS_THROW_MSG("bfKnn: Metal distance computation failed");
+    }
+
+    std::memcpy(outDistances, [distBuf contents], distBytes);
+
+    const int32_t* gpuIdx = (const int32_t*)[idxBuf contents];
+    for (idx_t i = 0; i < (idx_t)numQueries * k; ++i) {
+        outIndices[i] = (idx_t)gpuIdx[i];
+    }
+
+    resources->deallocBuffer(distBuf, MetalAllocType::TemporaryMemoryBuffer);
+    resources->deallocBuffer(idxBuf,  MetalAllocType::TemporaryMemoryBuffer);
 }
 
 // ============================================================

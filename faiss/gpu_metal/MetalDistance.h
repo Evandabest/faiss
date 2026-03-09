@@ -13,7 +13,9 @@
 
 #import <Metal/Metal.h>
 
+#include <faiss/MetricType.h>
 #include <cstddef>
+#include <memory>
 
 namespace faiss {
 namespace gpu_metal {
@@ -180,6 +182,39 @@ bool runMetalIVFFlatFullSearch(
         int avgListLen = 256,
         id<MTLBuffer> interleavedCodes = nil,
         id<MTLBuffer> interleavedCodesOffset = nil);
+
+// ============================================================
+//  Public brute-force k-NN on raw CPU pointers (mirrors CUDA bfKnn)
+// ============================================================
+
+class MetalResources; // forward declaration
+
+/// Brute-force k-nearest-neighbor search on externally-provided data.
+/// Vectors and queries are row-major float32 CPU pointers; results are
+/// written to caller-provided CPU arrays. All GPU buffer management is
+/// handled internally.
+///
+/// @param resources  Metal resources (device + queue)
+/// @param vectors    Database vectors, row-major (numVectors x dims) float
+/// @param numVectors Number of database vectors
+/// @param queries    Query vectors, row-major (numQueries x dims) float
+/// @param numQueries Number of query vectors
+/// @param dims       Vector dimensionality
+/// @param k          Number of nearest neighbors to return (must be > 0)
+/// @param metric     METRIC_L2 or METRIC_INNER_PRODUCT
+/// @param outDistances  Output distances, row-major (numQueries x k) float
+/// @param outIndices    Output indices, row-major (numQueries x k) idx_t
+void bfKnn(
+        std::shared_ptr<MetalResources> resources,
+        const float* vectors,
+        idx_t numVectors,
+        const float* queries,
+        idx_t numQueries,
+        int dims,
+        int k,
+        faiss::MetricType metric,
+        float* outDistances,
+        idx_t* outIndices);
 
 } // namespace gpu_metal
 } // namespace faiss
