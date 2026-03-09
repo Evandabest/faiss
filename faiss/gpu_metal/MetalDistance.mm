@@ -12,18 +12,101 @@
 
 #import "MetalDistance.h"
 #import "MetalKernels.h"
+#import <Foundation/Foundation.h>
+#import <mach/host_info.h>
+#import <mach/mach.h>
+#import <mach/vm_statistics.h>
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 
 namespace faiss {
 namespace gpu_metal {
+
+namespace {
+
+/// Default tiling budget when system query fails or returns 0 (matches previous hardcoded behavior).
+constexpr size_t kDefaultTilingBudgetBytes = 256ULL * 1024 * 1024;
+
+/// Minimum budget so we don't over-tile on very low memory.
+constexpr size_t kMinTilingBudgetBytes = 64ULL * 1024 * 1024;
+
+/// Cap so we don't assume we own all free memory (other processes need headroom).
+constexpr size_t kMaxTilingBudgetBytes = 2ULL * 1024 * 1024 * 1024 * 4;
+
+/// Returns a byte budget for distance tiling based on system available memory.
+/// Uses Mach host_statistics64 (free + inactive pages), with fallback to a fraction of
+/// physical memory. Result is clamped to [kMinTilingBudgetBytes, kMaxTilingBudgetBytes].
+/// If FAISS_METAL_TILING_MEMORY_BYTES is set, that value is used instead (for tests/debug).
+size_t getAvailableMemoryForTiling() {
+    const char* envBytes = std::getenv("FAISS_METAL_TILING_MEMORY_BYTES");
+    if (envBytes && envBytes[0] != '\0') {
+        char* end = nullptr;
+        unsigned long long val = std::strtoull(envBytes, &end, 10);
+        if (end != envBytes && val != 0) {
+            return static_cast<size_t>(std::min(std::max(val, (unsigned long long)kMinTilingBudgetBytes),
+                                                (unsigned long long)kMaxTilingBudgetBytes));
+        }
+    }
+
+    size_t availableBytes = 0;
+    size_t physicalBytes = 0;
+
+    // Mach host VM stats (free + inactive pages).
+    mach_port_t host = mach_host_self();
+    vm_statistics64_data_t vm_stats;
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+    kern_return_t kr = host_statistics64(host, HOST_VM_INFO64, (host_info64_t)&vm_stats, &count);
+    if (kr == KERN_SUCCESS) {
+        vm_size_t pageSize = 0;
+        if (host_page_size(host, &pageSize) == KERN_SUCCESS && pageSize > 0) {
+            uint64_t freePages = vm_stats.free_count + vm_stats.inactive_count;
+            availableBytes = static_cast<size_t>(freePages * pageSize);
+        }
+    }
+
+    // Physical memory for ceiling and fallback.
+    uint64_t phys = [[NSProcessInfo processInfo] physicalMemory];
+    physicalBytes = static_cast<size_t>(phys);
+
+    if (availableBytes == 0 && physicalBytes > 0) {
+        availableBytes = physicalBytes / 4;
+    }
+
+    if (physicalBytes > 0) {
+        size_t cap = std::min(physicalBytes / 4, kMaxTilingBudgetBytes);
+        availableBytes = std::min(availableBytes, cap);
+    }
+    availableBytes = std::min(availableBytes, kMaxTilingBudgetBytes);
+
+    // Floor and final default.
+    if (availableBytes < kMinTilingBudgetBytes) {
+        availableBytes = kMinTilingBudgetBytes;
+    }
+    if (availableBytes == 0) {
+        availableBytes = kDefaultTilingBudgetBytes;
+    }
+    
+    //printf("Available bytes: %zu \n", availableBytes);
+    return availableBytes;
+}
+
+} // namespace
 
 void chooseTileSize(
         int nq, int nb, int d,
         size_t elementSize, size_t availableMem,
         int& tileRows, int& tileCols) {
-    size_t targetUsage = 512 * 1024 * 1024;
-    targetUsage /= 2;
-    targetUsage /= elementSize;
+
+    size_t targetUsageBytes = availableMem/ 2;
+    if (targetUsageBytes < kMinTilingBudgetBytes) {
+        targetUsageBytes = kMinTilingBudgetBytes;
+    }
+    size_t targetUsage = targetUsageBytes / elementSize;
+    if (targetUsage == 0) targetUsage = 1;
+
+    //printf("Target usage bytes %zu, Target used %zu \n", targetUsageBytes, targetUsage);
+
     int preferredTileRows = (d <= 32) ? 1024 : 512;
     tileRows = std::min(preferredTileRows, nq);
     tileCols = std::min((int)(targetUsage / preferredTileRows), nb);
@@ -56,8 +139,12 @@ bool runMetalDistance(
     MetalKernels& K = getMetalKernels(device);
     if (!K.isValid()) return false;
 
+    size_t availableMem = getAvailableMemoryForTiling();
+    if (availableMem == 0) {
+        availableMem = kDefaultTilingBudgetBytes;
+    }
     int tileRows, tileCols;
-    chooseTileSize(nq, nb, d, sizeof(float), 512ULL * 1024 * 1024,
+    chooseTileSize(nq, nb, d, sizeof(float), availableMem,
                    tileRows, tileCols);
     bool needsTiling = (tileCols < nb || tileRows < nq);
     int K_prime = needsTiling ? MetalKernels::computeKPrimeForTiling(k) : k;

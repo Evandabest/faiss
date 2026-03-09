@@ -19,7 +19,8 @@ namespace faiss {
 namespace gpu_metal {
 
 /// Calculate tile sizes for distance computation (mirrors CUDA's chooseTileSize).
-/// Determines optimal query and vector tile dimensions based on available memory.
+/// Determines optimal query and vector tile dimensions. \p availableMem is the
+/// byte budget for the tile working set (e.g. from system available memory).
 void chooseTileSize(
         int nq,
         int nb,
