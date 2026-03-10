@@ -33,13 +33,28 @@ faiss::Index* index_cpu_to_metal_gpu(
         StandardMetalResources* res,
         int device,
         const faiss::Index* index) {
+    return index_cpu_to_metal_gpu(res, device, index, nullptr);
+}
+
+faiss::Index* index_cpu_to_metal_gpu(
+        StandardMetalResources* res,
+        int device,
+        const faiss::Index* index,
+        const MetalClonerOptions* options) {
     FAISS_THROW_IF_NOT(res != nullptr);
     FAISS_THROW_IF_NOT(res->getResources() != nullptr);
     FAISS_THROW_IF_NOT(res->getResources()->isAvailable());
     FAISS_THROW_IF_NOT_MSG(device == 0, "Metal backend supports only device 0");
 
+    MetalClonerOptions opts;
+    if (options) {
+        opts = *options;
+    }
+
     MetalIndexConfig config;
     config.device = 0;
+    config.useFloat16 = opts.useFloat16;
+    config.useFloat16CoarseQuantizer = opts.useFloat16CoarseQuantizer;
 
     // IndexIVFPQ (check before IndexIVFFlat)
     const auto* ivfPQ = dynamic_cast<const faiss::IndexIVFPQ*>(index);
@@ -52,6 +67,10 @@ faiss::Index* index_cpu_to_metal_gpu(
                 "Metal IVFPQ only supports 8-bit PQ codes");
         auto* metal = new MetalIndexIVFPQ(
                 res->getResources(), ivfPQ, config);
+        metal->verbose = opts.verbose;
+        if (opts.reserveVecs > 0) {
+            metal->reserveMemory(opts.reserveVecs);
+        }
         return metal;
     }
 
@@ -63,6 +82,10 @@ faiss::Index* index_cpu_to_metal_gpu(
                 ivfSQ->metric_type == METRIC_INNER_PRODUCT);
         auto* metal = new MetalIndexIVFScalarQuantizer(
                 res->getResources(), ivfSQ, config);
+        metal->verbose = opts.verbose;
+        if (opts.reserveVecs > 0) {
+            metal->reserveMemory(opts.reserveVecs);
+        }
         return metal;
     }
 
@@ -74,6 +97,10 @@ faiss::Index* index_cpu_to_metal_gpu(
                 ivfFlat->metric_type == METRIC_INNER_PRODUCT);
         auto* metal = new MetalIndexIVFFlat(
                 res->getResources(), ivfFlat, config);
+        metal->verbose = opts.verbose;
+        if (opts.reserveVecs > 0) {
+            metal->reserveMemory(opts.reserveVecs);
+        }
         return metal;
     }
 
@@ -89,6 +116,7 @@ faiss::Index* index_cpu_to_metal_gpu(
                 flat->metric_arg,
                 config);
         metal->copyFrom(flat);
+        metal->verbose = opts.verbose;
         return metal;
     }
 

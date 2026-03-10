@@ -848,3 +848,53 @@ TEST_F(AccMetalIndexFlat, ComputeResidualN) {
         EXPECT_NEAR(residuals[i], 0.0f, 1e-5f);
     }
 }
+
+TEST_F(AccMetalIndexFlat, ClonerOptionsFloat16) {
+    const int dim = 64, nb = 500, nq = 10, k = 5;
+    std::vector<float> vecs(nb * dim), queries(nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 100);
+    faiss::float_rand(queries.data(), queries.size(), 200);
+
+    faiss::IndexFlatL2 cpuIdx(dim);
+    cpuIdx.add(nb, vecs.data());
+
+    faiss::gpu_metal::StandardMetalResources stdRes;
+    faiss::gpu_metal::MetalClonerOptions opts;
+    opts.useFloat16 = true;
+    opts.verbose = true;
+
+    faiss::Index* metalRaw = faiss::gpu_metal::index_cpu_to_metal_gpu(
+            &stdRes, 0, &cpuIdx, &opts);
+    ASSERT_NE(metalRaw, nullptr);
+    EXPECT_TRUE(metalRaw->verbose);
+
+    std::vector<float> cpuDist(nq * k), metalDist(nq * k);
+    std::vector<faiss::idx_t> cpuLab(nq * k), metalLab(nq * k);
+    cpuIdx.search(nq, queries.data(), k, cpuDist.data(), cpuLab.data());
+    metalRaw->search(nq, queries.data(), k, metalDist.data(), metalLab.data());
+
+    float recall = computeRecall(nq, k, cpuLab.data(), metalLab.data());
+    EXPECT_GE(recall, 0.90f) << "fp16 cloner recall = " << recall;
+
+    delete metalRaw;
+}
+
+TEST_F(AccMetalIndexFlat, ClonerOptionsVerbose) {
+    const int dim = 32, nb = 100;
+    std::vector<float> vecs(nb * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 300);
+
+    faiss::IndexFlatL2 cpuIdx(dim);
+    cpuIdx.add(nb, vecs.data());
+
+    faiss::gpu_metal::StandardMetalResources stdRes;
+    faiss::gpu_metal::MetalClonerOptions opts;
+    opts.verbose = false;
+
+    faiss::Index* metalRaw = faiss::gpu_metal::index_cpu_to_metal_gpu(
+            &stdRes, 0, &cpuIdx, &opts);
+    ASSERT_NE(metalRaw, nullptr);
+    EXPECT_FALSE(metalRaw->verbose);
+
+    delete metalRaw;
+}

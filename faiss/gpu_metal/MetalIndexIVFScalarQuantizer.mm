@@ -551,6 +551,12 @@ void MetalIndexIVFScalarQuantizer::reclaimMemory() {
     // No-op: Metal unified memory doesn't require explicit reclaim.
 }
 
+void MetalIndexIVFScalarQuantizer::reserveMemory(idx_t numVecs) {
+    if (gpuIvf_) {
+        gpuIvf_->reserveMemory(numVecs);
+    }
+}
+
 idx_t MetalIndexIVFScalarQuantizer::nlist() const {
     return cpuIndex_ ? cpuIndex_->nlist : 0;
 }

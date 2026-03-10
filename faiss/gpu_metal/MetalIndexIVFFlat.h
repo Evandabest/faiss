@@ -103,6 +103,9 @@ public:
     /// Release unused GPU memory.
     void reclaimMemory();
 
+    /// Pre-allocate GPU storage for the given total number of vectors.
+    void reserveMemory(idx_t numVecs);
+
     /// Accessors (needed by cloner and tests).
     idx_t nlist() const;
     size_t nprobe() const;

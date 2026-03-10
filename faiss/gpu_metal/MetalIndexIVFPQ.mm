@@ -524,6 +524,12 @@ void MetalIndexIVFPQ::reclaimMemory() {
     // No-op: Metal unified memory doesn't require explicit reclaim.
 }
 
+void MetalIndexIVFPQ::reserveMemory(idx_t numVecs) {
+    if (gpuIvf_) {
+        gpuIvf_->reserveMemory(numVecs);
+    }
+}
+
 idx_t MetalIndexIVFPQ::nlist() const {
     return cpuIndex_ ? cpuIndex_->nlist : 0;
 }

@@ -18,22 +18,42 @@ namespace gpu_metal {
 
 class StandardMetalResources;
 
+/// Options controlling how CPU indexes are cloned to Metal GPU.
+/// Mirrors faiss::gpu::GpuClonerOptions for the Metal backend.
+struct MetalClonerOptions {
+    /// Store flat vectors as float16 (MetalIndexFlat only).
+    bool useFloat16 = false;
+
+    /// Store IVF coarse-quantizer centroids as float16.
+    bool useFloat16CoarseQuantizer = false;
+
+    /// Reserve space for this many vectors in IVF inverted lists.
+    long reserveVecs = 0;
+
+    /// Set verbose flag on the created index.
+    bool verbose = false;
+};
+
 /// Returns the number of Metal "devices" (1 if Metal is available, else 0).
 int get_num_gpus();
 
-/// Clone a CPU index to Metal GPU.
-/// Supports IndexFlat, IndexIVFFlat, IndexIVFScalarQuantizer, IndexIVFPQ.
-/// device must be 0. Caller owns the returned index.
+/// Clone a CPU index to Metal GPU with default options.
 faiss::Index* index_cpu_to_metal_gpu(
         StandardMetalResources* res,
         int device,
         const faiss::Index* index);
 
+/// Clone a CPU index to Metal GPU with explicit options.
+faiss::Index* index_cpu_to_metal_gpu(
+        StandardMetalResources* res,
+        int device,
+        const faiss::Index* index,
+        const MetalClonerOptions* options);
+
 /// Copy a Metal index back to CPU. Caller owns the returned index.
 faiss::Index* index_metal_gpu_to_cpu(const faiss::Index* index);
 
 /// Clone a CPU binary index to Metal GPU.
-/// Supports IndexBinaryFlat.
 faiss::IndexBinary* index_binary_cpu_to_metal_gpu(
         StandardMetalResources* res,
         int device,

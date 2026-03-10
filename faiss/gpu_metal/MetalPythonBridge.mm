@@ -30,11 +30,12 @@ faiss::Index* index_cpu_to_gpu(
         int device,
         const faiss::Index* index,
         const MetalClonerOptions* options) {
-    (void)options;
     if (!res || !res->impl) {
         return nullptr;
     }
-    return index_cpu_to_metal_gpu(static_cast<StandardMetalResources*>(res->impl), device, index);
+    return index_cpu_to_metal_gpu(
+            static_cast<StandardMetalResources*>(res->impl),
+            device, index, options);
 }
 
 faiss::Index* index_cpu_to_gpu_multiple(
@@ -42,11 +43,10 @@ faiss::Index* index_cpu_to_gpu_multiple(
         std::vector<int>& devices,
         const faiss::Index* index,
         const MetalClonerOptions* options) {
-    (void)options;
     if (res.size() != 1 || devices.size() != 1) {
-        return nullptr;  // Multi-GPU not supported
+        return nullptr;
     }
-    return index_cpu_to_gpu(res[0], devices[0], index);
+    return index_cpu_to_gpu(res[0], devices[0], index, options);
 }
 
 faiss::Index* index_gpu_to_cpu(const faiss::Index* index) {

@@ -523,6 +523,12 @@ void MetalIndexIVFFlat::reclaimMemory() {
     // reclaim in the same way as discrete CUDA GPU memory.
 }
 
+void MetalIndexIVFFlat::reserveMemory(idx_t numVecs) {
+    if (gpuIvf_) {
+        gpuIvf_->reserveMemory(numVecs);
+    }
+}
+
 idx_t MetalIndexIVFFlat::nlist() const {
     return cpuIndex_ ? cpuIndex_->nlist : 0;
 }

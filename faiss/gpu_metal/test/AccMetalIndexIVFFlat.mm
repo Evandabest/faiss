@@ -661,3 +661,54 @@ TEST_F(AccMetalIndexIVFFlat, ReclaimMemory) {
     metalIdx.reclaimMemory();
     EXPECT_EQ(metalIdx.ntotal, nb);
 }
+
+TEST_F(AccMetalIndexIVFFlat, ClonerOptionsFloat16Coarse) {
+    const int dim = 64, nlist = 8, nb = 1000, nq = 10, k = 5;
+    std::vector<float> vecs(nb * dim), queries(nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 101);
+    faiss::float_rand(queries.data(), queries.size(), 102);
+
+    auto cpuIdx = makeCpuIVFFlat(dim, nlist, faiss::METRIC_L2, nb, vecs.data());
+    cpuIdx->add(nb, vecs.data());
+    cpuIdx->nprobe = 4;
+
+    faiss::gpu_metal::StandardMetalResources stdRes;
+    faiss::gpu_metal::MetalClonerOptions opts;
+    opts.useFloat16CoarseQuantizer = true;
+    opts.verbose = true;
+
+    faiss::Index* metalRaw = faiss::gpu_metal::index_cpu_to_metal_gpu(
+            &stdRes, 0, cpuIdx.get(), &opts);
+    ASSERT_NE(metalRaw, nullptr);
+    EXPECT_TRUE(metalRaw->verbose);
+
+    std::vector<float> cpuDist(nq * k), metalDist(nq * k);
+    std::vector<faiss::idx_t> cpuLab(nq * k), metalLab(nq * k);
+    cpuIdx->search(nq, queries.data(), k, cpuDist.data(), cpuLab.data());
+    metalRaw->search(nq, queries.data(), k, metalDist.data(), metalLab.data());
+
+    float recall = computeRecall(nq, k, cpuLab.data(), metalLab.data());
+    EXPECT_GE(recall, 0.70f) << "fp16 coarse recall = " << recall;
+
+    delete metalRaw;
+}
+
+TEST_F(AccMetalIndexIVFFlat, ClonerOptionsReserveVecs) {
+    const int dim = 32, nlist = 4, nb = 200;
+    std::vector<float> vecs(nb * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 103);
+
+    auto cpuIdx = makeCpuIVFFlat(dim, nlist, faiss::METRIC_L2, nb, vecs.data());
+    cpuIdx->add(nb, vecs.data());
+
+    faiss::gpu_metal::StandardMetalResources stdRes;
+    faiss::gpu_metal::MetalClonerOptions opts;
+    opts.reserveVecs = 10000;
+
+    faiss::Index* metalRaw = faiss::gpu_metal::index_cpu_to_metal_gpu(
+            &stdRes, 0, cpuIdx.get(), &opts);
+    ASSERT_NE(metalRaw, nullptr);
+    EXPECT_EQ(metalRaw->ntotal, nb);
+
+    delete metalRaw;
+}

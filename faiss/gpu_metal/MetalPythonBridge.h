@@ -12,6 +12,7 @@
 #pragma once
 
 #include <faiss/Index.h>
+#include <faiss/gpu_metal/MetalCloner.h>
 #include <vector>
 
 namespace faiss {
@@ -25,9 +26,6 @@ struct StandardMetalResourcesHolder {
     StandardMetalResourcesHolder(const StandardMetalResourcesHolder&) = delete;
     StandardMetalResourcesHolder& operator=(const StandardMetalResourcesHolder&) = delete;
 };
-
-/// Dummy options for API compatibility with GPU cloner (options are ignored).
-struct MetalClonerOptions {};
 
 /// Same names as GPU API for unified Python binding.
 int get_num_gpus();
