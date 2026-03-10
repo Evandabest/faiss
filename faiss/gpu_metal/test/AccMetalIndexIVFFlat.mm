@@ -583,3 +583,81 @@ TEST_F(AccMetalIndexIVFFlat, FP16CoarseD128) {
 
     expectRecall(nq, k, 0.85f, cpuL.data(), gpuL.data());
 }
+
+// ---- D3 API tests: getListIndices / getListVectorData / updateQuantizer ----
+
+TEST_F(AccMetalIndexIVFFlat, GetListIndices) {
+    const int dim = 32, nlist = 8, nb = 500;
+    std::vector<float> vecs(nb * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 42);
+
+    auto cpuIdx = makeCpuIVFFlat(dim, nlist, faiss::METRIC_L2, nb, vecs.data());
+    cpuIdx->add(nb, vecs.data());
+
+    faiss::gpu_metal::MetalIndexIVFFlat metalIdx(resources_, cpuIdx.get());
+
+    for (faiss::idx_t l = 0; l < nlist; ++l) {
+        auto metalIds = metalIdx.getListIndices(l);
+        size_t cpuLen = cpuIdx->invlists->list_size(l);
+        EXPECT_EQ(metalIds.size(), cpuLen) << "List " << l;
+        if (cpuLen > 0) {
+            const faiss::idx_t* cpuIds = cpuIdx->invlists->get_ids(l);
+            for (size_t i = 0; i < cpuLen; ++i)
+                EXPECT_EQ(metalIds[i], cpuIds[i]);
+        }
+    }
+}
+
+TEST_F(AccMetalIndexIVFFlat, GetListVectorData) {
+    const int dim = 16, nlist = 4, nb = 200;
+    std::vector<float> vecs(nb * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 77);
+
+    auto cpuIdx = makeCpuIVFFlat(dim, nlist, faiss::METRIC_L2, nb, vecs.data());
+    cpuIdx->add(nb, vecs.data());
+
+    faiss::gpu_metal::MetalIndexIVFFlat metalIdx(resources_, cpuIdx.get());
+
+    for (faiss::idx_t l = 0; l < nlist; ++l) {
+        auto metalVecs = metalIdx.getListVectorData(l);
+        size_t cpuLen = cpuIdx->invlists->list_size(l);
+        EXPECT_EQ(metalVecs.size(), cpuLen * (size_t)dim);
+    }
+}
+
+TEST_F(AccMetalIndexIVFFlat, UpdateQuantizer) {
+    const int dim = 32, nlist = 8, nb = 500, nq = 10, k = 5;
+    std::vector<float> vecs(nb * dim), queries(nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 42);
+    faiss::float_rand(queries.data(), queries.size(), 123);
+
+    auto cpuIdx = makeCpuIVFFlat(dim, nlist, faiss::METRIC_L2, nb, vecs.data());
+    cpuIdx->add(nb, vecs.data());
+    cpuIdx->nprobe = 4;
+
+    faiss::gpu_metal::MetalIndexIVFFlat metalIdx(resources_, cpuIdx.get());
+    metalIdx.updateQuantizer();
+
+    std::vector<float> dist(nq * k);
+    std::vector<faiss::idx_t> lab(nq * k);
+    metalIdx.search(nq, queries.data(), k, dist.data(), lab.data());
+
+    bool anyResult = false;
+    for (int i = 0; i < nq * k; ++i) {
+        if (lab[i] >= 0) { anyResult = true; break; }
+    }
+    EXPECT_TRUE(anyResult);
+}
+
+TEST_F(AccMetalIndexIVFFlat, ReclaimMemory) {
+    const int dim = 32, nlist = 4, nb = 100;
+    std::vector<float> vecs(nb * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 99);
+
+    auto cpuIdx = makeCpuIVFFlat(dim, nlist, faiss::METRIC_L2, nb, vecs.data());
+    cpuIdx->add(nb, vecs.data());
+
+    faiss::gpu_metal::MetalIndexIVFFlat metalIdx(resources_, cpuIdx.get());
+    metalIdx.reclaimMemory();
+    EXPECT_EQ(metalIdx.ntotal, nb);
+}

@@ -506,6 +506,24 @@ void MetalIndexIVFPQ::copyTo(faiss::IndexIVFPQ* dst) const {
 //  Accessors
 // ============================================================
 
+void MetalIndexIVFPQ::updateQuantizer() {
+    uploadCentroids_();
+    uploadPQCentroids_();
+}
+
+std::vector<idx_t> MetalIndexIVFPQ::getListIndices(idx_t listId) const {
+    FAISS_THROW_IF_NOT(cpuIndex_);
+    FAISS_THROW_IF_NOT(listId >= 0 && listId < cpuIndex_->nlist);
+    size_t ls = cpuIndex_->invlists->list_size(listId);
+    if (ls == 0) return {};
+    const idx_t* ids = cpuIndex_->invlists->get_ids(listId);
+    return std::vector<idx_t>(ids, ids + ls);
+}
+
+void MetalIndexIVFPQ::reclaimMemory() {
+    // No-op: Metal unified memory doesn't require explicit reclaim.
+}
+
 idx_t MetalIndexIVFPQ::nlist() const {
     return cpuIndex_ ? cpuIndex_->nlist : 0;
 }

@@ -60,6 +60,10 @@ public:
     void reconstruct(idx_t key, float* recons) const override;
     void reconstruct_n(idx_t i0, idx_t ni, float* recons) const override;
 
+    void updateQuantizer();
+    std::vector<idx_t> getListIndices(idx_t listId) const;
+    void reclaimMemory();
+
     idx_t nlist() const;
     size_t nprobe() const;
     faiss::ScalarQuantizer::QuantizerType sqQuantizerType() const;

@@ -773,3 +773,78 @@ TEST_F(AccMetalIndexFlat, Float16LargeD128) {
     float recall = computeRecall(nq, k, cpuLab.data(), gpuLab.data());
     EXPECT_GE(recall, 0.95f) << "Float16 L2 d=128 recall " << recall;
 }
+
+// ---- assign / compute_residual tests ----
+
+TEST_F(AccMetalIndexFlat, AssignL2) {
+    const int dim = 32, nb = 500, nq = 10, k = 3;
+    std::vector<float> vecs(nb * dim), queries(nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 42);
+    faiss::float_rand(queries.data(), queries.size(), 123);
+
+    faiss::IndexFlatL2 cpuIdx(dim);
+    cpuIdx.add(nb, vecs.data());
+
+    faiss::gpu_metal::MetalIndexFlat metalIdx(
+            resources_, dim, faiss::METRIC_L2);
+    metalIdx.add(nb, vecs.data());
+
+    std::vector<faiss::idx_t> cpuLab(nq * k), metalLab(nq * k);
+    cpuIdx.assign(nq, queries.data(), cpuLab.data(), k);
+    metalIdx.assign(nq, queries.data(), metalLab.data(), k);
+
+    for (int i = 0; i < nq; ++i) {
+        EXPECT_EQ(cpuLab[i * k], metalLab[i * k])
+                << "Top-1 assign mismatch for query " << i;
+    }
+}
+
+TEST_F(AccMetalIndexFlat, ComputeResidual) {
+    const int dim = 32, nb = 100;
+    std::vector<float> vecs(nb * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 55);
+
+    faiss::gpu_metal::MetalIndexFlat metalIdx(
+            resources_, dim, faiss::METRIC_L2);
+    metalIdx.add(nb, vecs.data());
+
+    for (int key = 0; key < nb; key += 10) {
+        std::vector<float> residual(dim);
+        metalIdx.compute_residual(vecs.data() + key * dim,
+                                   residual.data(), key);
+        for (int j = 0; j < dim; ++j) {
+            EXPECT_NEAR(residual[j], 0.0f, 1e-5f)
+                    << "Residual should be ~0 for own vector, key=" << key;
+        }
+    }
+
+    std::vector<float> query(dim);
+    faiss::float_rand(query.data(), query.size(), 77);
+    std::vector<float> residual(dim), recons(dim);
+    metalIdx.compute_residual(query.data(), residual.data(), 0);
+    metalIdx.reconstruct(0, recons.data());
+    for (int j = 0; j < dim; ++j) {
+        EXPECT_NEAR(residual[j], query[j] - recons[j], 1e-5f);
+    }
+}
+
+TEST_F(AccMetalIndexFlat, ComputeResidualN) {
+    const int dim = 16, nb = 50, n = 5;
+    std::vector<float> vecs(nb * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 99);
+
+    faiss::gpu_metal::MetalIndexFlat metalIdx(
+            resources_, dim, faiss::METRIC_L2);
+    metalIdx.add(nb, vecs.data());
+
+    std::vector<faiss::idx_t> keys = {0, 5, 10, 20, 49};
+    std::vector<float> xs(n * dim), residuals(n * dim);
+    for (int i = 0; i < n; ++i)
+        std::memcpy(xs.data() + i * dim,
+                     vecs.data() + keys[i] * dim, dim * sizeof(float));
+
+    metalIdx.compute_residual_n(n, xs.data(), residuals.data(), keys.data());
+    for (int i = 0; i < n * dim; ++i) {
+        EXPECT_NEAR(residuals[i], 0.0f, 1e-5f);
+    }
+}

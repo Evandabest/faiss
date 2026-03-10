@@ -91,6 +91,18 @@ public:
     /// Reconstruct n contiguous stored vectors starting at i0.
     void reconstruct_n(idx_t i0, idx_t ni, float* recons) const override;
 
+    /// Re-upload coarse quantizer centroids to GPU after external changes.
+    void updateQuantizer();
+
+    /// Return the vector indices in inverted list `listId`.
+    std::vector<idx_t> getListIndices(idx_t listId) const;
+
+    /// Return raw vector data from inverted list `listId`.
+    std::vector<float> getListVectorData(idx_t listId) const;
+
+    /// Release unused GPU memory.
+    void reclaimMemory();
+
     /// Accessors (needed by cloner and tests).
     idx_t nlist() const;
     size_t nprobe() const;

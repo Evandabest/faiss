@@ -243,6 +243,33 @@ void MetalIndexFlat::copyFrom(const faiss::IndexFlat* index) {
     ntotal = n;
 }
 
+void MetalIndexFlat::assign(
+        idx_t n, const float* x, idx_t* labels, idx_t k) const {
+    FAISS_THROW_IF_NOT(k > 0);
+    std::vector<float> distances(n * k);
+    search(n, x, k, distances.data(), labels);
+}
+
+void MetalIndexFlat::compute_residual(
+        const float* x, float* residual, idx_t key) const {
+    compute_residual_n(1, x, residual, &key);
+}
+
+void MetalIndexFlat::compute_residual_n(
+        idx_t n,
+        const float* xs,
+        float* residuals,
+        const idx_t* keys) const {
+    for (idx_t i = 0; i < n; ++i) {
+        std::vector<float> recons(d);
+        reconstruct(keys[i], recons.data());
+        const float* x = xs + i * d;
+        float* r = residuals + i * d;
+        for (int j = 0; j < d; ++j)
+            r[j] = x[j] - recons[j];
+    }
+}
+
 void MetalIndexFlat::reconstruct(idx_t key, float* recons) const {
     reconstruct_n(key, 1, recons);
 }

@@ -55,6 +55,21 @@ public:
     /// any existing data (e.g. for index_cpu_to_metal_gpu).
     void copyFrom(const ::faiss::IndexFlat* index);
 
+    /// Assign vectors to their nearest neighbor (returns labels only).
+    void assign(idx_t n, const float* x, idx_t* labels, idx_t k = 1)
+            const override;
+
+    /// Compute residual: residual = x - reconstruct(key).
+    void compute_residual(const float* x, float* residual, idx_t key)
+            const override;
+
+    /// Batch compute residuals: residuals[i] = xs[i] - reconstruct(keys[i]).
+    void compute_residual_n(
+            idx_t n,
+            const float* xs,
+            float* residuals,
+            const idx_t* keys) const override;
+
     /// Reconstruct a single stored vector by internal key (0-based).
     void reconstruct(idx_t key, float* recons) const override;
 

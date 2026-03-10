@@ -62,6 +62,10 @@ public:
     void copyFrom(const faiss::IndexIVFPQ* index);
     void copyTo(faiss::IndexIVFPQ* index) const;
 
+    void updateQuantizer();
+    std::vector<idx_t> getListIndices(idx_t listId) const;
+    void reclaimMemory();
+
     idx_t nlist() const;
     size_t nprobe() const;
     int getNumSubQuantizers() const;
