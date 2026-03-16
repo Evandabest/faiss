@@ -46,7 +46,7 @@ class TestMetalPython(unittest.TestCase):
         np.testing.assert_array_equal(I_gpu, I_cpu)
 
     def test_index_cpu_to_gpu_with_options(self):
-        """Same as above but pass GpuClonerOptions (ignored on Metal) for API parity."""
+        """Same as above but pass GpuClonerOptions for Metal cloner parity."""
         if faiss.get_num_gpus() == 0:
             self.skipTest("No Metal device")
         d, nb, nq, k = 16, 50, 5, 3

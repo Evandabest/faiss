@@ -37,6 +37,15 @@ struct MetalClonerOptions {
     /// Enable/disable interleaved IVF layout.
     bool interleavedLayout = true;
 
+    /// Match CUDA option shape: accepted for API parity.
+    /// Metal Flat does not use a transposed storage layout today.
+    bool storeTransposed = false;
+
+    /// If false, reject IVF indexes whose coarse quantizer is not IndexFlat.
+    /// If true, allow cloner to reconstruct coarse centroids from the CPU
+    /// quantizer and proceed.
+    bool allowCpuCoarseQuantizer = false;
+
     /// Set verbose flag on the created index.
     bool verbose = false;
 };

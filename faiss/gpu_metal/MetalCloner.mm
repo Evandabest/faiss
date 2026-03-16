@@ -58,12 +58,25 @@ faiss::Index* index_cpu_to_metal_gpu(
     config.indicesOptions = opts.indicesOptions;
     config.interleavedLayout = opts.interleavedLayout;
 
+    auto coarseQuantizerAllowed = [&](const faiss::IndexIVF* ivf) {
+        if (!ivf || !ivf->quantizer) {
+            return;
+        }
+        const bool isFlat =
+                dynamic_cast<const faiss::IndexFlat*>(ivf->quantizer) != nullptr;
+        FAISS_THROW_IF_NOT_MSG(
+                isFlat || opts.allowCpuCoarseQuantizer,
+                "index_cpu_to_metal_gpu: coarse quantizer must be IndexFlat unless "
+                "allowCpuCoarseQuantizer=true");
+    };
+
     // IndexIVFPQ (check before IndexIVFFlat)
     const auto* ivfPQ = dynamic_cast<const faiss::IndexIVFPQ*>(index);
     if (ivfPQ) {
         FAISS_THROW_IF_NOT(
                 ivfPQ->metric_type == METRIC_L2 ||
                 ivfPQ->metric_type == METRIC_INNER_PRODUCT);
+        coarseQuantizerAllowed(ivfPQ);
         FAISS_THROW_IF_NOT_MSG(
                 ivfPQ->pq.nbits == 8,
                 "Metal IVFPQ only supports 8-bit PQ codes");
@@ -82,6 +95,7 @@ faiss::Index* index_cpu_to_metal_gpu(
         FAISS_THROW_IF_NOT(
                 ivfSQ->metric_type == METRIC_L2 ||
                 ivfSQ->metric_type == METRIC_INNER_PRODUCT);
+        coarseQuantizerAllowed(ivfSQ);
         auto* metal = new MetalIndexIVFScalarQuantizer(
                 res->getResources(), ivfSQ, config);
         metal->verbose = opts.verbose;
@@ -97,6 +111,7 @@ faiss::Index* index_cpu_to_metal_gpu(
         FAISS_THROW_IF_NOT(
                 ivfFlat->metric_type == METRIC_L2 ||
                 ivfFlat->metric_type == METRIC_INNER_PRODUCT);
+        coarseQuantizerAllowed(ivfFlat);
         auto* metal = new MetalIndexIVFFlat(
                 res->getResources(), ivfFlat, config);
         metal->verbose = opts.verbose;

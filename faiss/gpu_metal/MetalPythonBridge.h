@@ -71,7 +71,7 @@ struct MetalBridgeDistanceParams {
 int get_num_gpus();
 
 /// Clone CPU index to Metal GPU. Caller owns returned index.
-/// options is ignored but accepted for API compatibility with GPU cloner.
+/// options supports a Metal-compatible subset of GpuClonerOptions.
 faiss::Index* index_cpu_to_gpu(
         StandardMetalResourcesHolder* res,
         int device,

@@ -10,6 +10,7 @@
  */
 
 #include <faiss/IndexFlat.h>
+#include <faiss/IndexIDMap.h>
 #include <faiss/IndexIVFFlat.h>
 #include <faiss/invlists/DirectMap.h>
 #include <faiss/gpu_metal/MetalCloner.h>
@@ -803,4 +804,54 @@ TEST_F(AccMetalIndexIVFFlat, Indices32BitRejectsOutOfRangeIds) {
     }
 
     EXPECT_ANY_THROW(metalIdx.add_with_ids(nb, vecs.data(), ids.data()));
+}
+
+TEST_F(AccMetalIndexIVFFlat, ClonerRejectsNonFlatCoarseQuantizerByDefault) {
+    const int dim = 24, nlist = 8, nb = 1200;
+    std::vector<float> vecs(nb * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 414);
+
+    auto* idMapQ = new faiss::IndexIDMap(new faiss::IndexFlatL2(dim));
+    auto cpuIdx = std::make_unique<faiss::IndexIVFFlat>(
+            idMapQ, (size_t)dim, (size_t)nlist, faiss::METRIC_L2);
+    cpuIdx->own_fields = true;
+    cpuIdx->train(nb, vecs.data());
+    cpuIdx->add(nb, vecs.data());
+
+    faiss::gpu_metal::StandardMetalResources stdRes;
+    EXPECT_ANY_THROW(faiss::gpu_metal::index_cpu_to_metal_gpu(
+            &stdRes, 0, cpuIdx.get()));
+}
+
+TEST_F(AccMetalIndexIVFFlat, ClonerAllowsNonFlatCoarseQuantizerWhenEnabled) {
+    const int dim = 24, nlist = 8, nb = 1200, nq = 12, k = 6;
+    std::vector<float> vecs(nb * dim), queries(nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 515);
+    faiss::float_rand(queries.data(), queries.size(), 516);
+
+    auto* idMapQ = new faiss::IndexIDMap(new faiss::IndexFlatL2(dim));
+    auto cpuIdx = std::make_unique<faiss::IndexIVFFlat>(
+            idMapQ, (size_t)dim, (size_t)nlist, faiss::METRIC_L2);
+    cpuIdx->own_fields = true;
+    cpuIdx->train(nb, vecs.data());
+    cpuIdx->add(nb, vecs.data());
+    cpuIdx->nprobe = 4;
+
+    std::vector<float> cpuD(nq * k);
+    std::vector<faiss::idx_t> cpuL(nq * k, -1);
+    cpuIdx->search(nq, queries.data(), k, cpuD.data(), cpuL.data());
+
+    faiss::gpu_metal::StandardMetalResources stdRes;
+    faiss::gpu_metal::MetalClonerOptions opts;
+    opts.allowCpuCoarseQuantizer = true;
+    faiss::Index* metalRaw = faiss::gpu_metal::index_cpu_to_metal_gpu(
+            &stdRes, 0, cpuIdx.get(), &opts);
+    ASSERT_NE(metalRaw, nullptr);
+
+    std::vector<float> testD(nq * k);
+    std::vector<faiss::idx_t> testL(nq * k, -1);
+    metalRaw->search(nq, queries.data(), k, testD.data(), testL.data());
+    expectRecall(nq, k, 0.70f, cpuL.data(), testL.data());
+
+    delete metalRaw;
 }

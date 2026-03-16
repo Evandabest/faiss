@@ -411,14 +411,17 @@ void MetalIndexIVFPQ::copyFrom(const faiss::IndexIVFPQ* src) {
         return;
     }
 
-    // Copy quantizer centroids.
-    auto* srcQ = dynamic_cast<const faiss::IndexFlat*>(src->quantizer);
+    // Copy quantizer centroids (allow non-IndexFlat CPU coarse quantizers by
+    // reconstructing centroid vectors).
+    FAISS_THROW_IF_NOT_MSG(src->quantizer, "copyFrom: source quantizer is null");
     auto* ourQ = dynamic_cast<faiss::IndexFlat*>(cpuIndex_->quantizer);
-    FAISS_THROW_IF_NOT_MSG(srcQ, "copyFrom: source quantizer not IndexFlat");
     FAISS_THROW_IF_NOT_MSG(ourQ, "copyFrom: internal quantizer not IndexFlat");
     ourQ->reset();
-    if (srcQ->ntotal > 0)
-        ourQ->add(srcQ->ntotal, srcQ->get_xb());
+    if (src->nlist > 0) {
+        std::vector<float> coarse((size_t)src->nlist * d);
+        src->quantizer->reconstruct_n(0, src->nlist, coarse.data());
+        ourQ->add(src->nlist, coarse.data());
+    }
 
     // Copy PQ centroids.
     cpuIndex_->pq = src->pq;
