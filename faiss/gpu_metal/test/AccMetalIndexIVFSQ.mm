@@ -64,13 +64,14 @@ std::unique_ptr<faiss::IndexIVFScalarQuantizer> makeCpuIVFSQ(
         faiss::ScalarQuantizer::QuantizerType sqType,
         faiss::MetricType metric,
         int nb,
-        const float* trainData) {
+        const float* trainData,
+        bool byResidual = false) {
     faiss::IndexFlat* quantizer = (metric == faiss::METRIC_INNER_PRODUCT)
             ? (faiss::IndexFlat*)new faiss::IndexFlatIP(dim)
             : (faiss::IndexFlat*)new faiss::IndexFlatL2(dim);
     auto idx = std::make_unique<faiss::IndexIVFScalarQuantizer>(
             quantizer, (size_t)dim, (size_t)nlist, sqType, metric,
-            /*by_residual=*/false);
+            byResidual);
     idx->own_fields = true;
     idx->train(nb, trainData);
     return idx;
@@ -308,6 +309,39 @@ TEST(AccMetalIndexIVFSQ_ExtraTypes, Qt4AndQt6ConstructAndSearch) {
         metalIdx.search(nq, queries.data(), k, gpuD.data(), gpuL.data());
         expectRecall(nq, k, 0.95f, cpuL.data(), gpuL.data());
     }
+}
+
+TEST(AccMetalIndexIVFSQ_Residual, CopyFromByResidualTrueMatchesCpu) {
+    auto res = std::make_shared<faiss::gpu_metal::MetalResources>();
+    if (!res->isAvailable()) {
+        GTEST_SKIP() << "Metal not available";
+    }
+
+    const int dim = 64, nlist = 16, nb = 4000, nq = 40, k = 10;
+    std::vector<float> data(nb * dim), queries(nq * dim);
+    faiss::float_rand(data.data(), data.size(), 7001);
+    faiss::float_rand(queries.data(), queries.size(), 7002);
+
+    auto cpuIdx = makeCpuIVFSQ(
+            dim,
+            nlist,
+            faiss::ScalarQuantizer::QT_8bit,
+            faiss::METRIC_L2,
+            nb,
+            data.data(),
+            /*byResidual=*/true);
+    cpuIdx->add(nb, data.data());
+    cpuIdx->nprobe = 8;
+
+    faiss::gpu_metal::MetalIndexIVFScalarQuantizer metalIdx(
+            res, cpuIdx.get());
+
+    std::vector<float> cpuD(nq * k), gpuD(nq * k);
+    std::vector<faiss::idx_t> cpuL(nq * k), gpuL(nq * k);
+    cpuIdx->search(nq, queries.data(), k, cpuD.data(), cpuL.data());
+    metalIdx.search(nq, queries.data(), k, gpuD.data(), gpuL.data());
+
+    expectRecall(nq, k, 0.99f, cpuL.data(), gpuL.data());
 }
 
 } // namespace

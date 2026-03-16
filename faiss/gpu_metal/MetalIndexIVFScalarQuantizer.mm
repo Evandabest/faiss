@@ -76,7 +76,7 @@ MetalIndexIVFScalarQuantizer::MetalIndexIVFScalarQuantizer(
             : (faiss::IndexFlat*)new faiss::IndexFlatL2(dims);
  
     cpuIndex_ = std::make_unique<faiss::IndexIVFScalarQuantizer>(
-            quantizer, (size_t)d, (size_t)nlist, sqType, metric, false);
+            quantizer, (size_t)d, (size_t)nlist, sqType, metric, byResidual);
     cpuIndex_->own_fields = true;
 
     MetalSQType mst = MetalSQType::SQ8;
@@ -109,7 +109,7 @@ MetalIndexIVFScalarQuantizer::MetalIndexIVFScalarQuantizer(
             cpuIndex->nlist,
             cpuIndex->sq.qtype,
             cpuIndex->metric_type,
-            /*by_residual=*/false);
+            cpuIndex->by_residual);
     cpuIndex_->own_fields = true;
 
     if (gpuSqSupported) {
@@ -367,6 +367,10 @@ void MetalIndexIVFScalarQuantizer::search(
         coarseDst[i] = (int32_t)coarseAssignVec[i];
     }
 
+    if (cpuIndex_->by_residual && !centroidBuf_) {
+        uploadCentroids_();
+    }
+
     MetalSQType mst = gpuIvf_->sqType();
     bool ok = runMetalIVFSQScan(
             device, queue,
@@ -379,6 +383,8 @@ void MetalIndexIVFScalarQuantizer::search(
             (int)n, d, (int)k, (int)nprobe, isL2,
             mst,
             gpuIvf_->sqTablesBuffer(),
+            centroidBuf_,
+            cpuIndex_->by_residual,
             searchOutDistBuf_, searchOutIdxBuf_,
             searchPerListDistBuf_, searchPerListIdxBuf_);
 
@@ -429,13 +435,12 @@ void MetalIndexIVFScalarQuantizer::copyFrom(
     }
 
     cpuIndex_->sq = src->sq;
-    cpuIndex_->by_residual = false;
+    cpuIndex_->by_residual = src->by_residual;
     cpuIndex_->is_trained = true;
     cpuIndex_->nprobe = src->nprobe;
     is_trained = true;
 
     size_t codeSize = gpuIvf_ ? gpuIvf_->codeSize() : (size_t)src->sq.code_size;
-    bool needReencode = src->by_residual;
 
     size_t totalN = 0;
     for (size_t l = 0; l < (size_t)src->nlist; ++l) {
@@ -448,48 +453,22 @@ void MetalIndexIVFScalarQuantizer::copyFrom(
         std::vector<idx_t>   allIds(totalN);
         size_t pos = 0;
 
-        if (needReencode) {
-            // Source stores residual-encoded codes. Decode to float vectors,
-            // then re-encode with by_residual=false for GPU-friendly storage.
-            for (size_t l = 0; l < (size_t)src->nlist; ++l) {
-                size_t ls = src->invlists->list_size(l);
-                if (ls == 0) continue;
+        for (size_t l = 0; l < (size_t)src->nlist; ++l) {
+            size_t ls = src->invlists->list_size(l);
+            if (ls == 0) continue;
 
-                const uint8_t* srcCodes = src->invlists->get_codes(l);
-                const idx_t* ids = src->invlists->get_ids(l);
+            const uint8_t* codes = src->invlists->get_codes(l);
+            const idx_t* ids = src->invlists->get_ids(l);
 
-                std::vector<idx_t> listNos(ls, (idx_t)l);
-                std::vector<float> decoded(ls * (size_t)d);
-                src->decode_vectors(ls, srcCodes, listNos.data(), decoded.data());
-
-                cpuIndex_->encode_vectors(
-                        ls, decoded.data(), listNos.data(),
-                        allCodes.data() + pos * codeSize);
-
-                std::memcpy(allIds.data() + pos, ids, ls * sizeof(idx_t));
-                for (size_t i = 0; i < ls; ++i) {
-                    allListNos[pos + i] = (idx_t)l;
-                }
-                pos += ls;
+            std::memcpy(allCodes.data() + pos * codeSize, codes, ls * codeSize);
+            std::memcpy(allIds.data() + pos, ids, ls * sizeof(idx_t));
+            for (size_t i = 0; i < ls; ++i) {
+                allListNos[pos + i] = (idx_t)l;
             }
-        } else {
-            for (size_t l = 0; l < (size_t)src->nlist; ++l) {
-                size_t ls = src->invlists->list_size(l);
-                if (ls == 0) continue;
-
-                const uint8_t* codes = src->invlists->get_codes(l);
-                const idx_t* ids = src->invlists->get_ids(l);
-
-                std::memcpy(allCodes.data() + pos * codeSize, codes, ls * codeSize);
-                std::memcpy(allIds.data() + pos, ids, ls * sizeof(idx_t));
-                for (size_t i = 0; i < ls; ++i) {
-                    allListNos[pos + i] = (idx_t)l;
-                }
-                pos += ls;
-            }
+            pos += ls;
         }
 
-        // Add re-encoded (or direct) codes to our CPU index's inverted lists.
+        // Add source codes to our CPU index's inverted lists.
         pos = 0;
         for (size_t l = 0; l < (size_t)src->nlist; ++l) {
             size_t ls = src->invlists->list_size(l);

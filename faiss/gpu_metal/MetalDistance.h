@@ -202,6 +202,8 @@ enum class MetalSQType { SQ4, SQ6, SQ8, SQ8_DIRECT, FP16 };
 /// @param sqType       Quantizer type (SQ4/SQ6/SQ8/SQ8_DIRECT/FP16)
 /// @param sqTables     SQ decode tables buffer (SQ4/SQ6/SQ8:
 ///                     vmin[d] + vdiff[d] = 2*d floats; nil for FP16/SQ8_DIRECT)
+/// @param centroids    Coarse centroids (nlist * d, float) for residual decode.
+/// @param byResidual   If true, decode `code + centroid[list_no]`.
 bool runMetalIVFSQScan(
         id<MTLDevice> device,
         id<MTLCommandQueue> queue,
@@ -218,6 +220,8 @@ bool runMetalIVFSQScan(
         bool isL2,
         MetalSQType sqType,
         id<MTLBuffer> sqTables,
+        id<MTLBuffer> centroids,
+        bool byResidual,
         id<MTLBuffer> outDistances,
         id<MTLBuffer> outIndices,
         id<MTLBuffer> perListDistBuf,

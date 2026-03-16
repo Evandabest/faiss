@@ -419,7 +419,8 @@ void MetalKernels::encodeIVFScanList(
         id<MTLBuffer> paramsBuf,
         int nq, int nprobe,
         id<MTLBuffer> ilCodesOffset,
-        id<MTLBuffer> sqTables) {
+        id<MTLBuffer> sqTables,
+        id<MTLBuffer> centroids) {
     const char* name;
     NSUInteger tgSize;
     switch (variant) {
@@ -457,6 +458,14 @@ void MetalKernels::encodeIVFScanList(
          variant == IVFScanVariant::SQ6 ||
          variant == IVFScanVariant::SQ8) && sqTables) {
         [enc setBuffer:sqTables offset:0 atIndex:9];
+    }
+    if ((variant == IVFScanVariant::SQ4 ||
+         variant == IVFScanVariant::SQ6 ||
+         variant == IVFScanVariant::SQ8 ||
+         variant == IVFScanVariant::SQ8Direct ||
+         variant == IVFScanVariant::FP16) &&
+        centroids) {
+        [enc setBuffer:centroids offset:0 atIndex:10];
     }
     NSUInteger totalTGs = (NSUInteger)nq * (NSUInteger)nprobe;
     [enc dispatchThreadgroups:MTLSizeMake(totalTGs, 1, 1)

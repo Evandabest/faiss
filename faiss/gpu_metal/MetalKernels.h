@@ -208,7 +208,8 @@ public:
             int nq,
             int nprobe,
             id<MTLBuffer> ilCodesOffset = nil,
-            id<MTLBuffer> sqTables = nil);
+            id<MTLBuffer> sqTables = nil,
+            id<MTLBuffer> centroids = nil);
 
     void encodeIVFPQScanList(
             id<MTLComputeCommandEncoder> enc,

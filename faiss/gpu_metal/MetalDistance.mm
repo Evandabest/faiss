@@ -2340,6 +2340,8 @@ bool runMetalIVFSQScan(
         int nq, int d, int k, int nprobe, bool isL2,
         MetalSQType sqType,
         id<MTLBuffer> sqTables,
+        id<MTLBuffer> centroids,
+        bool byResidual,
         id<MTLBuffer> outDistances, id<MTLBuffer> outIndices,
         id<MTLBuffer> perListDistBuf, id<MTLBuffer> perListIdxBuf) {
     if (!device || !queue || !queries || !codes || !ids ||
@@ -2351,6 +2353,9 @@ bool runMetalIVFSQScan(
     if (sqType != MetalSQType::FP16 &&
         sqType != MetalSQType::SQ8_DIRECT &&
         !sqTables) {
+        return false;
+    }
+    if (byResidual && !centroids) {
         return false;
     }
 
@@ -2376,8 +2381,9 @@ bool runMetalIVFSQScan(
             break;
     }
 
-    uint32_t sp[5] = {(uint32_t)nq, (uint32_t)d, (uint32_t)k,
-                      (uint32_t)nprobe, isL2 ? 1u : 0u};
+    uint32_t sp[6] = {(uint32_t)nq, (uint32_t)d, (uint32_t)k,
+                      (uint32_t)nprobe, isL2 ? 1u : 0u,
+                      byResidual ? 1u : 0u};
     id<MTLBuffer> paramsBuf = [device newBufferWithBytes:sp length:sizeof(sp)
                                                  options:MTLResourceStorageModeShared];
     if (!paramsBuf) return false;
@@ -2390,7 +2396,8 @@ bool runMetalIVFSQScan(
                         perListDistBuf, perListIdxBuf, paramsBuf,
                         nq, nprobe,
                         nil /* ilCodesOffset */,
-                        sqTables);
+                        sqTables,
+                        centroids);
     K.encodeIVFMergeLists(enc, perListDistBuf, perListIdxBuf,
                           outDistances, outIndices, paramsBuf, nq);
 

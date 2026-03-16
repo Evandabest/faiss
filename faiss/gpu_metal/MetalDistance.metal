@@ -1662,6 +1662,7 @@ kernel void ivf_scan_list_sq4(
     device       long*       perListIdx    [[buffer(7)]],
     device const uint*       params        [[buffer(8)]],
     device const float*      sqTables      [[buffer(9)]],
+    device const float*      centroids     [[buffer(10)]],
     uint tgid [[threadgroup_position_in_grid]],
     uint tid  [[thread_position_in_threadgroup]]
 ) {
@@ -1673,6 +1674,7 @@ kernel void ivf_scan_list_sq4(
     uint k        = params[2];
     uint nprobe   = params[3];
     uint want_min = params[4];
+    uint by_residual = params[5];
 
     uint qi = tgid / nprobe;
     uint pi = tgid % nprobe;
@@ -1731,6 +1733,9 @@ kernel void ivf_scan_list_sq4(
         for (uint t = 0; t < d; t++) {
             float xi = sq4_decode_component(cvec, t);
             float decoded = tgVmin[t] + xi * tgVdiff[t];
+            if (by_residual) {
+                decoded += centroids[(uint)list_no * d + t];
+            }
             if (want_min) {
                 float diff = tgQuery[t] - decoded;
                 dist += diff * diff;
@@ -1813,6 +1818,7 @@ kernel void ivf_scan_list_sq6(
     device       long*       perListIdx    [[buffer(7)]],
     device const uint*       params        [[buffer(8)]],
     device const float*      sqTables      [[buffer(9)]],
+    device const float*      centroids     [[buffer(10)]],
     uint tgid [[threadgroup_position_in_grid]],
     uint tid  [[thread_position_in_threadgroup]]
 ) {
@@ -1824,6 +1830,7 @@ kernel void ivf_scan_list_sq6(
     uint k        = params[2];
     uint nprobe   = params[3];
     uint want_min = params[4];
+    uint by_residual = params[5];
 
     uint qi = tgid / nprobe;
     uint pi = tgid % nprobe;
@@ -1882,6 +1889,9 @@ kernel void ivf_scan_list_sq6(
         for (uint t = 0; t < d; t++) {
             float xi = sq6_decode_component(cvec, t);
             float decoded = tgVmin[t] + xi * tgVdiff[t];
+            if (by_residual) {
+                decoded += centroids[(uint)list_no * d + t];
+            }
             if (want_min) {
                 float diff = tgQuery[t] - decoded;
                 dist += diff * diff;
@@ -1963,6 +1973,7 @@ kernel void ivf_scan_list_sq8_direct(
     device       float*      perListDist   [[buffer(6)]],
     device       long*       perListIdx    [[buffer(7)]],
     device const uint*       params        [[buffer(8)]],
+    device const float*      centroids     [[buffer(10)]],
     uint tgid [[threadgroup_position_in_grid]],
     uint tid  [[thread_position_in_threadgroup]]
 ) {
@@ -1974,6 +1985,7 @@ kernel void ivf_scan_list_sq8_direct(
     uint k        = params[2];
     uint nprobe   = params[3];
     uint want_min = params[4];
+    uint by_residual = params[5];
 
     uint qi = tgid / nprobe;
     uint pi = tgid % nprobe;
@@ -2023,6 +2035,9 @@ kernel void ivf_scan_list_sq8_direct(
         float dist = 0.0f;
         for (uint t = 0; t < d; t++) {
             float decoded = float(cvec[t]);
+            if (by_residual) {
+                decoded += centroids[(uint)list_no * d + t];
+            }
             if (want_min) {
                 float diff = tgQuery[t] - decoded;
                 dist += diff * diff;
@@ -2105,6 +2120,7 @@ kernel void ivf_scan_list_sq8(
     device       long*       perListIdx    [[buffer(7)]],
     device const uint*       params        [[buffer(8)]],
     device const float*      sqTables      [[buffer(9)]],
+    device const float*      centroids     [[buffer(10)]],
     uint tgid [[threadgroup_position_in_grid]],
     uint tid  [[thread_position_in_threadgroup]]
 ) {
@@ -2116,6 +2132,7 @@ kernel void ivf_scan_list_sq8(
     uint k        = params[2];
     uint nprobe   = params[3];
     uint want_min = params[4];
+    uint by_residual = params[5];
 
     uint qi = tgid / nprobe;
     uint pi = tgid % nprobe;
@@ -2173,6 +2190,9 @@ kernel void ivf_scan_list_sq8(
         for (uint t = 0; t < d; t++) {
             float xi = (float(cvec[t]) + 0.5f) / 255.0f;
             float decoded = tgVmin[t] + xi * tgVdiff[t];
+            if (by_residual) {
+                decoded += centroids[(uint)list_no * d + t];
+            }
             if (want_min) {
                 float diff = tgQuery[t] - decoded;
                 dist += diff * diff;
@@ -2254,6 +2274,7 @@ kernel void ivf_scan_list_fp16(
     device       float*      perListDist   [[buffer(6)]],
     device       long*       perListIdx    [[buffer(7)]],
     device const uint*       params        [[buffer(8)]],
+    device const float*      centroids     [[buffer(10)]],
     uint tgid [[threadgroup_position_in_grid]],
     uint tid  [[thread_position_in_threadgroup]]
 ) {
@@ -2265,6 +2286,7 @@ kernel void ivf_scan_list_fp16(
     uint k        = params[2];
     uint nprobe   = params[3];
     uint want_min = params[4];
+    uint by_residual = params[5];
 
     uint qi = tgid / nprobe;
     uint pi = tgid % nprobe;
@@ -2319,11 +2341,23 @@ kernel void ivf_scan_list_fp16(
             const threadgroup float4* q4 = (const threadgroup float4*)tgQuery;
             for (uint t = 0; t < d4; t++) {
                 float4 fv = float4(v4[t]);
+                if (by_residual) {
+                    float4 cv = float4(
+                            centroids[(uint)list_no * d + t * 4 + 0],
+                            centroids[(uint)list_no * d + t * 4 + 1],
+                            centroids[(uint)list_no * d + t * 4 + 2],
+                            centroids[(uint)list_no * d + t * 4 + 3]);
+                    fv += cv;
+                }
                 float4 diff = q4[t] - fv;
                 dist += dot(diff, diff);
             }
             for (uint t = d4 * 4; t < d; t++) {
-                float diff = tgQuery[t] - float(cvec[t]);
+                float decoded = float(cvec[t]);
+                if (by_residual) {
+                    decoded += centroids[(uint)list_no * d + t];
+                }
+                float diff = tgQuery[t] - decoded;
                 dist += diff * diff;
             }
         } else {
@@ -2331,10 +2365,22 @@ kernel void ivf_scan_list_fp16(
             const threadgroup float4* q4 = (const threadgroup float4*)tgQuery;
             for (uint t = 0; t < d4; t++) {
                 float4 fv = float4(v4[t]);
+                if (by_residual) {
+                    float4 cv = float4(
+                            centroids[(uint)list_no * d + t * 4 + 0],
+                            centroids[(uint)list_no * d + t * 4 + 1],
+                            centroids[(uint)list_no * d + t * 4 + 2],
+                            centroids[(uint)list_no * d + t * 4 + 3]);
+                    fv += cv;
+                }
                 dist += dot(q4[t], fv);
             }
             for (uint t = d4 * 4; t < d; t++) {
-                dist += tgQuery[t] * float(cvec[t]);
+                float decoded = float(cvec[t]);
+                if (by_residual) {
+                    decoded += centroids[(uint)list_no * d + t];
+                }
+                dist += tgQuery[t] * decoded;
             }
         }
 
