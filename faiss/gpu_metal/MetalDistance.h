@@ -308,5 +308,27 @@ void bfKnn(
         float* outDistances,
         idx_t* outIndices);
 
+/// Memory-budgeted brute-force k-NN (Metal equivalent of CUDA bfKnn_tiling).
+/// If limits are non-zero, vectors and/or queries are processed in CPU-side
+/// shards and merged into final top-k results.
+///
+/// @param vectorsMemoryLimit Bytes budget for database vectors per shard.
+///                           0 means "no explicit vector sharding".
+/// @param queriesMemoryLimit Bytes budget for query+output working set per shard.
+///                           0 means "no explicit query sharding".
+void bfKnn_tiling(
+        std::shared_ptr<MetalResources> resources,
+        const float* vectors,
+        idx_t numVectors,
+        const float* queries,
+        idx_t numQueries,
+        int dims,
+        int k,
+        faiss::MetricType metric,
+        float* outDistances,
+        idx_t* outIndices,
+        size_t vectorsMemoryLimit,
+        size_t queriesMemoryLimit);
+
 } // namespace gpu_metal
 } // namespace faiss

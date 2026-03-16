@@ -10,6 +10,7 @@
 
 #include <faiss/IndexFlat.h>
 #include <faiss/gpu_metal/MetalCloner.h>
+#include <faiss/gpu_metal/MetalDistance.h>
 #include <faiss/gpu_metal/MetalIndexFlat.h>
 #include <faiss/gpu_metal/MetalResources.h>
 #include <faiss/gpu_metal/StandardMetalResources.h>
@@ -992,4 +993,52 @@ TEST_F(AccMetalIndexFlat, MemoryInfoAndLoggingControls) {
     EXPECT_TRUE(resources_->getLogMemoryAllocations());
     auto infoLogging = resources_->getMemoryInfo();
     EXPECT_TRUE(infoLogging.logMemoryAllocations);
+}
+
+TEST_F(AccMetalIndexFlat, BfKnnTilingMatchesCpuL2) {
+    const int dim = 64;
+    const int nb = 14000;
+    const int nq = 120;
+    const int k = 10;
+
+    std::vector<float> vecs((size_t)nb * dim);
+    std::vector<float> queries((size_t)nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 101);
+    faiss::float_rand(queries.data(), queries.size(), 202);
+
+    faiss::IndexFlatL2 cpuIndex(dim);
+    cpuIndex.add(nb, vecs.data());
+
+    std::vector<float> refDist((size_t)nq * k);
+    std::vector<faiss::idx_t> refLab((size_t)nq * k, -1);
+    cpuIndex.search(nq, queries.data(), k, refDist.data(), refLab.data());
+
+    std::vector<float> testDist((size_t)nq * k);
+    std::vector<faiss::idx_t> testLab((size_t)nq * k, -1);
+
+    const size_t vectorsMemoryLimit = (size_t)dim * sizeof(float) * 2000;
+    const size_t queriesMemoryLimit =
+            ((size_t)dim * sizeof(float) + (size_t)k * (sizeof(float) + sizeof(faiss::idx_t))) * 40;
+
+    faiss::gpu_metal::bfKnn_tiling(
+            resources_,
+            vecs.data(),
+            nb,
+            queries.data(),
+            nq,
+            dim,
+            k,
+            faiss::METRIC_L2,
+            testDist.data(),
+            testLab.data(),
+            vectorsMemoryLimit,
+            queriesMemoryLimit);
+
+    compareSearchResultsAllowTieBreak(
+            nq,
+            k,
+            refDist.data(),
+            refLab.data(),
+            testDist.data(),
+            testLab.data());
 }

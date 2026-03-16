@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 namespace faiss {
@@ -129,6 +130,140 @@ class TempBufferArena {
     std::shared_ptr<MetalResources> resources_;
     std::vector<id<MTLBuffer>> pooledBuffers_;
 };
+
+inline bool betterDistance(float a, float b, bool isL2) {
+    return isL2 ? (a < b) : (a > b);
+}
+
+void mergeShardTopK_(
+        int nq,
+        int k,
+        bool isL2,
+        const float* shardDist,
+        const idx_t* shardIdx,
+        idx_t indexBase,
+        std::vector<float>& bestDist,
+        std::vector<idx_t>& bestIdx) {
+    for (int q = 0; q < nq; ++q) {
+        float* rowDist = bestDist.data() + (size_t)q * k;
+        idx_t* rowIdx = bestIdx.data() + (size_t)q * k;
+        for (int j = 0; j < k; ++j) {
+            idx_t candIdx = shardIdx[(size_t)q * k + j];
+            if (candIdx < 0) {
+                continue;
+            }
+            const float candDist = shardDist[(size_t)q * k + j];
+            candIdx += indexBase;
+
+            if (!betterDistance(candDist, rowDist[k - 1], isL2)) {
+                continue;
+            }
+
+            int pos = k - 1;
+            while (pos > 0 && betterDistance(candDist, rowDist[pos - 1], isL2)) {
+                rowDist[pos] = rowDist[pos - 1];
+                rowIdx[pos] = rowIdx[pos - 1];
+                --pos;
+            }
+            rowDist[pos] = candDist;
+            rowIdx[pos] = candIdx;
+        }
+    }
+}
+
+void bfKnnSingleQueryShard_(
+        std::shared_ptr<MetalResources> resources,
+        const float* vectors,
+        idx_t numVectors,
+        const float* queries,
+        idx_t numQueries,
+        int dims,
+        int k,
+        faiss::MetricType metric,
+        float* outDistances,
+        idx_t* outIndices,
+        size_t vectorsMemoryLimit) {
+    if (vectorsMemoryLimit == 0) {
+        bfKnn(
+                resources,
+                vectors,
+                numVectors,
+                queries,
+                numQueries,
+                dims,
+                k,
+                metric,
+                outDistances,
+                outIndices);
+        return;
+    }
+
+    const size_t bytesPerVector = (size_t)dims * sizeof(float);
+    const size_t shardVectors = vectorsMemoryLimit / bytesPerVector;
+    FAISS_THROW_IF_NOT_MSG(
+            shardVectors > 0,
+            "bfKnn_tiling: vectorsMemoryLimit is too low");
+
+    if ((size_t)numVectors <= shardVectors) {
+        bfKnn(
+                resources,
+                vectors,
+                numVectors,
+                queries,
+                numQueries,
+                dims,
+                k,
+                metric,
+                outDistances,
+                outIndices);
+        return;
+    }
+
+    const bool isL2 = (metric == METRIC_L2);
+    const float sentinelDist = isL2 ? std::numeric_limits<float>::infinity()
+                                    : -std::numeric_limits<float>::infinity();
+
+    std::vector<float> bestDist((size_t)numQueries * k, sentinelDist);
+    std::vector<idx_t> bestIdx((size_t)numQueries * k, -1);
+    std::vector<float> shardDist((size_t)numQueries * k);
+    std::vector<idx_t> shardIdx((size_t)numQueries * k);
+
+    for (idx_t base = 0; base < numVectors; base += (idx_t)shardVectors) {
+        const idx_t nThis = std::min((idx_t)shardVectors, numVectors - base);
+        const float* vecPtr = vectors + (size_t)base * dims;
+
+        bfKnn(
+                resources,
+                vecPtr,
+                nThis,
+                queries,
+                numQueries,
+                dims,
+                k,
+                metric,
+                shardDist.data(),
+                shardIdx.data());
+
+        mergeShardTopK_(
+                (int)numQueries,
+                k,
+                isL2,
+                shardDist.data(),
+                shardIdx.data(),
+                base,
+                bestDist,
+                bestIdx);
+    }
+
+    std::memcpy(
+            outDistances,
+            bestDist.data(),
+            (size_t)numQueries * k * sizeof(float));
+    std::memcpy(
+            outIndices,
+            bestIdx.data(),
+            (size_t)numQueries * k * sizeof(idx_t));
+}
 
 } // namespace
 
@@ -595,6 +730,74 @@ void bfKnn(
 
     resources->deallocBuffer(distBuf, MetalAllocType::TemporaryMemoryBuffer);
     resources->deallocBuffer(idxBuf,  MetalAllocType::TemporaryMemoryBuffer);
+}
+
+void bfKnn_tiling(
+        std::shared_ptr<MetalResources> resources,
+        const float* vectors,
+        idx_t numVectors,
+        const float* queries,
+        idx_t numQueries,
+        int dims,
+        int k,
+        faiss::MetricType metric,
+        float* outDistances,
+        idx_t* outIndices,
+        size_t vectorsMemoryLimit,
+        size_t queriesMemoryLimit) {
+    FAISS_THROW_IF_NOT(resources && resources->isAvailable());
+    FAISS_THROW_IF_NOT(vectors);
+    FAISS_THROW_IF_NOT(queries);
+    FAISS_THROW_IF_NOT(outDistances);
+    FAISS_THROW_IF_NOT(outIndices);
+    FAISS_THROW_IF_NOT(k > 0);
+    FAISS_THROW_IF_NOT(numVectors > 0);
+    FAISS_THROW_IF_NOT(numQueries > 0);
+    FAISS_THROW_IF_NOT(dims > 0);
+    FAISS_THROW_IF_NOT(metric == METRIC_L2 || metric == METRIC_INNER_PRODUCT);
+
+    if (queriesMemoryLimit == 0) {
+        bfKnnSingleQueryShard_(
+                resources,
+                vectors,
+                numVectors,
+                queries,
+                numQueries,
+                dims,
+                k,
+                metric,
+                outDistances,
+                outIndices,
+                vectorsMemoryLimit);
+        return;
+    }
+
+    const size_t bytesPerQuery = (size_t)dims * sizeof(float) +
+            (size_t)k * (sizeof(float) + sizeof(idx_t));
+    const size_t shardQueries = queriesMemoryLimit / bytesPerQuery;
+    FAISS_THROW_IF_NOT_MSG(
+            shardQueries > 0,
+            "bfKnn_tiling: queriesMemoryLimit is too low");
+
+    for (idx_t qBase = 0; qBase < numQueries; qBase += (idx_t)shardQueries) {
+        const idx_t nThisQ = std::min((idx_t)shardQueries, numQueries - qBase);
+        const float* qPtr = queries + (size_t)qBase * dims;
+        float* outDistPtr = outDistances + (size_t)qBase * k;
+        idx_t* outIdxPtr = outIndices + (size_t)qBase * k;
+
+        bfKnnSingleQueryShard_(
+                resources,
+                vectors,
+                numVectors,
+                qPtr,
+                nThisQ,
+                dims,
+                k,
+                metric,
+                outDistPtr,
+                outIdxPtr,
+                vectorsMemoryLimit);
+    }
 }
 
 // ============================================================
