@@ -108,6 +108,15 @@ set_target_properties(BenchMetalIvfVsCpu PROPERTIES
     OBJCXX_STANDARD 17
     OBJCXX_STANDARD_REQUIRED ON
 )
+
+add_executable(BenchMetalIvfSQVsCpu BenchMetalIvfSQVsCpu.mm)
+target_link_libraries(BenchMetalIvfSQVsCpu PRIVATE faiss_metal faiss)
+target_include_directories(BenchMetalIvfSQVsCpu PRIVATE ${PROJECT_SOURCE_DIR})
+set_target_properties(BenchMetalIvfSQVsCpu PROPERTIES
+    OBJCXX_STANDARD 17
+    OBJCXX_STANDARD_REQUIRED ON
+)
+
 add_executable(BenchRunIvf BenchRunIvf.mm)
 target_include_directories(BenchRunIvf PRIVATE ${PROJECT_SOURCE_DIR})
 set_target_properties(BenchRunIvf PROPERTIES
