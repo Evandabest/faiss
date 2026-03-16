@@ -19,6 +19,8 @@
 #import <mach/vm_statistics.h>
 #include <faiss/impl/FaissAssert.h>
 #include <faiss/utils/bf16.h>
+#include <faiss/utils/distances.h>
+#include <faiss/utils/extra_distances.h>
 #include <faiss/utils/fp16.h>
 #include <algorithm>
 #include <cstdlib>
@@ -1356,6 +1358,227 @@ void bfKnn_tilingWithNormsF32_(
     }
 }
 
+void allPairsBlockF32_(
+        std::shared_ptr<MetalResources> resources,
+        const float* vectors,
+        const float* vectorNorms,
+        idx_t numVectors,
+        const float* queries,
+        idx_t numQueries,
+        int dims,
+        faiss::MetricType metric,
+        float* outDistances) {
+    FAISS_THROW_IF_NOT(resources && resources->isAvailable());
+    FAISS_THROW_IF_NOT(vectors);
+    FAISS_THROW_IF_NOT(queries);
+    FAISS_THROW_IF_NOT(outDistances);
+    FAISS_THROW_IF_NOT(numVectors > 0);
+    FAISS_THROW_IF_NOT(numQueries > 0);
+    FAISS_THROW_IF_NOT(dims > 0);
+
+    id<MTLDevice> device = resources->getDevice();
+    id<MTLCommandQueue> queue = resources->getCommandQueue();
+    MetalKernels& K = getMetalKernels(device);
+    FAISS_THROW_IF_NOT_MSG(K.isValid(), "allPairs(F32): Metal kernels unavailable");
+
+    const size_t vecBytes = (size_t)numVectors * dims * sizeof(float);
+    const size_t qBytes = (size_t)numQueries * dims * sizeof(float);
+    const size_t distBytes = (size_t)numQueries * numVectors * sizeof(float);
+    const size_t normsBytes = vectorNorms ? (size_t)numVectors * sizeof(float) : 0;
+
+    id<MTLBuffer> vecBuf = resources->allocBuffer(
+            vecBytes, MetalAllocType::TemporaryMemoryBuffer);
+    id<MTLBuffer> qBuf = resources->allocBuffer(
+            qBytes, MetalAllocType::TemporaryMemoryBuffer);
+    id<MTLBuffer> distBuf = resources->allocBuffer(
+            distBytes, MetalAllocType::TemporaryMemoryBuffer);
+    id<MTLBuffer> normsBuf = nil;
+    if (vectorNorms) {
+        normsBuf = resources->allocBuffer(
+                normsBytes, MetalAllocType::TemporaryMemoryBuffer);
+    }
+    FAISS_THROW_IF_NOT_MSG(
+            vecBuf && qBuf && distBuf && (!vectorNorms || normsBuf),
+            "allPairs(F32): failed to allocate Metal buffers");
+
+    std::memcpy([vecBuf contents], vectors, vecBytes);
+    std::memcpy([qBuf contents], queries, qBytes);
+    if (vectorNorms) {
+        std::memcpy([normsBuf contents], vectorNorms, normsBytes);
+    }
+
+    id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+    if (metric == METRIC_L2) {
+        if (vectorNorms) {
+            K.encodeL2WithNorms(enc, qBuf, vecBuf, distBuf, normsBuf, (int)numQueries, (int)numVectors, dims);
+        } else {
+            K.encodeL2SquaredMatrix(enc, qBuf, vecBuf, distBuf, (int)numQueries, (int)numVectors, dims);
+        }
+    } else {
+        K.encodeIPMatrix(enc, qBuf, vecBuf, distBuf, (int)numQueries, (int)numVectors, dims);
+    }
+    [enc endEncoding];
+    [cmdBuf commit];
+    [cmdBuf waitUntilCompleted];
+    FAISS_THROW_IF_NOT_MSG(
+            cmdBuf.status == MTLCommandBufferStatusCompleted,
+            "allPairs(F32): Metal distance computation failed");
+
+    std::memcpy(outDistances, [distBuf contents], distBytes);
+
+    resources->deallocBuffer(vecBuf, MetalAllocType::TemporaryMemoryBuffer);
+    resources->deallocBuffer(qBuf, MetalAllocType::TemporaryMemoryBuffer);
+    resources->deallocBuffer(distBuf, MetalAllocType::TemporaryMemoryBuffer);
+    if (normsBuf) {
+        resources->deallocBuffer(normsBuf, MetalAllocType::TemporaryMemoryBuffer);
+    }
+}
+
+void allPairsBlockFP16Vectors_(
+        std::shared_ptr<MetalResources> resources,
+        const uint16_t* vectors,
+        idx_t numVectors,
+        const float* queries,
+        idx_t numQueries,
+        int dims,
+        faiss::MetricType metric,
+        float* outDistances) {
+    FAISS_THROW_IF_NOT(resources && resources->isAvailable());
+    FAISS_THROW_IF_NOT(vectors);
+    FAISS_THROW_IF_NOT(queries);
+    FAISS_THROW_IF_NOT(outDistances);
+    FAISS_THROW_IF_NOT(numVectors > 0);
+    FAISS_THROW_IF_NOT(numQueries > 0);
+    FAISS_THROW_IF_NOT(dims > 0);
+
+    id<MTLDevice> device = resources->getDevice();
+    id<MTLCommandQueue> queue = resources->getCommandQueue();
+    MetalKernels& K = getMetalKernels(device);
+    FAISS_THROW_IF_NOT_MSG(K.isValid(), "allPairs(F16 vectors): Metal kernels unavailable");
+
+    const size_t vecBytes = (size_t)numVectors * dims * sizeof(uint16_t);
+    const size_t qBytes = (size_t)numQueries * dims * sizeof(float);
+    const size_t distBytes = (size_t)numQueries * numVectors * sizeof(float);
+
+    id<MTLBuffer> vecBuf = resources->allocBuffer(
+            vecBytes, MetalAllocType::TemporaryMemoryBuffer);
+    id<MTLBuffer> qBuf = resources->allocBuffer(
+            qBytes, MetalAllocType::TemporaryMemoryBuffer);
+    id<MTLBuffer> distBuf = resources->allocBuffer(
+            distBytes, MetalAllocType::TemporaryMemoryBuffer);
+    FAISS_THROW_IF_NOT_MSG(
+            vecBuf && qBuf && distBuf,
+            "allPairs(F16 vectors): failed to allocate Metal buffers");
+
+    std::memcpy([vecBuf contents], vectors, vecBytes);
+    std::memcpy([qBuf contents], queries, qBytes);
+
+    id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+    if (metric == METRIC_L2) {
+        K.encodeL2SquaredMatrixFP16(enc, qBuf, vecBuf, distBuf, (int)numQueries, (int)numVectors, dims);
+    } else {
+        K.encodeIPMatrixFP16(enc, qBuf, vecBuf, distBuf, (int)numQueries, (int)numVectors, dims);
+    }
+    [enc endEncoding];
+    [cmdBuf commit];
+    [cmdBuf waitUntilCompleted];
+    FAISS_THROW_IF_NOT_MSG(
+            cmdBuf.status == MTLCommandBufferStatusCompleted,
+            "allPairs(F16 vectors): Metal distance computation failed");
+
+    std::memcpy(outDistances, [distBuf contents], distBytes);
+
+    resources->deallocBuffer(vecBuf, MetalAllocType::TemporaryMemoryBuffer);
+    resources->deallocBuffer(qBuf, MetalAllocType::TemporaryMemoryBuffer);
+    resources->deallocBuffer(distBuf, MetalAllocType::TemporaryMemoryBuffer);
+}
+
+void allPairsDistanceTiledParams_(
+        std::shared_ptr<MetalResources> resources,
+        const MetalDistanceParams& args,
+        const float* vectorsF32,
+        const uint16_t* vectorsF16,
+        const float* queriesF32,
+        const float* vectorNorms,
+        size_t vectorsMemoryLimit,
+        size_t queriesMemoryLimit,
+        float* outDistances) {
+    FAISS_THROW_IF_NOT(outDistances);
+    FAISS_THROW_IF_NOT(args.k == -1);
+
+    const size_t vecElemBytes = (args.vectorType == MetalDistanceDataType::F16)
+            ? sizeof(uint16_t)
+            : sizeof(float);
+    const size_t vecBytesPer = (size_t)args.dims * vecElemBytes;
+
+    size_t shardVectors = (size_t)args.numVectors;
+    if (vectorsMemoryLimit > 0) {
+        shardVectors = vectorsMemoryLimit / vecBytesPer;
+        if (shardVectors == 0) {
+            shardVectors = 1;
+        }
+    }
+    shardVectors = std::min(shardVectors, (size_t)args.numVectors);
+
+    size_t shardQueries = (size_t)args.numQueries;
+    if (queriesMemoryLimit > 0) {
+        const size_t bytesPerQuery = (size_t)args.dims * sizeof(float) +
+                shardVectors * sizeof(float);
+        shardQueries = queriesMemoryLimit / bytesPerQuery;
+        if (shardQueries == 0) {
+            shardQueries = 1;
+        }
+    }
+    shardQueries = std::min(shardQueries, (size_t)args.numQueries);
+
+    std::vector<float> blockDist;
+    for (idx_t qBase = 0; qBase < args.numQueries; qBase += (idx_t)shardQueries) {
+        const idx_t nThisQ = std::min((idx_t)shardQueries, args.numQueries - qBase);
+        const float* qPtr = queriesF32 + (size_t)qBase * args.dims;
+
+        for (idx_t vBase = 0; vBase < args.numVectors; vBase += (idx_t)shardVectors) {
+            const idx_t nThisV = std::min((idx_t)shardVectors, args.numVectors - vBase);
+
+            blockDist.resize((size_t)nThisQ * nThisV);
+            const float* normsPtr = vectorNorms ? (vectorNorms + (size_t)vBase) : nullptr;
+
+            if (args.vectorType == MetalDistanceDataType::F16) {
+                const uint16_t* vPtr = vectorsF16 + (size_t)vBase * args.dims;
+                allPairsBlockFP16Vectors_(
+                        resources,
+                        vPtr,
+                        nThisV,
+                        qPtr,
+                        nThisQ,
+                        args.dims,
+                        args.metric,
+                        blockDist.data());
+            } else {
+                const float* vPtr = vectorsF32 + (size_t)vBase * args.dims;
+                allPairsBlockF32_(
+                        resources,
+                        vPtr,
+                        normsPtr,
+                        nThisV,
+                        qPtr,
+                        nThisQ,
+                        args.dims,
+                        args.metric,
+                        blockDist.data());
+            }
+
+            for (idx_t qi = 0; qi < nThisQ; ++qi) {
+                float* dst = outDistances +
+                        (size_t)(qBase + qi) * args.numVectors + (size_t)vBase;
+                const float* src = blockDist.data() + (size_t)qi * nThisV;
+                std::memcpy(dst, src, (size_t)nThisV * sizeof(float));
+            }
+        }
+    }
+}
+
 const float* materializeQueryF32_(
         const MetalDistanceParams& args,
         std::vector<float>& convertedQueries) {
@@ -1473,22 +1696,129 @@ const uint16_t* materializeVectorF16IfNeeded_(
     return convertedVectors.data();
 }
 
+const float* materializeVectorF32FromF16_(
+        const MetalDistanceParams& args,
+        std::vector<float>& convertedVectorsF32) {
+    if (args.vectorType != MetalDistanceDataType::F16) {
+        return nullptr;
+    }
+    const uint16_t* v =
+            static_cast<const uint16_t*>(args.vectors);
+    const size_t n = (size_t)args.numVectors * args.dims;
+    convertedVectorsF32.resize(n);
+    if (args.vectorsRowMajor) {
+        for (size_t i = 0; i < n; ++i) {
+            convertedVectorsF32[i] = faiss::decode_fp16(v[i]);
+        }
+    } else {
+        for (idx_t vi = 0; vi < args.numVectors; ++vi) {
+            for (int d = 0; d < args.dims; ++d) {
+                convertedVectorsF32[(size_t)vi * args.dims + d] =
+                        faiss::decode_fp16(v[(size_t)d * args.numVectors + vi]);
+            }
+        }
+    }
+    return convertedVectorsF32.data();
+}
+
+void bfKnnCpuFallbackParams_(
+        const MetalDistanceParams& args,
+        const float* vectors,
+        const float* queries,
+        float* outDistances,
+        void* outIndices,
+        MetalIndicesDataType outIndicesType) {
+    FAISS_THROW_IF_NOT(vectors && queries && outDistances);
+
+    if (args.k == -1) {
+        if (args.metric == METRIC_L2) {
+            faiss::pairwise_L2sqr(
+                    args.dims,
+                    args.numQueries,
+                    queries,
+                    args.numVectors,
+                    vectors,
+                    outDistances);
+        } else if (args.metric == METRIC_INNER_PRODUCT) {
+            for (idx_t qi = 0; qi < args.numQueries; ++qi) {
+                for (idx_t vi = 0; vi < args.numVectors; ++vi) {
+                    float ip = 0.0f;
+                    const float* q = queries + (size_t)qi * args.dims;
+                    const float* v = vectors + (size_t)vi * args.dims;
+                    for (int d = 0; d < args.dims; ++d) {
+                        ip += q[d] * v[d];
+                    }
+                    outDistances[(size_t)qi * args.numVectors + vi] = ip;
+                }
+            }
+        } else {
+            faiss::pairwise_extra_distances(
+                    args.dims,
+                    args.numQueries,
+                    queries,
+                    args.numVectors,
+                    vectors,
+                    args.metric,
+                    args.metricArg,
+                    outDistances);
+        }
+        return;
+    }
+
+    FAISS_THROW_IF_NOT(outIndices);
+    if (outIndicesType == MetalIndicesDataType::I64) {
+        faiss::knn_extra_metrics(
+                queries,
+                vectors,
+                args.dims,
+                args.numQueries,
+                args.numVectors,
+                args.metric,
+                args.metricArg,
+                args.k,
+                outDistances,
+                static_cast<idx_t*>(outIndices));
+        return;
+    }
+
+    if (outIndicesType == MetalIndicesDataType::I32) {
+        std::vector<idx_t> tmpIdx((size_t)args.numQueries * args.k);
+        faiss::knn_extra_metrics(
+                queries,
+                vectors,
+                args.dims,
+                args.numQueries,
+                args.numVectors,
+                args.metric,
+                args.metricArg,
+                args.k,
+                outDistances,
+                tmpIdx.data());
+        int32_t* outIdx32 = static_cast<int32_t*>(outIndices);
+        for (size_t i = 0; i < tmpIdx.size(); ++i) {
+            outIdx32[i] = static_cast<int32_t>(tmpIdx[i]);
+        }
+        return;
+    }
+
+    FAISS_THROW_MSG("bfKnn(params): unknown outIndicesType in CPU fallback");
+}
+
 void bfKnn(
         std::shared_ptr<MetalResources> resources,
         const MetalDistanceParams& args) {
-    FAISS_THROW_IF_NOT_MSG(
-            args.metric == METRIC_L2 || args.metric == METRIC_INNER_PRODUCT,
-            "bfKnn(params): only METRIC_L2 and METRIC_INNER_PRODUCT are supported");
-    FAISS_THROW_IF_NOT_MSG(
-            args.metric != METRIC_Lp,
-            "bfKnn(params): METRIC_Lp is not supported on Metal");
     FAISS_THROW_IF_NOT(args.vectors);
     FAISS_THROW_IF_NOT(args.queries);
-    FAISS_THROW_IF_NOT(args.outIndices);
-    FAISS_THROW_IF_NOT(args.k > 0);
+    FAISS_THROW_IF_NOT_MSG(
+            args.k > 0 || args.k == -1,
+            "bfKnn(params): k must be > 0 or -1 for all-pairs");
     FAISS_THROW_IF_NOT(args.numVectors > 0);
     FAISS_THROW_IF_NOT(args.numQueries > 0);
     FAISS_THROW_IF_NOT(args.dims > 0);
+    FAISS_THROW_IF_NOT(args.outDistances);
+    if (args.k > 0) {
+        FAISS_THROW_IF_NOT(args.outIndices);
+    }
 
     std::vector<float> convertedQueries;
     const float* queries = materializeQueryF32_(args, convertedQueries);
@@ -1497,6 +1827,68 @@ void bfKnn(
     std::vector<uint16_t> convertedVectorsF16;
     const uint16_t* vectorsF16 =
             materializeVectorF16IfNeeded_(args, convertedVectorsF16);
+    std::vector<float> convertedVectorsFromF16;
+    const float* vectorsF32FromF16 =
+            materializeVectorF32FromF16_(args, convertedVectorsFromF16);
+    const float* vectorNormsF32 = args.vectorNorms;
+    std::vector<float> convertedVectorNorms;
+    if (args.vectorNorms && !args.vectorsRowMajor) {
+        convertedVectorNorms.assign(args.vectorNorms, args.vectorNorms + args.numVectors);
+        vectorNormsF32 = convertedVectorNorms.data();
+    }
+
+    if (args.k == -1) {
+        FAISS_THROW_IF_NOT_MSG(
+                !args.ignoreOutDistances,
+                "bfKnn(params): ignoreOutDistances cannot be true when k == -1");
+        if (!(args.metric == METRIC_L2 || args.metric == METRIC_INNER_PRODUCT)) {
+            const float* vectorsForFallback =
+                    (args.vectorType == MetalDistanceDataType::F16)
+                    ? vectorsF32FromF16
+                    : vectorsF32;
+            bfKnnCpuFallbackParams_(
+                    args,
+                    vectorsForFallback,
+                    queries,
+                    args.outDistances,
+                    nullptr,
+                    args.outIndicesType);
+            return;
+        }
+        allPairsDistanceTiledParams_(
+                resources,
+                args,
+                vectorsF32,
+                vectorsF16,
+                queries,
+                vectorNormsF32,
+                0,
+                0,
+                args.outDistances);
+        return;
+    }
+
+    if (!(args.metric == METRIC_L2 || args.metric == METRIC_INNER_PRODUCT)) {
+        std::vector<float> tmpDistancesFallback;
+        float* outDistFallback = args.outDistances;
+        if (args.ignoreOutDistances) {
+            tmpDistancesFallback.resize((size_t)args.numQueries * args.k);
+            outDistFallback = tmpDistancesFallback.data();
+        }
+        const float* vectorsForFallback =
+                (args.vectorType == MetalDistanceDataType::F16)
+                ? vectorsF32FromF16
+                : vectorsF32;
+        bfKnnCpuFallbackParams_(
+                args,
+                vectorsForFallback,
+                queries,
+                outDistFallback,
+                args.outIndices,
+                args.outIndicesType);
+        return;
+    }
+
     const bool useVectorNorms =
             args.metric == METRIC_L2 && args.vectorNorms != nullptr &&
             args.vectorType != MetalDistanceDataType::F16;
@@ -1533,7 +1925,7 @@ void bfKnn(
                 bfKnnWithVectorNormsF32_(
                         resources,
                         vectorsF32,
-                        args.vectorNorms,
+                        vectorNormsF32,
                         args.numVectors,
                         queries,
                         args.numQueries,
@@ -1581,7 +1973,7 @@ void bfKnn(
                 bfKnnWithVectorNormsF32_(
                         resources,
                         vectorsF32,
-                        args.vectorNorms,
+                        vectorNormsF32,
                         args.numVectors,
                         queries,
                         args.numQueries,
@@ -1620,19 +2012,18 @@ void bfKnn_tiling(
         const MetalDistanceParams& args,
         size_t vectorsMemoryLimit,
         size_t queriesMemoryLimit) {
-    FAISS_THROW_IF_NOT_MSG(
-            args.metric == METRIC_L2 || args.metric == METRIC_INNER_PRODUCT,
-            "bfKnn_tiling(params): only METRIC_L2 and METRIC_INNER_PRODUCT are supported");
-    FAISS_THROW_IF_NOT_MSG(
-            args.metric != METRIC_Lp,
-            "bfKnn_tiling(params): METRIC_Lp is not supported on Metal");
     FAISS_THROW_IF_NOT(args.vectors);
     FAISS_THROW_IF_NOT(args.queries);
-    FAISS_THROW_IF_NOT(args.outIndices);
-    FAISS_THROW_IF_NOT(args.k > 0);
+    FAISS_THROW_IF_NOT_MSG(
+            args.k > 0 || args.k == -1,
+            "bfKnn_tiling(params): k must be > 0 or -1 for all-pairs");
     FAISS_THROW_IF_NOT(args.numVectors > 0);
     FAISS_THROW_IF_NOT(args.numQueries > 0);
     FAISS_THROW_IF_NOT(args.dims > 0);
+    FAISS_THROW_IF_NOT(args.outDistances);
+    if (args.k > 0) {
+        FAISS_THROW_IF_NOT(args.outIndices);
+    }
 
     std::vector<float> convertedQueries;
     const float* queries = materializeQueryF32_(args, convertedQueries);
@@ -1641,6 +2032,68 @@ void bfKnn_tiling(
     std::vector<uint16_t> convertedVectorsF16;
     const uint16_t* vectorsF16 =
             materializeVectorF16IfNeeded_(args, convertedVectorsF16);
+    std::vector<float> convertedVectorsFromF16;
+    const float* vectorsF32FromF16 =
+            materializeVectorF32FromF16_(args, convertedVectorsFromF16);
+    const float* vectorNormsF32 = args.vectorNorms;
+    std::vector<float> convertedVectorNorms;
+    if (args.vectorNorms && !args.vectorsRowMajor) {
+        convertedVectorNorms.assign(args.vectorNorms, args.vectorNorms + args.numVectors);
+        vectorNormsF32 = convertedVectorNorms.data();
+    }
+
+    if (args.k == -1) {
+        FAISS_THROW_IF_NOT_MSG(
+                !args.ignoreOutDistances,
+                "bfKnn_tiling(params): ignoreOutDistances cannot be true when k == -1");
+        if (!(args.metric == METRIC_L2 || args.metric == METRIC_INNER_PRODUCT)) {
+            const float* vectorsForFallback =
+                    (args.vectorType == MetalDistanceDataType::F16)
+                    ? vectorsF32FromF16
+                    : vectorsF32;
+            bfKnnCpuFallbackParams_(
+                    args,
+                    vectorsForFallback,
+                    queries,
+                    args.outDistances,
+                    nullptr,
+                    args.outIndicesType);
+            return;
+        }
+        allPairsDistanceTiledParams_(
+                resources,
+                args,
+                vectorsF32,
+                vectorsF16,
+                queries,
+                vectorNormsF32,
+                vectorsMemoryLimit,
+                queriesMemoryLimit,
+                args.outDistances);
+        return;
+    }
+
+    if (!(args.metric == METRIC_L2 || args.metric == METRIC_INNER_PRODUCT)) {
+        std::vector<float> tmpDistancesFallback;
+        float* outDistFallback = args.outDistances;
+        if (args.ignoreOutDistances) {
+            tmpDistancesFallback.resize((size_t)args.numQueries * args.k);
+            outDistFallback = tmpDistancesFallback.data();
+        }
+        const float* vectorsForFallback =
+                (args.vectorType == MetalDistanceDataType::F16)
+                ? vectorsF32FromF16
+                : vectorsF32;
+        bfKnnCpuFallbackParams_(
+                args,
+                vectorsForFallback,
+                queries,
+                outDistFallback,
+                args.outIndices,
+                args.outIndicesType);
+        return;
+    }
+
     const bool useVectorNorms =
             args.metric == METRIC_L2 && args.vectorNorms != nullptr &&
             args.vectorType != MetalDistanceDataType::F16;
@@ -1679,7 +2132,7 @@ void bfKnn_tiling(
                 bfKnn_tilingWithNormsF32_(
                         resources,
                         vectorsF32,
-                        args.vectorNorms,
+                        vectorNormsF32,
                         args.numVectors,
                         queries,
                         args.numQueries,
@@ -1733,7 +2186,7 @@ void bfKnn_tiling(
                 bfKnn_tilingWithNormsF32_(
                         resources,
                         vectorsF32,
-                        args.vectorNorms,
+                        vectorNormsF32,
                         args.numVectors,
                         queries,
                         args.numQueries,

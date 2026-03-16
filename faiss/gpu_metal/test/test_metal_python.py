@@ -343,6 +343,57 @@ class TestMetalPython(unittest.TestCase):
         np.testing.assert_allclose(D, D_cpu, rtol=1e-5, atol=1e-5)
         np.testing.assert_array_equal(I, I_cpu)
 
+    def test_pairwise_distance_gpu_all_pairs(self):
+        """k == -1 path returns full pairwise matrix."""
+        if faiss.get_num_gpus() == 0:
+            self.skipTest("No Metal device")
+
+        d, nb, nq = 20, 900, 22
+        np.random.seed(9600)
+        xb = np.random.randn(nb, d).astype(np.float32)
+        xq = np.random.randn(nq, d).astype(np.float32)
+
+        cpu = np.sum((xq[:, None, :] - xb[None, :, :]) ** 2, axis=2, dtype=np.float32)
+
+        res = faiss.StandardGpuResources()
+        D = faiss.pairwise_distance_gpu(res, xq, xb, metric=faiss.METRIC_L2)
+        np.testing.assert_allclose(D, cpu, rtol=1e-5, atol=1e-5)
+
+    def test_knn_gpu_l1_metric(self):
+        """knn_gpu supports non-L2/IP metrics via params fallback path."""
+        if faiss.get_num_gpus() == 0:
+            self.skipTest("No Metal device")
+
+        d, nb, nq, k = 16, 1200, 24, 5
+        np.random.seed(9700)
+        xb = np.random.randn(nb, d).astype(np.float32)
+        xq = np.random.randn(nq, d).astype(np.float32)
+
+        cpu_index = faiss.IndexFlat(d, faiss.METRIC_L1)
+        cpu_index.add(xb)
+        D_cpu, I_cpu = cpu_index.search(xq, k)
+
+        res = faiss.StandardGpuResources()
+        D, I = faiss.knn_gpu(res, xq, xb, k, metric=faiss.METRIC_L1)
+        np.testing.assert_allclose(D, D_cpu, rtol=1e-5, atol=1e-5)
+        np.testing.assert_array_equal(I, I_cpu)
+
+    def test_pairwise_distance_gpu_l1_metric(self):
+        """pairwise_distance_gpu supports non-L2/IP metrics via params fallback path."""
+        if faiss.get_num_gpus() == 0:
+            self.skipTest("No Metal device")
+
+        d, nb, nq = 14, 700, 18
+        np.random.seed(9800)
+        xb = np.random.randn(nb, d).astype(np.float32)
+        xq = np.random.randn(nq, d).astype(np.float32)
+
+        cpu = np.sum(np.abs(xq[:, None, :] - xb[None, :, :]), axis=2, dtype=np.float32)
+
+        res = faiss.StandardGpuResources()
+        D = faiss.pairwise_distance_gpu(res, xq, xb, metric=faiss.METRIC_L1)
+        np.testing.assert_allclose(D, cpu, rtol=1e-5, atol=1e-5)
+
 
 if __name__ == "__main__":
     unittest.main()
