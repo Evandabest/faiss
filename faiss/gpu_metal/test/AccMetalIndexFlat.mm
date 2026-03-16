@@ -712,6 +712,49 @@ TEST_F(AccMetalIndexFlat, Float16Reconstruct) {
     }
 }
 
+TEST_F(AccMetalIndexFlat, ReconstructBatch) {
+    const int dim = 24, nb = 200;
+    std::vector<float> vecs((size_t)nb * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 7331);
+
+    faiss::gpu_metal::MetalIndexFlat metalIdx(
+            resources_, dim, faiss::METRIC_L2, 0.0f);
+    metalIdx.add(nb, vecs.data());
+
+    const std::vector<faiss::idx_t> keys = {0, 5, 17, 42, 111, 199};
+    std::vector<float> recons(keys.size() * (size_t)dim);
+    metalIdx.reconstruct_batch((faiss::idx_t)keys.size(), keys.data(), recons.data());
+
+    for (size_t i = 0; i < keys.size(); ++i) {
+        const float* ref = vecs.data() + (size_t)keys[i] * dim;
+        const float* got = recons.data() + i * (size_t)dim;
+        for (int j = 0; j < dim; ++j) {
+            EXPECT_NEAR(got[j], ref[j], 1e-5f)
+                    << "key=" << keys[i] << " dim=" << j;
+        }
+    }
+}
+
+TEST_F(AccMetalIndexFlat, SAEncodeDecode) {
+    const int dim = 32, n = 50;
+    std::vector<float> x((size_t)n * dim);
+    faiss::float_rand(x.data(), x.size(), 8842);
+
+    faiss::gpu_metal::MetalIndexFlat metalIdx(
+            resources_, dim, faiss::METRIC_L2, 0.0f);
+    EXPECT_EQ(metalIdx.sa_code_size(), (size_t)dim * sizeof(float));
+
+    std::vector<uint8_t> codes((size_t)n * metalIdx.sa_code_size());
+    std::vector<float> decoded((size_t)n * dim, 0.0f);
+
+    metalIdx.sa_encode(n, x.data(), codes.data());
+    metalIdx.sa_decode(n, codes.data(), decoded.data());
+
+    for (size_t i = 0; i < x.size(); ++i) {
+        EXPECT_EQ(decoded[i], x[i]) << "i=" << i;
+    }
+}
+
 TEST_F(AccMetalIndexFlat, Float16CopyFromTo) {
     const int dim = 32;
     const int nb = 100;

@@ -501,5 +501,38 @@ void MetalIndexFlat::reconstruct_n(idx_t i0, idx_t ni, float* recons) const {
     }
 }
 
+void MetalIndexFlat::reconstruct_batch(
+        idx_t n,
+        const idx_t* keys,
+        float* recons) const {
+    FAISS_THROW_IF_NOT(keys != nullptr);
+    FAISS_THROW_IF_NOT(recons != nullptr);
+    for (idx_t i = 0; i < n; ++i) {
+        reconstruct(keys[i], recons + (size_t)i * (size_t)d);
+    }
+}
+
+size_t MetalIndexFlat::sa_code_size() const {
+    return (size_t)d * sizeof(float);
+}
+
+void MetalIndexFlat::sa_encode(idx_t n, const float* x, uint8_t* bytes) const {
+    if (n <= 0) {
+        return;
+    }
+    FAISS_THROW_IF_NOT(x != nullptr);
+    FAISS_THROW_IF_NOT(bytes != nullptr);
+    std::memcpy(bytes, x, (size_t)n * (size_t)d * sizeof(float));
+}
+
+void MetalIndexFlat::sa_decode(idx_t n, const uint8_t* bytes, float* x) const {
+    if (n <= 0) {
+        return;
+    }
+    FAISS_THROW_IF_NOT(bytes != nullptr);
+    FAISS_THROW_IF_NOT(x != nullptr);
+    std::memcpy(x, bytes, (size_t)n * (size_t)d * sizeof(float));
+}
+
 } // namespace gpu_metal
 } // namespace faiss

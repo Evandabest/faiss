@@ -76,6 +76,15 @@ public:
     /// Reconstruct n contiguous stored vectors starting at i0.
     void reconstruct_n(idx_t i0, idx_t ni, float* recons) const override;
 
+    /// Reconstruct an arbitrary batch of stored vectors.
+    void reconstruct_batch(idx_t n, const idx_t* keys, float* recons)
+            const override;
+
+    /// Standalone codec interface (same behavior as IndexFlat: raw float copy).
+    size_t sa_code_size() const override;
+    void sa_encode(idx_t n, const float* x, uint8_t* bytes) const override;
+    void sa_decode(idx_t n, const uint8_t* bytes, float* x) const override;
+
     /// Whether this index stores vectors as float16 (half).
     bool useFloat16() const { return useFloat16_; }
     bool storeTransposed() const { return storeTransposed_; }
