@@ -90,6 +90,48 @@ class TestMetalPython(unittest.TestCase):
         np.testing.assert_array_equal(D_rt, D_gpu)
         np.testing.assert_array_equal(I_rt, I_gpu)
 
+    def test_gpuindexflat_direct_constructor_helper_l2(self):
+        """GpuIndexFlat helper constructs a usable Metal flat index."""
+        if faiss.get_num_gpus() == 0:
+            self.skipTest("No Metal device")
+        d, nb, nq, k = 32, 300, 12, 6
+        xb = np.random.randn(nb, d).astype(np.float32)
+        xq = np.random.randn(nq, d).astype(np.float32)
+
+        cpu_index = faiss.IndexFlatL2(d)
+        cpu_index.add(xb)
+        D_cpu, I_cpu = cpu_index.search(xq, k)
+
+        res = faiss.StandardGpuResources()
+        gpu_index = faiss.GpuIndexFlat(res, d, faiss.METRIC_L2)
+        gpu_index.add(xb)
+        D_gpu, I_gpu = gpu_index.search(xq, k)
+
+        np.testing.assert_allclose(D_gpu, D_cpu, rtol=1e-5, atol=1e-5)
+        np.testing.assert_array_equal(I_gpu, I_cpu)
+
+    def test_gpuindexflatl2_gpuindexflatip_helpers(self):
+        """GpuIndexFlatL2/GpuIndexFlatIP convenience helpers work on Metal."""
+        if faiss.get_num_gpus() == 0:
+            self.skipTest("No Metal device")
+        d, nb, nq, k = 24, 240, 10, 5
+        xb = np.random.randn(nb, d).astype(np.float32)
+        xq = np.random.randn(nq, d).astype(np.float32)
+
+        res = faiss.StandardGpuResources()
+
+        gpu_l2 = faiss.GpuIndexFlatL2(res, d)
+        gpu_l2.add(xb)
+        D_l2, I_l2 = gpu_l2.search(xq, k)
+        self.assertEqual(D_l2.shape, (nq, k))
+        self.assertEqual(I_l2.shape, (nq, k))
+
+        gpu_ip = faiss.GpuIndexFlatIP(res, d)
+        gpu_ip.add(xb)
+        D_ip, I_ip = gpu_ip.search(xq, k)
+        self.assertEqual(D_ip.shape, (nq, k))
+        self.assertEqual(I_ip.shape, (nq, k))
+
     def test_tiled_many_vectors(self):
         """Force vector tiling (nb > 131072): compare Metal vs CPU."""
         if faiss.get_num_gpus() == 0:

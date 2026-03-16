@@ -70,6 +70,16 @@ if "GpuIndexFlat" not in globals():
             raise TypeError("GpuIndexFlat helper supports METRIC_L2 or METRIC_INNER_PRODUCT")
         return index_cpu_to_gpu(res, device, cpu_index)
 
+if "GpuIndexFlatL2" not in globals():
+    def GpuIndexFlatL2(res, d, device=0):
+        """Construct a GPU L2 flat index directly from Python."""
+        return GpuIndexFlat(res, d, METRIC_L2, device)
+
+if "GpuIndexFlatIP" not in globals():
+    def GpuIndexFlatIP(res, d, device=0):
+        """Construct a GPU inner-product flat index directly from Python."""
+        return GpuIndexFlat(res, d, METRIC_INNER_PRODUCT, device)
+
 # allows numpy ndarray usage with bfKnn
 
 
