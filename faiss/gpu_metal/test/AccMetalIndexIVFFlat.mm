@@ -11,6 +11,7 @@
 
 #include <faiss/IndexFlat.h>
 #include <faiss/IndexIVFFlat.h>
+#include <faiss/invlists/DirectMap.h>
 #include <faiss/gpu_metal/MetalCloner.h>
 #include <faiss/gpu_metal/MetalIndexIVFFlat.h>
 #include <faiss/gpu_metal/MetalResources.h>
@@ -18,6 +19,7 @@
 #include <faiss/utils/random.h>
 #include <gtest/gtest.h>
 #import <cmath>
+#import <limits>
 #import <memory>
 #import <set>
 #import <vector>
@@ -711,4 +713,94 @@ TEST_F(AccMetalIndexIVFFlat, ClonerOptionsReserveVecs) {
     EXPECT_EQ(metalRaw->ntotal, nb);
 
     delete metalRaw;
+}
+
+TEST_F(AccMetalIndexIVFFlat, ClonerOptionsInterleavedLayoutFalse) {
+    const int dim = 64, nlist = 16, nb = 3000, nq = 20, k = 10;
+    std::vector<float> vecs(nb * dim), queries(nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 111);
+    faiss::float_rand(queries.data(), queries.size(), 112);
+
+    auto cpuIdx = makeCpuIVFFlat(dim, nlist, faiss::METRIC_L2, nb, vecs.data());
+    cpuIdx->add(nb, vecs.data());
+    cpuIdx->nprobe = 8;
+
+    faiss::gpu_metal::StandardMetalResources stdRes;
+    faiss::gpu_metal::MetalClonerOptions opts;
+    opts.interleavedLayout = false;
+
+    faiss::Index* metalRaw = faiss::gpu_metal::index_cpu_to_metal_gpu(
+            &stdRes, 0, cpuIdx.get(), &opts);
+    ASSERT_NE(metalRaw, nullptr);
+    auto* metalIVF = dynamic_cast<faiss::gpu_metal::MetalIndexIVFFlat*>(metalRaw);
+    ASSERT_NE(metalIVF, nullptr);
+    EXPECT_FALSE(metalIVF->interleavedLayout());
+
+    std::vector<float> refD((size_t)nq * k), testD((size_t)nq * k);
+    std::vector<faiss::idx_t> refL((size_t)nq * k), testL((size_t)nq * k);
+    cpuIdx->search(nq, queries.data(), k, refD.data(), refL.data());
+    metalRaw->search(nq, queries.data(), k, testD.data(), testL.data());
+    expectRecall(nq, k, 0.85f, refL.data(), testL.data());
+
+    delete metalRaw;
+}
+
+TEST_F(AccMetalIndexIVFFlat, ClonerOptionsIndicesIVF) {
+    const int dim = 32, nlist = 8, nb = 2000, nq = 16, k = 8;
+    std::vector<float> vecs(nb * dim), queries(nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 211);
+    faiss::float_rand(queries.data(), queries.size(), 212);
+
+    auto cpuIdx = makeCpuIVFFlat(dim, nlist, faiss::METRIC_L2, nb, vecs.data());
+    cpuIdx->add(nb, vecs.data());
+    cpuIdx->nprobe = 6;
+
+    faiss::gpu_metal::StandardMetalResources stdRes;
+    faiss::gpu_metal::MetalClonerOptions opts;
+    opts.indicesOptions = faiss::gpu::INDICES_IVF;
+
+    faiss::Index* metalRaw = faiss::gpu_metal::index_cpu_to_metal_gpu(
+            &stdRes, 0, cpuIdx.get(), &opts);
+    ASSERT_NE(metalRaw, nullptr);
+    auto* metalIVF = dynamic_cast<faiss::gpu_metal::MetalIndexIVFFlat*>(metalRaw);
+    ASSERT_NE(metalIVF, nullptr);
+    EXPECT_EQ(metalIVF->indicesOptions(), faiss::gpu::INDICES_IVF);
+
+    std::vector<float> d((size_t)nq * k);
+    std::vector<faiss::idx_t> l((size_t)nq * k, -1);
+    metalRaw->search(nq, queries.data(), k, d.data(), l.data());
+
+    for (faiss::idx_t lab : l) {
+        if (lab < 0) {
+            continue;
+        }
+        uint64_t pair = (uint64_t)lab;
+        uint64_t listNo = faiss::lo_listno(pair);
+        uint64_t offset = faiss::lo_offset(pair);
+        EXPECT_LT(listNo, (uint64_t)nlist);
+        if (listNo < (uint64_t)nlist) {
+            EXPECT_LT(offset, cpuIdx->invlists->list_size((size_t)listNo));
+        }
+    }
+
+    delete metalRaw;
+}
+
+TEST_F(AccMetalIndexIVFFlat, Indices32BitRejectsOutOfRangeIds) {
+    const int dim = 16, nlist = 4, nb = 200;
+    std::vector<float> vecs(nb * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 313);
+
+    faiss::gpu_metal::MetalIndexConfig cfg;
+    cfg.indicesOptions = faiss::gpu::INDICES_32_BIT;
+    faiss::gpu_metal::MetalIndexIVFFlat metalIdx(
+            resources_, dim, nlist, faiss::METRIC_L2, 0.0f, cfg);
+    metalIdx.train(nb, vecs.data());
+
+    std::vector<faiss::idx_t> ids(nb);
+    for (int i = 0; i < nb; ++i) {
+        ids[i] = (faiss::idx_t)std::numeric_limits<int32_t>::max() + 100 + i;
+    }
+
+    EXPECT_ANY_THROW(metalIdx.add_with_ids(nb, vecs.data(), ids.data()));
 }

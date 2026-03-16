@@ -11,6 +11,7 @@
 #pragma once
 
 #include <faiss/Index.h>
+#include <faiss/gpu/GpuIndicesOptions.h>
 #include <faiss/gpu_metal/MetalResources.h>
 #include <memory>
 
@@ -31,6 +32,12 @@ struct MetalIndexConfig {
     /// fp16 distance kernels. Applies to MetalIndexIVFFlat and
     /// MetalIndexIVFScalarQuantizer.
     bool useFloat16CoarseQuantizer = false;
+
+    /// How IVF labels are represented (mirrors GPU IndicesOptions).
+    faiss::gpu::IndicesOptions indicesOptions = faiss::gpu::INDICES_64_BIT;
+
+    /// Whether IVF list data should use interleaved layout for scan kernels.
+    bool interleavedLayout = true;
 };
 
 /// Base class for Metal-backed indexes. Mirrors faiss::gpu::GpuIndex.

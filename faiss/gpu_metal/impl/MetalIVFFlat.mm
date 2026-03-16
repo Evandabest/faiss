@@ -11,8 +11,10 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 
 #include <faiss/impl/FaissAssert.h>
+#include <faiss/invlists/DirectMap.h>
 
 namespace faiss {
 namespace gpu_metal {
@@ -22,12 +24,16 @@ MetalIVFFlatImpl::MetalIVFFlatImpl(
         int dim,
         idx_t nlist,
         faiss::MetricType metric,
-        float metricArg)
+        float metricArg,
+        faiss::gpu::IndicesOptions indicesOptions,
+        bool interleavedLayout)
         : resources_(std::move(resources)),
           dim_(dim),
           nlist_(nlist),
           metric_type_(metric),
           metric_arg_(metricArg),
+          indicesOptions_(indicesOptions),
+          interleavedLayout_(interleavedLayout),
           listLength_(nlist_, 0),
           listOffset_(nlist_, 0),
           totalVecs_(0),
@@ -166,6 +172,7 @@ void MetalIVFFlatImpl::appendVectors(
         }
         size_t l = (size_t)list;
         size_t dstIndex = newOffset[l] + curPerList[l];
+        size_t listOffset = curPerList[l];
         curPerList[l]++;
 
         // Copy vector
@@ -176,7 +183,20 @@ void MetalIVFFlatImpl::appendVectors(
                 (size_t)dim_ * sizeof(float));
 
         // Copy id
-        idx_t id = xids ? xids[i] : (idx_t)(totalVecs_ + (size_t)(i));
+        idx_t id = -1;
+        if (indicesOptions_ == faiss::gpu::INDICES_CPU ||
+            indicesOptions_ == faiss::gpu::INDICES_IVF) {
+            id = (idx_t)faiss::lo_build((uint64_t)l, (uint64_t)listOffset);
+        } else {
+            id = xids ? xids[i] : (idx_t)(totalVecs_ + (size_t)(i));
+            if (indicesOptions_ == faiss::gpu::INDICES_32_BIT) {
+                FAISS_THROW_IF_NOT_MSG(
+                        id >= (idx_t)std::numeric_limits<int32_t>::min() &&
+                                id <= (idx_t)std::numeric_limits<int32_t>::max(),
+                        "MetalIVFFlatImpl: id out of int32 range");
+                id = (idx_t)(int32_t)id;
+            }
+        }
         newIds[dstIndex] = id;
     }
 
@@ -248,6 +268,10 @@ void MetalIVFFlatImpl::uploadToGpu() {
     std::memcpy([codesBuffer_ contents], hostCodes_.data(), codesBytes);
     std::memcpy([idsBuffer_   contents], hostIds_.data(),   idsBytes);
 
+    if (!interleavedLayout_) {
+        return;
+    }
+
     // Build interleaved codes buffer: blocks of 32 vectors with dims interleaved.
     // Layout per block: [v0d0 v1d0 ... v31d0] [v0d1 v1d1 ... v31d1] ...
     if (interleavedCodesBuf_ != nil) {
@@ -313,4 +337,3 @@ void MetalIVFFlatImpl::uploadToGpu() {
 
 } // namespace gpu_metal
 } // namespace faiss
-

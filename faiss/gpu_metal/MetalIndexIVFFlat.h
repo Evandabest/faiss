@@ -14,6 +14,7 @@
 #import <Metal/Metal.h>
 
 #include <faiss/IndexIVFFlat.h>
+#include <faiss/gpu/GpuIndicesOptions.h>
 #include <faiss/gpu_metal/MetalIndex.h>
 
 #include <memory>
@@ -109,10 +110,14 @@ public:
     /// Accessors (needed by cloner and tests).
     idx_t nlist() const;
     size_t nprobe() const;
+    bool interleavedLayout() const;
+    faiss::gpu::IndicesOptions indicesOptions() const;
 
 private:
     std::unique_ptr<faiss::IndexIVFFlat> cpuIndex_;
     std::unique_ptr<MetalIVFFlatImpl> gpuIvf_;
+    faiss::gpu::IndicesOptions indicesOptions_;
+    bool interleavedLayout_;
 
     // Persistent search buffers — allocated once, grown lazily.
     // Declared mutable so search() (const) can resize them.
@@ -151,4 +156,3 @@ private:
 
 } // namespace gpu_metal
 } // namespace faiss
-

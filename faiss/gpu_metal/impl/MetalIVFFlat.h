@@ -20,6 +20,7 @@
 
 #include <faiss/MetricType.h>
 #include <faiss/Index.h>
+#include <faiss/gpu/GpuIndicesOptions.h>
 #include <faiss/gpu_metal/MetalResources.h>
 
 namespace faiss {
@@ -35,7 +36,9 @@ public:
             int dim,
             idx_t nlist,
             faiss::MetricType metric,
-            float metricArg);
+            float metricArg,
+            faiss::gpu::IndicesOptions indicesOptions,
+            bool interleavedLayout);
 
     ~MetalIVFFlatImpl();
 
@@ -103,6 +106,9 @@ public:
     id<MTLBuffer> interleavedCodesOffsetBuffer() const {
         return interleavedCodesOffsetBuf_;
     }
+    bool interleavedLayout() const {
+        return interleavedLayout_;
+    }
 
 private:
     void uploadToGpu();
@@ -113,6 +119,8 @@ private:
     idx_t nlist_;
     faiss::MetricType metric_type_;
     float metric_arg_;
+    faiss::gpu::IndicesOptions indicesOptions_;
+    bool interleavedLayout_;
 
     // Per-list metadata
     std::vector<size_t> listLength_;
@@ -138,4 +146,3 @@ private:
 
 } // namespace gpu_metal
 } // namespace faiss
-

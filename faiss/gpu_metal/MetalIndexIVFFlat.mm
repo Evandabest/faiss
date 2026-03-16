@@ -12,6 +12,7 @@
 #include <faiss/impl/FaissAssert.h>
 #include <faiss/gpu_metal/MetalDistance.h>
 #include <faiss/gpu_metal/impl/MetalIVFFlat.h>
+#include <faiss/invlists/DirectMap.h>
 
 #include <cstring>
 #include <limits>
@@ -23,6 +24,23 @@ void floatToHalf(const float* src, uint16_t* dst, size_t n) {
         __fp16 h = (__fp16)src[i];
         std::memcpy(&dst[i], &h, sizeof(uint16_t));
     }
+}
+
+inline faiss::idx_t decodeCpuLabelFromPair(
+        const faiss::IndexIVFFlat* cpuIndex,
+        int64_t pairLabel) {
+    const uint64_t pair = static_cast<uint64_t>(pairLabel);
+    const uint64_t listNo = faiss::lo_listno(pair);
+    const uint64_t offset = faiss::lo_offset(pair);
+    if (!cpuIndex || listNo >= (uint64_t)cpuIndex->nlist) {
+        return -1;
+    }
+    const size_t sz = cpuIndex->invlists->list_size((size_t)listNo);
+    if (offset >= sz) {
+        return -1;
+    }
+    const faiss::idx_t* ids = cpuIndex->invlists->get_ids((size_t)listNo);
+    return ids ? ids[offset] : -1;
 }
 } // namespace
 
@@ -36,7 +54,9 @@ MetalIndexIVFFlat::MetalIndexIVFFlat(
         faiss::MetricType metric,
         float metricArg,
         MetalIndexConfig config)
-        : MetalIndex(resources, dims, metric, metricArg, config) {
+        : MetalIndex(resources, dims, metric, metricArg, config),
+          indicesOptions_(config.indicesOptions),
+          interleavedLayout_(config.interleavedLayout) {
     // Simple CPU quantizer: IndexFlatL2 or IndexFlatIP
     faiss::IndexFlat* quantizer = (metric == METRIC_INNER_PRODUCT)
             ? (faiss::IndexFlat*)new faiss::IndexFlatIP(dims)
@@ -45,7 +65,13 @@ MetalIndexIVFFlat::MetalIndexIVFFlat(
             quantizer, (size_t)d, (size_t)nlist, metric);
     cpuIndex_->own_fields = true;
     gpuIvf_ = std::make_unique<MetalIVFFlatImpl>(
-            resources, (int)d, nlist, metric, metricArg);
+            resources,
+            (int)d,
+            nlist,
+            metric,
+            metricArg,
+            indicesOptions_,
+            interleavedLayout_);
 }
 
 MetalIndexIVFFlat::MetalIndexIVFFlat(
@@ -57,7 +83,9 @@ MetalIndexIVFFlat::MetalIndexIVFFlat(
                   (int)cpuIndex->d,
                   cpuIndex->metric_type,
                   cpuIndex->metric_arg,
-                  config) {
+                  config),
+          indicesOptions_(config.indicesOptions),
+          interleavedLayout_(config.interleavedLayout) {
     faiss::IndexFlat* quantizer = (cpuIndex->metric_type == METRIC_INNER_PRODUCT)
             ? (faiss::IndexFlat*)new faiss::IndexFlatIP((int)cpuIndex->d)
             : (faiss::IndexFlat*)new faiss::IndexFlatL2((int)cpuIndex->d);
@@ -69,7 +97,9 @@ MetalIndexIVFFlat::MetalIndexIVFFlat(
             (int)cpuIndex->d,
             cpuIndex->nlist,
             cpuIndex->metric_type,
-            cpuIndex->metric_arg);
+            cpuIndex->metric_arg,
+            indicesOptions_,
+            interleavedLayout_);
     copyFrom(cpuIndex);
 }
 
@@ -225,23 +255,6 @@ void MetalIndexIVFFlat::search(
             metric_type == METRIC_L2 || metric_type == METRIC_INNER_PRODUCT);
     const bool isL2 = (metric_type == METRIC_L2);
 
-    id<MTLDevice>      device = resources_->getDevice();
-    id<MTLCommandQueue> queue = resources_->getCommandQueue();
-
-    // Fall back to CPU if Metal is not available or GPU IVF storage not ready.
-    if (!device || !queue || !gpuIvf_ || !gpuIvf_->codesBuffer() ||
-        !gpuIvf_->idsBuffer() || !gpuIvf_->listOffsetGpuBuffer() ||
-        !gpuIvf_->listLengthGpuBuffer()) {
-        cpuIndex_->search(n, x, k, distances, labels);
-        return;
-    }
-
-    const int maxK = getMetalDistanceMaxK();
-    if (k > maxK) {
-        cpuIndex_->search(n, x, k, distances, labels);
-        return;
-    }
-
     // Determine nprobe from params or index.
     size_t nprobe = cpuIndex_->nprobe;
     if (auto* ivfParams = dynamic_cast<const IVFSearchParameters*>(params)) {
@@ -255,6 +268,45 @@ void MetalIndexIVFFlat::search(
             labels[i]    = -1;
             distances[i] = isL2 ? inf : negInf;
         }
+        return;
+    }
+
+    auto cpuFallbackSearch = [&]() {
+        if (indicesOptions_ == faiss::gpu::INDICES_IVF) {
+            std::vector<float> coarseDist((size_t)n * nprobe);
+            std::vector<idx_t> coarseAssign((size_t)n * nprobe);
+            cpuIndex_->quantizer->search(
+                    n, x, (idx_t)nprobe, coarseDist.data(), coarseAssign.data());
+            cpuIndex_->search_preassigned(
+                    n,
+                    x,
+                    k,
+                    coarseAssign.data(),
+                    coarseDist.data(),
+                    distances,
+                    labels,
+                    true,
+                    dynamic_cast<const IVFSearchParameters*>(params),
+                    nullptr);
+        } else {
+            cpuIndex_->search(n, x, k, distances, labels);
+        }
+    };
+
+    id<MTLDevice>      device = resources_->getDevice();
+    id<MTLCommandQueue> queue = resources_->getCommandQueue();
+
+    // Fall back to CPU if Metal is not available or GPU IVF storage not ready.
+    if (!device || !queue || !gpuIvf_ || !gpuIvf_->codesBuffer() ||
+        !gpuIvf_->idsBuffer() || !gpuIvf_->listOffsetGpuBuffer() ||
+        !gpuIvf_->listLengthGpuBuffer()) {
+        cpuFallbackSearch();
+        return;
+    }
+
+    const int maxK = getMetalDistanceMaxK();
+    if (k > maxK) {
+        cpuFallbackSearch();
         return;
     }
 
@@ -287,7 +339,7 @@ void MetalIndexIVFFlat::search(
     if (!searchQueriesBuf_ || !searchOutDistBuf_ || !searchOutIdxBuf_ ||
         !searchPerListDistBuf_ || !searchPerListIdxBuf_ ||
         !coarseOutDistBuf_ || !coarseOutIdxBuf_ || !distMatrixBuf_) {
-        cpuIndex_->search(n, x, k, distances, labels);
+        cpuFallbackSearch();
         return;
     }
 
@@ -331,7 +383,7 @@ void MetalIndexIVFFlat::search(
         size_t coarseBytes = (size_t)n * nprobe * sizeof(int32_t);
         ensureSearchBuf_(searchCoarseBuf_, searchCoarseCap_, coarseBytes);
         if (!searchCoarseBuf_) {
-            cpuIndex_->search(n, x, k, distances, labels);
+            cpuFallbackSearch();
             return;
         }
         auto* dst = reinterpret_cast<int32_t*>([searchCoarseBuf_ contents]);
@@ -354,7 +406,7 @@ void MetalIndexIVFFlat::search(
     }
 
     if (!ok) {
-        cpuIndex_->search(n, x, k, distances, labels);
+        cpuFallbackSearch();
         return;
     }
 
@@ -366,7 +418,15 @@ void MetalIndexIVFFlat::search(
         for (idx_t j = 0; j < k; ++j) {
             size_t pos        = (size_t)qi * (size_t)k + (size_t)j;
             int64_t globalId  = outIdxPtr[pos];
-            labels   [pos]    = (globalId < 0) ? -1 : (idx_t)globalId;
+            if (globalId < 0) {
+                labels[pos] = -1;
+            } else if (indicesOptions_ == faiss::gpu::INDICES_CPU) {
+                labels[pos] = decodeCpuLabelFromPair(cpuIndex_.get(), globalId);
+            } else if (indicesOptions_ == faiss::gpu::INDICES_32_BIT) {
+                labels[pos] = (idx_t)(int32_t)globalId;
+            } else {
+                labels[pos] = (idx_t)globalId;
+            }
             distances[pos]    = outDistPtr[pos];
         }
     }
@@ -418,7 +478,11 @@ void MetalIndexIVFFlat::search_preassigned(
         !gpuIvf_->listLengthGpuBuffer() || k > maxK) {
         cpuIndex_->search_preassigned(
                 n, x, k, assign, centroid_dis,
-                distances, labels, store_pairs, params, stats);
+                distances,
+                labels,
+                indicesOptions_ == faiss::gpu::INDICES_IVF ? true : store_pairs,
+                params,
+                stats);
         return;
     }
 
@@ -440,7 +504,11 @@ void MetalIndexIVFFlat::search_preassigned(
         !searchPerListDistBuf_ || !searchPerListIdxBuf_ || !searchCoarseBuf_) {
         cpuIndex_->search_preassigned(
                 n, x, k, assign, centroid_dis,
-                distances, labels, store_pairs, params, stats);
+                distances,
+                labels,
+                indicesOptions_ == faiss::gpu::INDICES_IVF ? true : store_pairs,
+                params,
+                stats);
         return;
     }
 
@@ -468,7 +536,11 @@ void MetalIndexIVFFlat::search_preassigned(
     if (!ok) {
         cpuIndex_->search_preassigned(
                 n, x, k, assign, centroid_dis,
-                distances, labels, store_pairs, params, stats);
+                distances,
+                labels,
+                indicesOptions_ == faiss::gpu::INDICES_IVF ? true : store_pairs,
+                params,
+                stats);
         return;
     }
 
@@ -478,7 +550,15 @@ void MetalIndexIVFFlat::search_preassigned(
         for (idx_t j = 0; j < k; ++j) {
             size_t pos       = (size_t)qi * (size_t)k + (size_t)j;
             int64_t globalId = outIdxPtr[pos];
-            labels   [pos]   = (globalId < 0) ? -1 : (idx_t)globalId;
+            if (globalId < 0) {
+                labels[pos] = -1;
+            } else if (indicesOptions_ == faiss::gpu::INDICES_CPU) {
+                labels[pos] = decodeCpuLabelFromPair(cpuIndex_.get(), globalId);
+            } else if (indicesOptions_ == faiss::gpu::INDICES_32_BIT) {
+                labels[pos] = (idx_t)(int32_t)globalId;
+            } else {
+                labels[pos] = (idx_t)globalId;
+            }
             distances[pos]   = outDistPtr[pos];
         }
     }
@@ -535,6 +615,14 @@ idx_t MetalIndexIVFFlat::nlist() const {
 
 size_t MetalIndexIVFFlat::nprobe() const {
     return cpuIndex_ ? cpuIndex_->nprobe : 1;
+}
+
+bool MetalIndexIVFFlat::interleavedLayout() const {
+    return interleavedLayout_;
+}
+
+faiss::gpu::IndicesOptions MetalIndexIVFFlat::indicesOptions() const {
+    return indicesOptions_;
 }
 
 void MetalIndexIVFFlat::copyFrom(const faiss::IndexIVFFlat* src) {
@@ -648,4 +736,3 @@ void MetalIndexIVFFlat::copyTo(faiss::IndexIVFFlat* dst) const {
 
 } // namespace gpu_metal
 } // namespace faiss
-

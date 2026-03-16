@@ -12,6 +12,7 @@
 
 #include <faiss/Index.h>
 #include <faiss/IndexBinary.h>
+#include <faiss/gpu/GpuIndicesOptions.h>
 
 namespace faiss {
 namespace gpu_metal {
@@ -21,6 +22,9 @@ class StandardMetalResources;
 /// Options controlling how CPU indexes are cloned to Metal GPU.
 /// Mirrors faiss::gpu::GpuClonerOptions for the Metal backend.
 struct MetalClonerOptions {
+    /// How IVF labels are represented (CPU/IVF/32-bit/64-bit).
+    faiss::gpu::IndicesOptions indicesOptions = faiss::gpu::INDICES_64_BIT;
+
     /// Store flat vectors as float16 (MetalIndexFlat only).
     bool useFloat16 = false;
 
@@ -29,6 +33,9 @@ struct MetalClonerOptions {
 
     /// Reserve space for this many vectors in IVF inverted lists.
     long reserveVecs = 0;
+
+    /// Enable/disable interleaved IVF layout.
+    bool interleavedLayout = true;
 
     /// Set verbose flag on the created index.
     bool verbose = false;

@@ -55,6 +55,8 @@ faiss::Index* index_cpu_to_metal_gpu(
     config.device = 0;
     config.useFloat16 = opts.useFloat16;
     config.useFloat16CoarseQuantizer = opts.useFloat16CoarseQuantizer;
+    config.indicesOptions = opts.indicesOptions;
+    config.interleavedLayout = opts.interleavedLayout;
 
     // IndexIVFPQ (check before IndexIVFFlat)
     const auto* ivfPQ = dynamic_cast<const faiss::IndexIVFPQ*>(index);
