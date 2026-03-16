@@ -13,6 +13,7 @@
 
 #include <faiss/Index.h>
 #include <faiss/IndexBinary.h>
+#include <faiss/IndexScalarQuantizer.h>
 #include <faiss/gpu_metal/MetalCloner.h>
 #include <cstdint>
 #include <vector>
@@ -36,6 +37,9 @@ struct MetalBridgeClonerOptions {
     bool useFloat16CoarseQuantizer = false;
     long reserveVecs = 0;
     bool interleavedLayout = true;
+    bool useIVFScalarQuantizer = false;
+    faiss::ScalarQuantizer::QuantizerType ivfSQType =
+            faiss::ScalarQuantizer::QT_8bit;
     bool storeTransposed = false;
     bool allowCpuCoarseQuantizer = false;
     bool verbose = false;

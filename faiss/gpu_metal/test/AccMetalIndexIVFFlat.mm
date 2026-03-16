@@ -15,6 +15,7 @@
 #include <faiss/invlists/DirectMap.h>
 #include <faiss/gpu_metal/MetalCloner.h>
 #include <faiss/gpu_metal/MetalIndexIVFFlat.h>
+#include <faiss/gpu_metal/MetalIndexIVFScalarQuantizer.h>
 #include <faiss/gpu_metal/MetalResources.h>
 #include <faiss/gpu_metal/StandardMetalResources.h>
 #include <faiss/utils/random.h>
@@ -81,6 +82,57 @@ std::unique_ptr<faiss::IndexIVFFlat> makeCpuIVFFlat(
     idx->own_fields = true;
     idx->train(nb, trainData);
     return idx;
+}
+
+std::unique_ptr<faiss::IndexIVFScalarQuantizer> makeCpuIVFSQFromIVFFlat(
+        const faiss::IndexIVFFlat* src,
+        faiss::ScalarQuantizer::QuantizerType sqType) {
+    faiss::IndexFlat* quantizer = (src->metric_type == faiss::METRIC_INNER_PRODUCT)
+            ? (faiss::IndexFlat*)new faiss::IndexFlatIP((int)src->d)
+            : (faiss::IndexFlat*)new faiss::IndexFlatL2((int)src->d);
+    auto dst = std::make_unique<faiss::IndexIVFScalarQuantizer>(
+            quantizer,
+            src->d,
+            src->nlist,
+            sqType,
+            src->metric_type,
+            false);
+    dst->own_fields = true;
+    dst->metric_arg = src->metric_arg;
+
+    std::vector<float> coarse((size_t)src->nlist * src->d);
+    src->quantizer->reconstruct_n(0, src->nlist, coarse.data());
+    dst->quantizer->train(src->nlist, coarse.data());
+    dst->quantizer->add(src->nlist, coarse.data());
+
+    size_t totalN = 0;
+    for (size_t l = 0; l < (size_t)src->nlist; ++l) {
+        totalN += src->invlists->list_size(l);
+    }
+    std::vector<float> allVecs(totalN * (size_t)src->d);
+    std::vector<faiss::idx_t> allIds(totalN);
+    size_t pos = 0;
+    for (size_t l = 0; l < (size_t)src->nlist; ++l) {
+        size_t ls = src->invlists->list_size(l);
+        if (ls == 0) {
+            continue;
+        }
+        const uint8_t* codes = src->invlists->get_codes(l);
+        const faiss::idx_t* ids = src->invlists->get_ids(l);
+        std::memcpy(
+                allVecs.data() + pos * (size_t)src->d,
+                codes,
+                ls * (size_t)src->d * sizeof(float));
+        std::memcpy(allIds.data() + pos, ids, ls * sizeof(faiss::idx_t));
+        pos += ls;
+    }
+
+    if (totalN > 0) {
+        dst->train((faiss::idx_t)totalN, allVecs.data());
+        dst->add_with_ids((faiss::idx_t)totalN, allVecs.data(), allIds.data());
+    }
+    dst->nprobe = src->nprobe;
+    return dst;
 }
 
 } // namespace
@@ -813,6 +865,72 @@ TEST_F(AccMetalIndexIVFFlat, ClonerOptionsIndicesIVF) {
             EXPECT_LT(offset, cpuIdx->invlists->list_size((size_t)listNo));
         }
     }
+
+    delete metalRaw;
+}
+
+TEST_F(AccMetalIndexIVFFlat, ClonerOptionsIVFFlatToIVFSQ8) {
+    const int dim = 48, nlist = 16, nb = 3000, nq = 20, k = 10;
+    std::vector<float> vecs(nb * dim), queries(nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 1011);
+    faiss::float_rand(queries.data(), queries.size(), 1012);
+
+    auto cpuIVFFlat = makeCpuIVFFlat(dim, nlist, faiss::METRIC_L2, nb, vecs.data());
+    cpuIVFFlat->add(nb, vecs.data());
+    cpuIVFFlat->nprobe = 8;
+    auto cpuIVFSQ = makeCpuIVFSQFromIVFFlat(
+            cpuIVFFlat.get(), faiss::ScalarQuantizer::QT_8bit);
+
+    faiss::gpu_metal::StandardMetalResources stdRes;
+    faiss::gpu_metal::MetalClonerOptions opts;
+    opts.useIVFScalarQuantizer = true;
+    opts.ivfSQType = faiss::ScalarQuantizer::QT_8bit;
+
+    faiss::Index* metalRaw = faiss::gpu_metal::index_cpu_to_metal_gpu(
+            &stdRes, 0, cpuIVFFlat.get(), &opts);
+    ASSERT_NE(metalRaw, nullptr);
+    auto* metalSQ = dynamic_cast<faiss::gpu_metal::MetalIndexIVFScalarQuantizer*>(metalRaw);
+    ASSERT_NE(metalSQ, nullptr);
+    EXPECT_EQ(metalSQ->sqQuantizerType(), faiss::ScalarQuantizer::QT_8bit);
+
+    std::vector<float> refD((size_t)nq * k), testD((size_t)nq * k);
+    std::vector<faiss::idx_t> refL((size_t)nq * k, -1), testL((size_t)nq * k, -1);
+    cpuIVFSQ->search(nq, queries.data(), k, refD.data(), refL.data());
+    metalRaw->search(nq, queries.data(), k, testD.data(), testL.data());
+    expectRecall(nq, k, 0.70f, refL.data(), testL.data());
+
+    delete metalRaw;
+}
+
+TEST_F(AccMetalIndexIVFFlat, ClonerOptionsIVFFlatToIVFSQFP16) {
+    const int dim = 48, nlist = 16, nb = 3000, nq = 20, k = 10;
+    std::vector<float> vecs(nb * dim), queries(nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 1111);
+    faiss::float_rand(queries.data(), queries.size(), 1112);
+
+    auto cpuIVFFlat = makeCpuIVFFlat(dim, nlist, faiss::METRIC_L2, nb, vecs.data());
+    cpuIVFFlat->add(nb, vecs.data());
+    cpuIVFFlat->nprobe = 8;
+    auto cpuIVFSQ = makeCpuIVFSQFromIVFFlat(
+            cpuIVFFlat.get(), faiss::ScalarQuantizer::QT_fp16);
+
+    faiss::gpu_metal::StandardMetalResources stdRes;
+    faiss::gpu_metal::MetalClonerOptions opts;
+    opts.useIVFScalarQuantizer = true;
+    opts.ivfSQType = faiss::ScalarQuantizer::QT_fp16;
+
+    faiss::Index* metalRaw = faiss::gpu_metal::index_cpu_to_metal_gpu(
+            &stdRes, 0, cpuIVFFlat.get(), &opts);
+    ASSERT_NE(metalRaw, nullptr);
+    auto* metalSQ = dynamic_cast<faiss::gpu_metal::MetalIndexIVFScalarQuantizer*>(metalRaw);
+    ASSERT_NE(metalSQ, nullptr);
+    EXPECT_EQ(metalSQ->sqQuantizerType(), faiss::ScalarQuantizer::QT_fp16);
+
+    std::vector<float> refD((size_t)nq * k), testD((size_t)nq * k);
+    std::vector<faiss::idx_t> refL((size_t)nq * k, -1), testL((size_t)nq * k, -1);
+    cpuIVFSQ->search(nq, queries.data(), k, refD.data(), refL.data());
+    metalRaw->search(nq, queries.data(), k, testD.data(), testL.data());
+    expectRecall(nq, k, 0.70f, refL.data(), testL.data());
 
     delete metalRaw;
 }

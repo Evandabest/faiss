@@ -20,6 +20,89 @@
 #include <faiss/IndexScalarQuantizer.h>
 #include <faiss/impl/FaissAssert.h>
 #include <cstring>
+#include <memory>
+#include <vector>
+
+namespace {
+
+std::unique_ptr<faiss::IndexIVFScalarQuantizer> convertIVFFlatToIVFSQ(
+        const faiss::IndexIVFFlat* src,
+        faiss::ScalarQuantizer::QuantizerType sqType) {
+    FAISS_THROW_IF_NOT_MSG(src, "convertIVFFlatToIVFSQ: source index is null");
+    FAISS_THROW_IF_NOT_MSG(src->quantizer, "convertIVFFlatToIVFSQ: source quantizer is null");
+    FAISS_THROW_IF_NOT_MSG(src->is_trained, "convertIVFFlatToIVFSQ: source index is not trained");
+
+    faiss::IndexFlat* dstQuantizer =
+            (src->metric_type == faiss::METRIC_INNER_PRODUCT)
+            ? (faiss::IndexFlat*)new faiss::IndexFlatIP(src->d)
+            : (faiss::IndexFlat*)new faiss::IndexFlatL2(src->d);
+    auto dst = std::make_unique<faiss::IndexIVFScalarQuantizer>(
+            dstQuantizer,
+            src->d,
+            src->nlist,
+            sqType,
+            src->metric_type,
+            /*by_residual=*/false);
+    dst->own_fields = true;
+    dst->metric_arg = src->metric_arg;
+
+    // Copy coarse centroids so list assignment behavior matches the source IVF.
+    if (src->nlist > 0) {
+        std::vector<float> coarse((size_t)src->nlist * src->d);
+        src->quantizer->reconstruct_n(0, src->nlist, coarse.data());
+        if (!dst->quantizer->is_trained) {
+            dst->quantizer->train(src->nlist, coarse.data());
+        }
+        dst->quantizer->add(src->nlist, coarse.data());
+    }
+
+    size_t totalN = 0;
+    for (size_t l = 0; l < (size_t)src->nlist; ++l) {
+        totalN += src->invlists->list_size(l);
+    }
+
+    std::vector<float> allVecs;
+    std::vector<faiss::idx_t> allIds;
+    if (totalN > 0) {
+        allVecs.resize(totalN * (size_t)src->d);
+        allIds.resize(totalN);
+
+        size_t pos = 0;
+        for (size_t l = 0; l < (size_t)src->nlist; ++l) {
+            size_t ls = src->invlists->list_size(l);
+            if (ls == 0) {
+                continue;
+            }
+            const uint8_t* codes = src->invlists->get_codes(l);
+            const faiss::idx_t* ids = src->invlists->get_ids(l);
+            std::memcpy(
+                    allVecs.data() + pos * (size_t)src->d,
+                    codes,
+                    ls * (size_t)src->d * sizeof(float));
+            std::memcpy(allIds.data() + pos, ids, ls * sizeof(faiss::idx_t));
+            pos += ls;
+        }
+    }
+
+    // Train SQ codec from vectors when available; for empty indexes train from
+    // coarse centroids so the destination remains usable.
+    if (totalN > 0) {
+        dst->train((faiss::idx_t)totalN, allVecs.data());
+    } else if (src->nlist > 0) {
+        std::vector<float> coarse((size_t)src->nlist * src->d);
+        src->quantizer->reconstruct_n(0, src->nlist, coarse.data());
+        dst->train(src->nlist, coarse.data());
+    }
+
+    if (totalN > 0) {
+        dst->add_with_ids((faiss::idx_t)totalN, allVecs.data(), allIds.data());
+    }
+
+    dst->nprobe = src->nprobe;
+    return dst;
+}
+
+} // namespace
 
 namespace faiss {
 namespace gpu_metal {
@@ -113,6 +196,18 @@ faiss::Index* index_cpu_to_metal_gpu(
                 ivfFlat->metric_type == METRIC_L2 ||
                 ivfFlat->metric_type == METRIC_INNER_PRODUCT);
         coarseQuantizerAllowed(ivfFlat);
+
+        if (opts.useIVFScalarQuantizer) {
+            auto cpuSQ = convertIVFFlatToIVFSQ(ivfFlat, opts.ivfSQType);
+            auto* metal = new MetalIndexIVFScalarQuantizer(
+                    res->getResources(), cpuSQ.get(), config);
+            metal->verbose = opts.verbose;
+            if (opts.reserveVecs > 0 && ivfFlat->ntotal == 0) {
+                metal->reserveMemory(opts.reserveVecs);
+            }
+            return metal;
+        }
+
         auto* metal = new MetalIndexIVFFlat(
                 res->getResources(), ivfFlat, config);
         metal->verbose = opts.verbose;

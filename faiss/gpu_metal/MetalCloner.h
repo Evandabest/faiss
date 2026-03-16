@@ -12,6 +12,7 @@
 
 #include <faiss/Index.h>
 #include <faiss/IndexBinary.h>
+#include <faiss/IndexScalarQuantizer.h>
 #include <faiss/gpu/GpuIndicesOptions.h>
 
 namespace faiss {
@@ -36,6 +37,14 @@ struct MetalClonerOptions {
 
     /// Enable/disable interleaved IVF layout.
     bool interleavedLayout = true;
+
+    /// For CPU IndexIVFFlat input, convert list storage to IVF scalar
+    /// quantization on Metal (instead of keeping full-float IVFFlat).
+    bool useIVFScalarQuantizer = false;
+
+    /// Quantizer type used when useIVFScalarQuantizer=true.
+    faiss::ScalarQuantizer::QuantizerType ivfSQType =
+            faiss::ScalarQuantizer::QT_8bit;
 
     /// Match CUDA option shape: accepted for API parity.
     /// Metal Flat does not use a transposed storage layout today.
