@@ -327,10 +327,15 @@ void MetalIndexIVFFlat::search(
     id<MTLDevice>      device = resources_->getDevice();
     id<MTLCommandQueue> queue = resources_->getCommandQueue();
 
+    const bool hasFlatCodes = gpuIvf_ && gpuIvf_->codesBuffer();
+    const bool hasInterleavedCodes =
+            gpuIvf_ && gpuIvf_->interleavedCodesBuffer() &&
+            gpuIvf_->interleavedCodesOffsetBuffer();
+    const bool hasScanCodes = hasFlatCodes || hasInterleavedCodes;
+
     // Fall back to CPU if Metal is not available or GPU IVF storage not ready.
-    if (!device || !queue || !gpuIvf_ || !gpuIvf_->codesBuffer() ||
-        !gpuIvf_->idsBuffer() || !gpuIvf_->listOffsetGpuBuffer() ||
-        !gpuIvf_->listLengthGpuBuffer()) {
+    if (!device || !queue || !gpuIvf_ || !hasScanCodes || !gpuIvf_->idsBuffer() ||
+        !gpuIvf_->listOffsetGpuBuffer() || !gpuIvf_->listLengthGpuBuffer()) {
         cpuFallbackSearch();
         return;
     }
@@ -504,9 +509,15 @@ void MetalIndexIVFFlat::search_preassigned(
     id<MTLCommandQueue> queue  = resources_->getCommandQueue();
 
     const int maxK = getMetalDistanceMaxK();
-    if (!device || !queue || !gpuIvf_ || !gpuIvf_->codesBuffer() ||
-        !gpuIvf_->idsBuffer() || !gpuIvf_->listOffsetGpuBuffer() ||
-        !gpuIvf_->listLengthGpuBuffer() || k > maxK) {
+    const bool hasFlatCodes = gpuIvf_ && gpuIvf_->codesBuffer();
+    const bool hasInterleavedCodes =
+            gpuIvf_ && gpuIvf_->interleavedCodesBuffer() &&
+            gpuIvf_->interleavedCodesOffsetBuffer();
+    const bool hasScanCodes = hasFlatCodes || hasInterleavedCodes;
+
+    if (!device || !queue || !gpuIvf_ || !hasScanCodes || !gpuIvf_->idsBuffer() ||
+        !gpuIvf_->listOffsetGpuBuffer() || !gpuIvf_->listLengthGpuBuffer() ||
+        k > maxK) {
         cpuIndex_->search_preassigned(
                 n, x, k, assign, centroid_dis,
                 distances,

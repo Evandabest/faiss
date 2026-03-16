@@ -237,6 +237,14 @@ void MetalIVFFlatImpl::uploadToGpu() {
         resources_->deallocBuffer(listLengthBuf_, MetalAllocType::IVFLists);
         listLengthBuf_ = nil;
     }
+    if (interleavedCodesBuf_ != nil) {
+        resources_->deallocBuffer(interleavedCodesBuf_, MetalAllocType::IVFLists);
+        interleavedCodesBuf_ = nil;
+    }
+    if (interleavedCodesOffsetBuf_ != nil) {
+        resources_->deallocBuffer(interleavedCodesOffsetBuf_, MetalAllocType::IVFLists);
+        interleavedCodesOffsetBuf_ = nil;
+    }
 
     // Always (re)upload metadata buffers — they reflect current list layout.
     if (metaBytes > 0) {
@@ -258,80 +266,88 @@ void MetalIVFFlatImpl::uploadToGpu() {
         return;
     }
 
-    codesBuffer_ = resources_->allocBuffer(codesBytes, MetalAllocType::IVFLists);
-    idsBuffer_   = resources_->allocBuffer(idsBytes,   MetalAllocType::IVFLists);
+    idsBuffer_   = resources_->allocBuffer(idsBytes, MetalAllocType::IVFLists);
 
     FAISS_THROW_IF_NOT_MSG(
-            codesBuffer_ && idsBuffer_,
-            "MetalIVFFlatImpl: failed to allocate IVF Metal buffers");
+            idsBuffer_,
+            "MetalIVFFlatImpl: failed to allocate IVF ids buffer");
 
-    std::memcpy([codesBuffer_ contents], hostCodes_.data(), codesBytes);
-    std::memcpy([idsBuffer_   contents], hostIds_.data(),   idsBytes);
+    std::memcpy([idsBuffer_ contents], hostIds_.data(), idsBytes);
 
-    if (!interleavedLayout_) {
-        return;
-    }
+    bool haveInterleaved = false;
+    if (interleavedLayout_) {
+        // Build interleaved codes buffer: blocks of 32 vectors with dims interleaved.
+        // Layout per block: [v0d0 v1d0 ... v31d0] [v0d1 v1d1 ... v31d1] ...
+        constexpr int G = kInterleavedGroupSize; // 32
+        std::vector<uint32_t> ilOffsets((size_t)nlist_);
+        size_t totalIlFloats = 0;
+        for (size_t l = 0; l < (size_t)nlist_; ++l) {
+            ilOffsets[l] = (uint32_t)totalIlFloats;
+            size_t len = listLength_[l];
+            size_t numBlocks = (len + G - 1) / G;
+            totalIlFloats += numBlocks * G * (size_t)dim_;
+        }
 
-    // Build interleaved codes buffer: blocks of 32 vectors with dims interleaved.
-    // Layout per block: [v0d0 v1d0 ... v31d0] [v0d1 v1d1 ... v31d1] ...
-    if (interleavedCodesBuf_ != nil) {
-        resources_->deallocBuffer(interleavedCodesBuf_, MetalAllocType::IVFLists);
-        interleavedCodesBuf_ = nil;
-    }
-    if (interleavedCodesOffsetBuf_ != nil) {
-        resources_->deallocBuffer(interleavedCodesOffsetBuf_, MetalAllocType::IVFLists);
-        interleavedCodesOffsetBuf_ = nil;
-    }
+        if (totalIlFloats > 0) {
+            size_t ilBytes = totalIlFloats * sizeof(float);
+            interleavedCodesBuf_ = resources_->allocBuffer(ilBytes, MetalAllocType::IVFLists);
+            if (interleavedCodesBuf_) {
+                auto* dst = reinterpret_cast<float*>([interleavedCodesBuf_ contents]);
+                std::memset(dst, 0, ilBytes);
 
-    constexpr int G = kInterleavedGroupSize; // 32
-    std::vector<uint32_t> ilOffsets((size_t)nlist_);
-    size_t totalIlFloats = 0;
-    for (size_t l = 0; l < (size_t)nlist_; ++l) {
-        ilOffsets[l] = (uint32_t)totalIlFloats;
-        size_t len = listLength_[l];
-        size_t numBlocks = (len + G - 1) / G;
-        totalIlFloats += numBlocks * G * (size_t)dim_;
-    }
+                for (size_t l = 0; l < (size_t)nlist_; ++l) {
+                    size_t len = listLength_[l];
+                    if (len == 0) continue;
+                    size_t srcOff = listOffset_[l];
+                    size_t dstOff = ilOffsets[l];
+                    size_t numBlocks = (len + G - 1) / G;
 
-    if (totalIlFloats > 0) {
-        size_t ilBytes = totalIlFloats * sizeof(float);
-        interleavedCodesBuf_ = resources_->allocBuffer(ilBytes, MetalAllocType::IVFLists);
-        if (interleavedCodesBuf_) {
-            auto* dst = reinterpret_cast<float*>([interleavedCodesBuf_ contents]);
-            std::memset(dst, 0, ilBytes);
-
-            for (size_t l = 0; l < (size_t)nlist_; ++l) {
-                size_t len = listLength_[l];
-                if (len == 0) continue;
-                size_t srcOff = listOffset_[l];
-                size_t dstOff = ilOffsets[l];
-                size_t numBlocks = (len + G - 1) / G;
-
-                for (size_t b = 0; b < numBlocks; ++b) {
-                    for (int dd = 0; dd < dim_; ++dd) {
-                        for (int g = 0; g < G; ++g) {
-                            size_t vi = b * G + g;
-                            float val = (vi < len)
-                                    ? hostCodes_[(srcOff + vi) * (size_t)dim_ + dd]
-                                    : 0.0f;
-                            dst[dstOff + b * G * (size_t)dim_ + dd * G + g] = val;
+                    for (size_t b = 0; b < numBlocks; ++b) {
+                        for (int dd = 0; dd < dim_; ++dd) {
+                            for (int g = 0; g < G; ++g) {
+                                size_t vi = b * G + g;
+                                float val = (vi < len)
+                                        ? hostCodes_[(srcOff + vi) * (size_t)dim_ + dd]
+                                        : 0.0f;
+                                dst[dstOff + b * G * (size_t)dim_ + dd * G + g] = val;
+                            }
                         }
                     }
+                }
+            }
+
+            if (metaBytes > 0 && interleavedCodesBuf_) {
+                interleavedCodesOffsetBuf_ = resources_->allocBuffer(
+                        metaBytes, MetalAllocType::IVFLists);
+                if (interleavedCodesOffsetBuf_) {
+                    auto* ptr = reinterpret_cast<uint32_t*>(
+                            [interleavedCodesOffsetBuf_ contents]);
+                    for (size_t i = 0; i < (size_t)nlist_; ++i) {
+                        ptr[i] = ilOffsets[i];
+                    }
+                    haveInterleaved = true;
                 }
             }
         }
     }
 
-    if (metaBytes > 0 && totalIlFloats > 0) {
-        interleavedCodesOffsetBuf_ = resources_->allocBuffer(
-                metaBytes, MetalAllocType::IVFLists);
-        if (interleavedCodesOffsetBuf_) {
-            auto* ptr = reinterpret_cast<uint32_t*>(
-                    [interleavedCodesOffsetBuf_ contents]);
-            for (size_t i = 0; i < (size_t)nlist_; ++i) {
-                ptr[i] = ilOffsets[i];
-            }
+    // If interleaved layout is disabled, or interleaved allocation failed,
+    // keep the canonical flat codes buffer so scan kernels can still run.
+    if (!haveInterleaved) {
+        if (interleavedCodesBuf_ != nil) {
+            resources_->deallocBuffer(interleavedCodesBuf_, MetalAllocType::IVFLists);
+            interleavedCodesBuf_ = nil;
         }
+        if (interleavedCodesOffsetBuf_ != nil) {
+            resources_->deallocBuffer(interleavedCodesOffsetBuf_, MetalAllocType::IVFLists);
+            interleavedCodesOffsetBuf_ = nil;
+        }
+
+        codesBuffer_ = resources_->allocBuffer(codesBytes, MetalAllocType::IVFLists);
+        FAISS_THROW_IF_NOT_MSG(
+                codesBuffer_,
+                "MetalIVFFlatImpl: failed to allocate IVF codes buffer");
+        std::memcpy([codesBuffer_ contents], hostCodes_.data(), codesBytes);
     }
 }
 

@@ -2290,7 +2290,8 @@ bool runMetalIVFFlatScan(
         id<MTLBuffer> perListDistBuf, id<MTLBuffer> perListIdxBuf,
         id<MTLBuffer> interleavedCodes,
         id<MTLBuffer> interleavedCodesOffset) {
-    if (!device || !queue || !queries || !codes || !ids ||
+    bool useIL = (interleavedCodes != nil && interleavedCodesOffset != nil);
+    if (!device || !queue || !queries || (!codes && !useIL) || !ids ||
         !listOffset || !listLength || !coarseAssign ||
         !outDistances || !outIndices ||
         !perListDistBuf || !perListIdxBuf)
@@ -2300,7 +2301,6 @@ bool runMetalIVFFlatScan(
     MetalKernels& K = getMetalKernels(device);
     if (!K.isValid()) return false;
 
-    bool useIL = (interleavedCodes != nil && interleavedCodesOffset != nil);
     IVFScanVariant variant = useIL ? IVFScanVariant::Interleaved
                                    : IVFScanVariant::Standard;
 
@@ -2507,7 +2507,8 @@ bool runMetalIVFFlatFullSearch(
         id<MTLBuffer> interleavedCodes,
         id<MTLBuffer> interleavedCodesOffset,
         bool centroidsAreFP16) {
-    if (!device || !queue || !queries || !centroids || !codes || !ids ||
+    bool useIL = (interleavedCodes != nil && interleavedCodesOffset != nil);
+    if (!device || !queue || !queries || !centroids || (!codes && !useIL) || !ids ||
         !listOffset || !listLength || !outDistances || !outIndices ||
         !perListDistBuf || !perListIdxBuf ||
         !coarseDistBuf || !coarseIdxBuf || !distMatrixBuf)
@@ -2517,7 +2518,6 @@ bool runMetalIVFFlatFullSearch(
     MetalKernels& K = getMetalKernels(device);
     if (!K.isValid()) return false;
 
-    bool useIL = (interleavedCodes != nil && interleavedCodesOffset != nil);
     bool useSmall = (!useIL && avgListLen <= 64);
     IVFScanVariant scanV = useIL   ? IVFScanVariant::Interleaved
                          : useSmall ? IVFScanVariant::Small
