@@ -2439,7 +2439,7 @@ bool runMetalIVFPQScan(
         id<MTLBuffer> codes, id<MTLBuffer> ids,
         id<MTLBuffer> listOffset, id<MTLBuffer> listLength,
         id<MTLBuffer> coarseAssign,
-        int nq, int M, int k, int nprobe, int avgListLen, bool isL2,
+        int nq, int M, int k, int nprobe, int avgListLen, bool lookupFp16, bool isL2,
         id<MTLBuffer> outDistances, id<MTLBuffer> outIndices,
         id<MTLBuffer> perListDistBuf, id<MTLBuffer> perListIdxBuf) {
     if (!device || !queue || !lookupTable || !codes || !ids ||
@@ -2462,8 +2462,8 @@ bool runMetalIVFPQScan(
     id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
 
-    bool useSmall = (avgListLen > 0 && avgListLen <= 32 && k <= 32);
-    K.encodeIVFPQScanList(enc, useSmall, lookupTable, codes, ids,
+    bool useSmall = (!lookupFp16 && avgListLen > 0 && avgListLen <= 32 && k <= 32);
+    K.encodeIVFPQScanList(enc, useSmall, lookupFp16, lookupTable, codes, ids,
                            listOffset, listLength, coarseAssign,
                            perListDistBuf, perListIdxBuf, paramsBuf,
                            nq, nprobe);
@@ -2540,6 +2540,7 @@ bool runMetalIVFPQFullSearch(
         int k,
         int nprobe,
         int avgListLen,
+        bool lookupFp16,
         bool isL2,
         id<MTLBuffer> outDistances,
         id<MTLBuffer> outIndices,
@@ -2578,10 +2579,11 @@ bool runMetalIVFPQFullSearch(
             M,
             nprobe);
 
-    bool useSmall = (avgListLen > 0 && avgListLen <= 32 && k <= 32);
+    bool useSmall = (!lookupFp16 && avgListLen > 0 && avgListLen <= 32 && k <= 32);
     K.encodeIVFPQScanList(
             enc,
             useSmall,
+            lookupFp16,
             lookupTable,
             codes,
             ids,
@@ -2603,6 +2605,25 @@ bool runMetalIVFPQFullSearch(
             paramsBuf,
             nq);
 
+    [enc endEncoding];
+    [cmdBuf commit];
+    [cmdBuf waitUntilCompleted];
+    return cmdBuf.status == MTLCommandBufferStatusCompleted;
+}
+
+bool runMetalConvertF32ToF16(
+        id<MTLDevice> device,
+        id<MTLCommandQueue> queue,
+        id<MTLBuffer> srcF32,
+        id<MTLBuffer> dstF16,
+        size_t numElems) {
+    if (!device || !queue || !srcF32 || !dstF16 || numElems == 0) return false;
+    MetalKernels& K = getMetalKernels(device);
+    if (!K.isValid()) return false;
+
+    id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+    K.encodeConvertF32ToF16(enc, srcF32, dstF16, numElems);
     [enc endEncoding];
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];

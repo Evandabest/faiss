@@ -171,6 +171,31 @@ TEST_F(AccMetalIndexIVFPQ, L2_M16_D128) {
     EXPECT_GE(recall, 0.85f) << "L2 M=16 D=128 recall = " << recall;
 }
 
+TEST_F(AccMetalIndexIVFPQ, L2_M16_D128_Fp16Lut) {
+    const int d = 128, nlist = 32, nb = 10000, nq = 20, k = 10, M = 16;
+    std::vector<float> xb(nb * d), xq(nq * d);
+    faiss::float_rand(xb.data(), xb.size(), 113);
+    faiss::float_rand(xq.data(), xq.size(), 137);
+
+    auto cpuIdx = makeCpuIVFPQ(d, nlist, M, 8, faiss::METRIC_L2, nb, xb.data());
+    cpuIdx->add(nb, xb.data());
+    cpuIdx->nprobe = 8;
+
+    faiss::gpu_metal::MetalIndexConfig config;
+    config.useFloat16 = true;
+    faiss::gpu_metal::MetalIndexIVFPQ metalIdx(
+            resources_, cpuIdx.get(), config);
+
+    std::vector<float> cpuDist(nq * k), metalDist(nq * k);
+    std::vector<faiss::idx_t> cpuLab(nq * k), metalLab(nq * k);
+
+    cpuIdx->search(nq, xq.data(), k, cpuDist.data(), cpuLab.data());
+    metalIdx.search(nq, xq.data(), k, metalDist.data(), metalLab.data());
+
+    float recall = computeRecall(nq, k, cpuLab.data(), metalLab.data());
+    EXPECT_GE(recall, 0.80f) << "L2 M=16 D=128 fp16 LUT recall = " << recall;
+}
+
 TEST_F(AccMetalIndexIVFPQ, CopyFromTo) {
     const int d = 64, nlist = 16, nb = 3000, nq = 10, k = 5, M = 8;
     std::vector<float> xb(nb * d), xq(nq * d);

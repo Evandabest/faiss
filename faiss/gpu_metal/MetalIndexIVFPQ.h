@@ -86,6 +86,7 @@ private:
     mutable id<MTLBuffer> searchPerListDistBuf_ = nil;
     mutable id<MTLBuffer> searchPerListIdxBuf_  = nil;
     mutable id<MTLBuffer> lookupTableBuf_   = nil;
+    mutable id<MTLBuffer> lookupTableHalfBuf_ = nil;
     mutable size_t searchQueriesCap_ = 0;
     mutable size_t searchCoarseCap_  = 0;
     mutable size_t searchOutDistCap_ = 0;
@@ -93,6 +94,7 @@ private:
     mutable size_t searchPerListDistCap_ = 0;
     mutable size_t searchPerListIdxCap_  = 0;
     mutable size_t lookupTableCap_   = 0;
+    mutable size_t lookupTableHalfCap_ = 0;
 
     mutable id<MTLBuffer> centroidBuf_      = nil;
     mutable id<MTLBuffer> centroidNormsBuf_ = nil;

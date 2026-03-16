@@ -214,6 +214,7 @@ public:
     void encodeIVFPQScanList(
             id<MTLComputeCommandEncoder> enc,
             bool useSmall,
+            bool useFp16Lookup,
             id<MTLBuffer> lookupTable,
             id<MTLBuffer> codes,
             id<MTLBuffer> ids,
@@ -225,6 +226,12 @@ public:
             id<MTLBuffer> paramsBuf,
             int nq,
             int nprobe);
+
+    void encodeConvertF32ToF16(
+            id<MTLComputeCommandEncoder> enc,
+            id<MTLBuffer> src,
+            id<MTLBuffer> dst,
+            size_t numElems);
 
     void encodeIVFPQBuildLookupTables(
             id<MTLComputeCommandEncoder> enc,

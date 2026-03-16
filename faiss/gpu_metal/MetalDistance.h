@@ -248,6 +248,7 @@ bool runMetalIVFPQScan(
         int k,
         int nprobe,
         int avgListLen,
+        bool lookupFp16,
         bool isL2,
         id<MTLBuffer> outDistances,
         id<MTLBuffer> outIndices,
@@ -290,11 +291,19 @@ bool runMetalIVFPQFullSearch(
         int k,
         int nprobe,
         int avgListLen,
+        bool lookupFp16,
         bool isL2,
         id<MTLBuffer> outDistances,
         id<MTLBuffer> outIndices,
         id<MTLBuffer> perListDistBuf,
         id<MTLBuffer> perListIdxBuf);
+
+bool runMetalConvertF32ToF16(
+        id<MTLDevice> device,
+        id<MTLCommandQueue> queue,
+        id<MTLBuffer> srcF32,
+        id<MTLBuffer> dstF16,
+        size_t numElems);
 
 /// Binary (Hamming) brute-force top-k search.
 ///

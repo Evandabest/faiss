@@ -475,6 +475,7 @@ void MetalKernels::encodeIVFScanList(
 void MetalKernels::encodeIVFPQScanList(
         id<MTLComputeCommandEncoder> enc,
         bool useSmall,
+        bool useFp16Lookup,
         id<MTLBuffer> lookupTable,
         id<MTLBuffer> codes,
         id<MTLBuffer> ids,
@@ -486,8 +487,13 @@ void MetalKernels::encodeIVFPQScanList(
         id<MTLBuffer> paramsBuf,
         int nq,
         int nprobe) {
-    [enc setComputePipelineState:
-            pipeline(useSmall ? "ivf_scan_list_pq8_small" : "ivf_scan_list_pq8")];
+    const char* name = "ivf_scan_list_pq8";
+    if (useFp16Lookup) {
+        name = "ivf_scan_list_pq8_f16";
+    } else if (useSmall) {
+        name = "ivf_scan_list_pq8_small";
+    }
+    [enc setComputePipelineState:pipeline(name)];
     [enc setBuffer:lookupTable  offset:0 atIndex:0];
     [enc setBuffer:codes        offset:0 atIndex:1];
     [enc setBuffer:ids          offset:0 atIndex:2];
@@ -498,7 +504,22 @@ void MetalKernels::encodeIVFPQScanList(
     [enc setBuffer:perListIdx   offset:0 atIndex:7];
     [enc setBuffer:paramsBuf    offset:0 atIndex:8];
     [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)nq * (NSUInteger)nprobe, 1, 1)
-        threadsPerThreadgroup:MTLSizeMake(useSmall ? 32 : 256, 1, 1)];
+        threadsPerThreadgroup:MTLSizeMake((useSmall && !useFp16Lookup) ? 32 : 256, 1, 1)];
+}
+
+void MetalKernels::encodeConvertF32ToF16(
+        id<MTLComputeCommandEncoder> enc,
+        id<MTLBuffer> src,
+        id<MTLBuffer> dst,
+        size_t numElems) {
+    [enc setComputePipelineState:pipeline("convert_f32_to_f16")];
+    [enc setBuffer:src offset:0 atIndex:0];
+    [enc setBuffer:dst offset:0 atIndex:1];
+    uint32_t n = (uint32_t)numElems;
+    [enc setBytes:&n length:sizeof(n) atIndex:2];
+    const NSUInteger tg = 256;
+    [enc dispatchThreads:MTLSizeMake((NSUInteger)numElems, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
 }
 
 void MetalKernels::encodeIVFPQBuildLookupTables(

@@ -2721,6 +2721,156 @@ kernel void ivf_scan_list_pq8(
     }
 }
 
+kernel void ivf_scan_list_pq8_f16(
+    device const half*  lookupTable [[buffer(0)]],
+    device const uchar* codes       [[buffer(1)]],
+    device const long*  ids         [[buffer(2)]],
+    device const uint*  listOffset  [[buffer(3)]],
+    device const uint*  listLength  [[buffer(4)]],
+    device const int*   coarseAssign [[buffer(5)]],
+    device float*       perListDist  [[buffer(6)]],
+    device long*        perListIdx   [[buffer(7)]],
+    device const uint*  params       [[buffer(8)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]]
+) {
+    constexpr uint TG_SIZE = 256;
+    constexpr uint LOCAL_K = 4;
+
+    uint nq       = params[0];
+    uint M        = params[1];
+    uint k        = params[2];
+    uint nprobe   = params[3];
+    uint want_min = params[4];
+
+    uint qi = tgid / nprobe;
+    uint pi = tgid % nprobe;
+    if (qi >= nq || k == 0) return;
+
+    float sentinel = want_min ? 1e38f : -1e38f;
+    uint outBase = (qi * nprobe + pi) * k;
+
+    int list_no = coarseAssign[qi * nprobe + pi];
+    if (list_no < 0) {
+        for (uint i = tid; i < k; i += TG_SIZE) {
+            perListDist[outBase + i] = sentinel;
+            perListIdx[outBase + i] = -1L;
+        }
+        return;
+    }
+
+    uint lOff = listOffset[(uint)list_no];
+    uint lLen = listLength[(uint)list_no];
+    if (lLen == 0) {
+        for (uint i = tid; i < k; i += TG_SIZE) {
+            perListDist[outBase + i] = sentinel;
+            perListIdx[outBase + i] = -1L;
+        }
+        return;
+    }
+
+    uint tableOff = (qi * nprobe + pi) * M * 256;
+
+    float localDist[LOCAL_K];
+    int localIdx[LOCAL_K];
+    uint localCount = 0;
+    for (uint i = 0; i < LOCAL_K; i++) {
+        localDist[i] = sentinel;
+        localIdx[i] = -1;
+    }
+
+    for (uint li = tid; li < lLen; li += TG_SIZE) {
+        uint vecIdx = lOff + li;
+        device const uchar* cvec = codes + vecIdx * M;
+        float dist = 0.0f;
+        for (uint m = 0; m < M; m++) {
+            dist += float(lookupTable[tableOff + m * 256 + uint(cvec[m])]);
+        }
+
+        int vi = (int)vecIdx;
+        bool better = want_min ? (dist < localDist[LOCAL_K - 1])
+                               : (dist > localDist[LOCAL_K - 1]);
+        if (localCount < LOCAL_K || better) {
+            uint pos = (localCount < LOCAL_K) ? localCount : LOCAL_K - 1;
+            localDist[pos] = dist;
+            localIdx[pos] = vi;
+            while (pos > 0) {
+                bool sw = want_min
+                        ? (localDist[pos] < localDist[pos - 1] ||
+                           (localDist[pos] == localDist[pos - 1] &&
+                            localIdx[pos] < localIdx[pos - 1]))
+                        : (localDist[pos] > localDist[pos - 1] ||
+                           (localDist[pos] == localDist[pos - 1] &&
+                            localIdx[pos] < localIdx[pos - 1]));
+                if (!sw) break;
+                float td = localDist[pos];
+                localDist[pos] = localDist[pos - 1];
+                localDist[pos - 1] = td;
+                int ti = localIdx[pos];
+                localIdx[pos] = localIdx[pos - 1];
+                localIdx[pos - 1] = ti;
+                pos--;
+            }
+            if (localCount < LOCAL_K) localCount++;
+        }
+    }
+
+    constexpr uint CAND = TG_SIZE * LOCAL_K;
+    threadgroup float tgDist[CAND];
+    threadgroup int tgIdx[CAND];
+
+    for (uint i = 0; i < LOCAL_K; i++) {
+        tgDist[tid * LOCAL_K + i] = (i < localCount) ? localDist[i] : sentinel;
+        tgIdx[tid * LOCAL_K + i] = (i < localCount) ? localIdx[i] : -1;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint k2 = 2; k2 <= CAND; k2 *= 2) {
+        for (uint j = k2 >> 1; j > 0; j >>= 1) {
+            for (uint idx = tid; idx < CAND; idx += TG_SIZE) {
+                uint partner = idx ^ j;
+                if (partner < CAND && partner > idx) {
+                    bool ascending = ((idx & k2) == 0);
+                    bool pB = want_min
+                            ? (tgDist[partner] < tgDist[idx] ||
+                               (tgDist[partner] == tgDist[idx] &&
+                                tgIdx[partner] < tgIdx[idx]))
+                            : (tgDist[partner] > tgDist[idx] ||
+                               (tgDist[partner] == tgDist[idx] &&
+                                tgIdx[partner] < tgIdx[idx]));
+                    bool iB = want_min
+                            ? (tgDist[idx] < tgDist[partner] ||
+                               (tgDist[idx] == tgDist[partner] &&
+                                tgIdx[idx] < tgIdx[partner]))
+                            : (tgDist[idx] > tgDist[partner] ||
+                               (tgDist[idx] == tgDist[partner] &&
+                                tgIdx[idx] < tgIdx[partner]));
+                    if (ascending ? pB : iB) {
+                        float td = tgDist[idx];
+                        tgDist[idx] = tgDist[partner];
+                        tgDist[partner] = td;
+                        int ti = tgIdx[idx];
+                        tgIdx[idx] = tgIdx[partner];
+                        tgIdx[partner] = ti;
+                    }
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+
+    uint kk = min(k, CAND);
+    for (uint i = tid; i < kk; i += TG_SIZE) {
+        int vi = tgIdx[i];
+        perListDist[outBase + i] = tgDist[i];
+        perListIdx[outBase + i] = (vi < 0) ? -1L : ids[vi];
+    }
+    for (uint i = tid; i < k - kk; i += TG_SIZE) {
+        perListDist[outBase + kk + i] = sentinel;
+        perListIdx[outBase + kk + i] = -1L;
+    }
+}
+
 // Small-list IVFPQ variant: lower threadgroup/barrier cost when average list
 // length is short.
 kernel void ivf_scan_list_pq8_small(
@@ -2842,6 +2992,16 @@ kernel void ivf_scan_list_pq8_small(
         perListDist[outBase + kk + i] = sentinel;
         perListIdx[outBase + kk + i] = -1L;
     }
+}
+
+kernel void convert_f32_to_f16(
+    device const float* src [[buffer(0)]],
+    device half* dst [[buffer(1)]],
+    constant uint& n [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= n) return;
+    dst[gid] = half(src[gid]);
 }
 
 // ============================================================

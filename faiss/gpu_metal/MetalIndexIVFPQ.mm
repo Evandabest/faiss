@@ -14,6 +14,7 @@
 #include <faiss/gpu_metal/impl/MetalIVFPQ.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <limits>
 #include <vector>
@@ -340,6 +341,8 @@ void MetalIndexIVFPQ::search(
     // Compute lookup tables on CPU directly into the upload buffer.
     size_t tableSize = (size_t)n * nprobe * M * ksub;
     size_t tableBytes = tableSize * sizeof(float);
+    const bool useFp16Lut = config_.useFloat16;
+    size_t tableHalfBytes = tableSize * sizeof(uint16_t);
 
     // Allocate GPU buffers.
     size_t outDistBytes = (size_t)n * (size_t)k * sizeof(float);
@@ -356,10 +359,14 @@ void MetalIndexIVFPQ::search(
     ensureSearchBuf_(searchPerListIdxBuf_, searchPerListIdxCap_, perListIdxB);
     ensureSearchBuf_(searchCoarseBuf_, searchCoarseCap_, coarseBytes);
     ensureSearchBuf_(lookupTableBuf_, lookupTableCap_, tableBytes);
+    if (useFp16Lut) {
+        ensureSearchBuf_(lookupTableHalfBuf_, lookupTableHalfCap_, tableHalfBytes);
+    }
 
     if (!searchQueriesBuf_ || !searchOutDistBuf_ || !searchOutIdxBuf_ ||
         !searchPerListDistBuf_ || !searchPerListIdxBuf_ ||
-        !searchCoarseBuf_ || !lookupTableBuf_) {
+        !searchCoarseBuf_ || !lookupTableBuf_ ||
+        (useFp16Lut && !lookupTableHalfBuf_)) {
         cpuIndex_->search(n, x, k, distances, labels);
         return;
     }
@@ -374,7 +381,7 @@ void MetalIndexIVFPQ::search(
             : 0;
     bool lutBuiltOnGpu = false;
     bool ok = false;
-    if (gpuIvf_->pqCentroidsBuffer()) {
+    if (!useFp16Lut && gpuIvf_->pqCentroidsBuffer()) {
         ok = runMetalIVFPQFullSearch(
                 device,
                 queue,
@@ -382,7 +389,7 @@ void MetalIndexIVFPQ::search(
                 searchCoarseBuf_,
                 centroidBuf_,
                 gpuIvf_->pqCentroidsBuffer(),
-                lookupTableBuf_,
+                useFp16Lut ? lookupTableHalfBuf_ : lookupTableBuf_,
                 gpuIvf_->codesBuffer(),
                 gpuIvf_->idsBuffer(),
                 gpuIvf_->listOffsetGpuBuffer(),
@@ -393,6 +400,7 @@ void MetalIndexIVFPQ::search(
                 (int)k,
                 (int)nprobe,
                 avgListLen,
+                false,
                 isL2,
                 searchOutDistBuf_,
                 searchOutIdxBuf_,
@@ -409,15 +417,27 @@ void MetalIndexIVFPQ::search(
                 coarseAssignVec.data(),
                 coarseDistVec.data(),
                 lookupDst);
+        if (useFp16Lut) {
+            ok = runMetalConvertF32ToF16(
+                    device,
+                    queue,
+                    lookupTableBuf_,
+                    lookupTableHalfBuf_,
+                    tableSize);
+            if (!ok) {
+                cpuIndex_->search(n, x, k, distances, labels);
+                return;
+            }
+        }
         ok = runMetalIVFPQScan(
                 device, queue,
-                lookupTableBuf_,
+                useFp16Lut ? lookupTableHalfBuf_ : lookupTableBuf_,
                 gpuIvf_->codesBuffer(),
                 gpuIvf_->idsBuffer(),
                 gpuIvf_->listOffsetGpuBuffer(),
                 gpuIvf_->listLengthGpuBuffer(),
                 searchCoarseBuf_,
-                (int)n, M, (int)k, (int)nprobe, avgListLen, isL2,
+                (int)n, M, (int)k, (int)nprobe, avgListLen, useFp16Lut, isL2,
                 searchOutDistBuf_, searchOutIdxBuf_,
                 searchPerListDistBuf_, searchPerListIdxBuf_);
     }
