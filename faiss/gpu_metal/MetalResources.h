@@ -15,8 +15,11 @@
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
 
+#include <array>
 #include <cstddef>
+#include <map>
 #include <mutex>
+#include <unordered_map>
 
 namespace faiss {
 namespace gpu_metal {
@@ -30,6 +33,24 @@ enum MetalAllocType {
     QuantizerPrecomputedCodes = 4,
     TemporaryMemoryBuffer = 10,
     TemporaryMemoryOverflow = 11,
+};
+
+struct MetalAllocStats {
+    size_t liveAllocs = 0;
+    size_t liveBytes = 0;
+    size_t totalAllocs = 0;
+    size_t totalAllocBytes = 0;
+    size_t totalFrees = 0;
+    size_t totalFreedBytes = 0;
+};
+
+struct MetalMemoryInfo {
+    size_t tempPoolBudgetBytes = 0;
+    size_t tempPoolCachedBytes = 0;
+    bool logMemoryAllocations = false;
+    size_t totalLiveAllocs = 0;
+    size_t totalLiveBytes = 0;
+    std::map<int, MetalAllocStats> byAllocType;
 };
 
 /// Owns Metal device, command queue, and provides buffer allocation.
@@ -76,14 +97,28 @@ public:
     /// Releases all currently cached temporary buffers.
     void clearTempMemoryPool();
 
+    /// Enables/disables allocation logging to stderr.
+    void setLogMemoryAllocations(bool enable);
+
+    /// Returns whether allocation logging is enabled.
+    bool getLogMemoryAllocations() const;
+
+    /// Returns a memory snapshot with per-allocation-type stats.
+    MetalMemoryInfo getMemoryInfo() const;
+
 private:
+    static constexpr size_t kNumTrackedAllocTypes = 12;
     static constexpr size_t kTempPoolAlignBytes = 256;
     static constexpr size_t kDefaultTempPoolBudgetBytes =
             512ULL * 1024 * 1024;
 
     size_t alignTempBufferSize_(size_t bytes) const;
-    id<MTLBuffer> allocTemporaryBuffer_(size_t size);
-    void deallocTemporaryBuffer_(id<MTLBuffer> buffer);
+    id<MTLBuffer> allocTemporaryBuffer_(size_t size, bool* reusedFromPool);
+    bool deallocTemporaryBuffer_(id<MTLBuffer> buffer);
+    size_t trackedAllocTypeIndex_(MetalAllocType type) const;
+    const char* allocTypeName_(MetalAllocType type) const;
+    void recordAlloc_(id<MTLBuffer> buffer, MetalAllocType type, size_t bytes);
+    void recordFree_(id<MTLBuffer> buffer, MetalAllocType type);
 
     id<MTLDevice> device_;
     id<MTLCommandQueue> commandQueue_;
@@ -91,6 +126,9 @@ private:
             tempPoolBuckets_;
     size_t tempPoolBudgetBytes_;
     size_t tempPoolCachedBytes_;
+    bool allocLogging_;
+    std::unordered_map<void*, std::pair<MetalAllocType, size_t>> liveAllocs_;
+    std::array<MetalAllocStats, kNumTrackedAllocTypes> allocStats_;
     mutable std::mutex tempPoolMutex_;
 };
 

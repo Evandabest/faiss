@@ -8,6 +8,7 @@
 
 #import "MetalResources.h"
 
+#include <cstdio>
 #include <cstdlib>
 
 namespace faiss {
@@ -18,7 +19,8 @@ MetalResources::MetalResources()
           commandQueue_(nil),
           tempPoolBuckets_(nil),
           tempPoolBudgetBytes_(kDefaultTempPoolBudgetBytes),
-          tempPoolCachedBytes_(0) {
+          tempPoolCachedBytes_(0),
+          allocLogging_(false) {
     const char* envBytes = std::getenv("FAISS_METAL_TEMP_POOL_BYTES");
     if (envBytes && envBytes[0] != '\0') {
         char* end = nullptr;
@@ -50,9 +52,14 @@ size_t MetalResources::alignTempBufferSize_(size_t bytes) const {
     return ((bytes + a - 1) / a) * a;
 }
 
-id<MTLBuffer> MetalResources::allocTemporaryBuffer_(size_t size) {
+id<MTLBuffer> MetalResources::allocTemporaryBuffer_(
+        size_t size,
+        bool* reusedFromPool) {
     const size_t wantSize = alignTempBufferSize_(size);
     std::lock_guard<std::mutex> guard(tempPoolMutex_);
+    if (reusedFromPool) {
+        *reusedFromPool = false;
+    }
 
     if (tempPoolBudgetBytes_ > 0 && tempPoolBuckets_ != nil) {
         NSNumber* bestKey = nil;
@@ -85,6 +92,9 @@ id<MTLBuffer> MetalResources::allocTemporaryBuffer_(size_t size) {
             if (bucket.count == 0) {
                 [tempPoolBuckets_ removeObjectForKey:bestKey];
             }
+            if (reusedFromPool) {
+                *reusedFromPool = true;
+            }
             return buffer;
         }
     }
@@ -93,22 +103,22 @@ id<MTLBuffer> MetalResources::allocTemporaryBuffer_(size_t size) {
                                 options:MTLResourceStorageModeShared];
 }
 
-void MetalResources::deallocTemporaryBuffer_(id<MTLBuffer> buffer) {
+bool MetalResources::deallocTemporaryBuffer_(id<MTLBuffer> buffer) {
     if (buffer == nil) {
-        return;
+        return false;
     }
     std::lock_guard<std::mutex> guard(tempPoolMutex_);
     if (tempPoolBudgetBytes_ == 0 || tempPoolBuckets_ == nil) {
-        return;
+        return false;
     }
 
     const size_t size = alignTempBufferSize_((size_t)[buffer length]);
     if (size == 0) {
-        return;
+        return false;
     }
 
     if (tempPoolCachedBytes_ + size > tempPoolBudgetBytes_) {
-        return;
+        return false;
     }
 
     NSNumber* key = @(size);
@@ -119,6 +129,7 @@ void MetalResources::deallocTemporaryBuffer_(id<MTLBuffer> buffer) {
     }
     [bucket addObject:buffer];
     tempPoolCachedBytes_ += size;
+    return true;
 }
 
 id<MTLBuffer> MetalResources::allocBuffer(size_t size, MetalAllocType type) {
@@ -127,20 +138,68 @@ id<MTLBuffer> MetalResources::allocBuffer(size_t size, MetalAllocType type) {
     }
 
     if (type == MetalAllocType::TemporaryMemoryBuffer) {
-        return allocTemporaryBuffer_(size);
+        bool reused = false;
+        id<MTLBuffer> buffer = allocTemporaryBuffer_(size, &reused);
+        recordAlloc_(buffer, type, alignTempBufferSize_(size));
+        if (buffer && getLogMemoryAllocations()) {
+            std::fprintf(
+                    stderr,
+                    "[faiss_metal] alloc type=%s req=%zu alloc=%zu src=%s ptr=%p\n",
+                    allocTypeName_(type),
+                    size,
+                    (size_t)[buffer length],
+                    reused ? "pool" : "fresh",
+                    [buffer contents]);
+        }
+        return buffer;
     }
     if (type == MetalAllocType::TemporaryMemoryOverflow) {
-        return [device_ newBufferWithLength:alignTempBufferSize_(size)
-                                    options:MTLResourceStorageModeShared];
+        id<MTLBuffer> buffer =
+                [device_ newBufferWithLength:alignTempBufferSize_(size)
+                                     options:MTLResourceStorageModeShared];
+        recordAlloc_(buffer, type, alignTempBufferSize_(size));
+        if (buffer && getLogMemoryAllocations()) {
+            std::fprintf(
+                    stderr,
+                    "[faiss_metal] alloc type=%s req=%zu alloc=%zu src=overflow ptr=%p\n",
+                    allocTypeName_(type),
+                    size,
+                    (size_t)[buffer length],
+                    [buffer contents]);
+        }
+        return buffer;
     }
 
-    return [device_ newBufferWithLength:size
-                                options:MTLResourceStorageModeShared];
+    id<MTLBuffer> buffer =
+            [device_ newBufferWithLength:size
+                                 options:MTLResourceStorageModeShared];
+    recordAlloc_(buffer, type, size);
+    if (buffer && getLogMemoryAllocations()) {
+        std::fprintf(
+                stderr,
+                "[faiss_metal] alloc type=%s req=%zu alloc=%zu src=direct ptr=%p\n",
+                allocTypeName_(type),
+                size,
+                (size_t)[buffer length],
+                [buffer contents]);
+    }
+    return buffer;
 }
 
 void MetalResources::deallocBuffer(id<MTLBuffer> buffer, MetalAllocType type) {
+    bool cachedToPool = false;
     if (type == MetalAllocType::TemporaryMemoryBuffer) {
-        deallocTemporaryBuffer_(buffer);
+        cachedToPool = deallocTemporaryBuffer_(buffer);
+    }
+    recordFree_(buffer, type);
+    if (buffer && getLogMemoryAllocations()) {
+        std::fprintf(
+                stderr,
+                "[faiss_metal] free  type=%s alloc=%zu dst=%s ptr=%p\n",
+                allocTypeName_(type),
+                (size_t)[buffer length],
+                cachedToPool ? "pool" : "release",
+                [buffer contents]);
     }
 }
 
@@ -198,6 +257,115 @@ size_t MetalResources::getTempMemoryPoolBytes() const {
 size_t MetalResources::getTempMemoryCachedBytes() const {
     std::lock_guard<std::mutex> guard(tempPoolMutex_);
     return tempPoolCachedBytes_;
+}
+
+void MetalResources::setLogMemoryAllocations(bool enable) {
+    std::lock_guard<std::mutex> guard(tempPoolMutex_);
+    allocLogging_ = enable;
+}
+
+bool MetalResources::getLogMemoryAllocations() const {
+    std::lock_guard<std::mutex> guard(tempPoolMutex_);
+    return allocLogging_;
+}
+
+size_t MetalResources::trackedAllocTypeIndex_(MetalAllocType type) const {
+    const size_t idx = static_cast<size_t>(type);
+    if (idx >= kNumTrackedAllocTypes) {
+        return static_cast<size_t>(MetalAllocType::Other);
+    }
+    return idx;
+}
+
+const char* MetalResources::allocTypeName_(MetalAllocType type) const {
+    switch (type) {
+        case MetalAllocType::Other:
+            return "Other";
+        case MetalAllocType::FlatData:
+            return "FlatData";
+        case MetalAllocType::IVFLists:
+            return "IVFLists";
+        case MetalAllocType::Quantizer:
+            return "Quantizer";
+        case MetalAllocType::QuantizerPrecomputedCodes:
+            return "QuantizerPrecomputedCodes";
+        case MetalAllocType::TemporaryMemoryBuffer:
+            return "TemporaryMemoryBuffer";
+        case MetalAllocType::TemporaryMemoryOverflow:
+            return "TemporaryMemoryOverflow";
+        default:
+            return "Unknown";
+    }
+}
+
+void MetalResources::recordAlloc_(
+        id<MTLBuffer> buffer,
+        MetalAllocType type,
+        size_t bytes) {
+    if (buffer == nil) {
+        return;
+    }
+    std::lock_guard<std::mutex> guard(tempPoolMutex_);
+    const size_t idx = trackedAllocTypeIndex_(type);
+    auto& stats = allocStats_[idx];
+    stats.liveAllocs++;
+    stats.liveBytes += bytes;
+    stats.totalAllocs++;
+    stats.totalAllocBytes += bytes;
+    liveAllocs_[(void*)[buffer contents]] = std::make_pair(type, bytes);
+}
+
+void MetalResources::recordFree_(id<MTLBuffer> buffer, MetalAllocType type) {
+    if (buffer == nil) {
+        return;
+    }
+    const void* ptr = [buffer contents];
+    const size_t fallbackBytes = (size_t)[buffer length];
+    std::lock_guard<std::mutex> guard(tempPoolMutex_);
+
+    MetalAllocType trackedType = type;
+    size_t bytes = fallbackBytes;
+    auto it = liveAllocs_.find((void*)ptr);
+    if (it != liveAllocs_.end()) {
+        trackedType = it->second.first;
+        bytes = it->second.second;
+        liveAllocs_.erase(it);
+    }
+
+    const size_t idx = trackedAllocTypeIndex_(trackedType);
+    auto& stats = allocStats_[idx];
+    if (stats.liveAllocs > 0) {
+        stats.liveAllocs--;
+    }
+    if (stats.liveBytes >= bytes) {
+        stats.liveBytes -= bytes;
+    } else {
+        stats.liveBytes = 0;
+    }
+    stats.totalFrees++;
+    stats.totalFreedBytes += bytes;
+}
+
+MetalMemoryInfo MetalResources::getMemoryInfo() const {
+    std::lock_guard<std::mutex> guard(tempPoolMutex_);
+    MetalMemoryInfo info;
+    info.tempPoolBudgetBytes = tempPoolBudgetBytes_;
+    info.tempPoolCachedBytes = tempPoolCachedBytes_;
+    info.logMemoryAllocations = allocLogging_;
+
+    for (size_t i = 0; i < allocStats_.size(); ++i) {
+        const MetalAllocStats& s = allocStats_[i];
+        if (s.liveAllocs == 0 && s.liveBytes == 0 && s.totalAllocs == 0 &&
+            s.totalAllocBytes == 0 && s.totalFrees == 0 &&
+            s.totalFreedBytes == 0) {
+            continue;
+        }
+        info.byAllocType[(int)i] = s;
+        info.totalLiveAllocs += s.liveAllocs;
+        info.totalLiveBytes += s.liveBytes;
+    }
+
+    return info;
 }
 
 void MetalResources::synchronize() {

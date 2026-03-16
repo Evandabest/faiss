@@ -953,3 +953,43 @@ TEST_F(AccMetalIndexFlat, TempPoolClearAndShrinkBudget) {
     resources_->clearTempMemoryPool();
     EXPECT_EQ(resources_->getTempMemoryCachedBytes(), 0);
 }
+
+TEST_F(AccMetalIndexFlat, MemoryInfoAndLoggingControls) {
+    resources_->setTempMemoryPoolBytes(64ULL * 1024 * 1024);
+    resources_->clearTempMemoryPool();
+    resources_->setLogMemoryAllocations(false);
+    EXPECT_FALSE(resources_->getLogMemoryAllocations());
+
+    const int dim = 32, nb = 4000, nq = 32, k = 10;
+    std::vector<float> vecs((size_t)nb * dim), queries((size_t)nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 9001);
+    faiss::float_rand(queries.data(), queries.size(), 9002);
+
+    {
+        faiss::gpu_metal::MetalIndexFlat metalIdx(
+                resources_, dim, faiss::METRIC_L2);
+        metalIdx.add(nb, vecs.data());
+
+        std::vector<float> dists((size_t)nq * k);
+        std::vector<faiss::idx_t> labels((size_t)nq * k);
+        metalIdx.search(nq, queries.data(), k, dists.data(), labels.data());
+
+        auto info = resources_->getMemoryInfo();
+        EXPECT_GT(info.tempPoolCachedBytes, 0);
+        EXPECT_FALSE(info.logMemoryAllocations);
+        EXPECT_GE(info.totalLiveAllocs, (size_t)1); // FlatData is live
+
+        const auto itTemp = info.byAllocType.find(
+                (int)faiss::gpu_metal::MetalAllocType::TemporaryMemoryBuffer);
+        ASSERT_NE(itTemp, info.byAllocType.end());
+        EXPECT_GT(itTemp->second.totalAllocs, 0);
+    }
+
+    auto infoAfterDestroy = resources_->getMemoryInfo();
+    EXPECT_EQ(infoAfterDestroy.totalLiveAllocs, 0);
+
+    resources_->setLogMemoryAllocations(true);
+    EXPECT_TRUE(resources_->getLogMemoryAllocations());
+    auto infoLogging = resources_->getMemoryInfo();
+    EXPECT_TRUE(infoLogging.logMemoryAllocations);
+}
