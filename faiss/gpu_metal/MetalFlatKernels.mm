@@ -28,8 +28,21 @@ bool runFlatSearchGPU(
         int k,
         bool isL2,
         id<MTLBuffer> outDistances,
-        id<MTLBuffer> outIndices) {
-    return runMetalDistance(device, queue, queries, vectors, nq, nb, d, k, isL2, outDistances, outIndices);
+        id<MTLBuffer> outIndices,
+        std::shared_ptr<MetalResources> resources) {
+    return runMetalDistance(
+            device,
+            queue,
+            queries,
+            vectors,
+            nq,
+            nb,
+            d,
+            k,
+            isL2,
+            outDistances,
+            outIndices,
+            resources);
 }
 
 bool runFlatSearchGPUFP16(
@@ -43,8 +56,21 @@ bool runFlatSearchGPUFP16(
         int k,
         bool isL2,
         id<MTLBuffer> outDistances,
-        id<MTLBuffer> outIndices) {
-    return runMetalDistanceFP16(device, queue, queries, vectors, nq, nb, d, k, isL2, outDistances, outIndices);
+        id<MTLBuffer> outIndices,
+        std::shared_ptr<MetalResources> resources) {
+    return runMetalDistanceFP16(
+            device,
+            queue,
+            queries,
+            vectors,
+            nq,
+            nb,
+            d,
+            k,
+            isL2,
+            outDistances,
+            outIndices,
+            resources);
 }
 
 int getMetalFlatSearchMaxK() {

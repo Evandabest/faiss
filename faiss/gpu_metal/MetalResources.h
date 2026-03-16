@@ -16,6 +16,7 @@
 #import <Foundation/Foundation.h>
 
 #include <cstddef>
+#include <mutex>
 
 namespace faiss {
 namespace gpu_metal {
@@ -62,9 +63,35 @@ public:
     /// Returns true if the Metal device and queue are available.
     bool isAvailable() const { return device_ != nil && commandQueue_ != nil; }
 
+    /// Sets the byte budget used to cache temporary buffers for reuse.
+    /// A value of 0 disables temporary-buffer caching.
+    void setTempMemoryPoolBytes(size_t bytes);
+
+    /// Returns the temporary buffer cache budget in bytes.
+    size_t getTempMemoryPoolBytes() const;
+
+    /// Returns the total bytes currently cached in the temporary pool.
+    size_t getTempMemoryCachedBytes() const;
+
+    /// Releases all currently cached temporary buffers.
+    void clearTempMemoryPool();
+
 private:
+    static constexpr size_t kTempPoolAlignBytes = 256;
+    static constexpr size_t kDefaultTempPoolBudgetBytes =
+            512ULL * 1024 * 1024;
+
+    size_t alignTempBufferSize_(size_t bytes) const;
+    id<MTLBuffer> allocTemporaryBuffer_(size_t size);
+    void deallocTemporaryBuffer_(id<MTLBuffer> buffer);
+
     id<MTLDevice> device_;
     id<MTLCommandQueue> commandQueue_;
+    NSMutableDictionary<NSNumber*, NSMutableArray<id<MTLBuffer>>*>*
+            tempPoolBuckets_;
+    size_t tempPoolBudgetBytes_;
+    size_t tempPoolCachedBytes_;
+    mutable std::mutex tempPoolMutex_;
 };
 
 } // namespace gpu_metal

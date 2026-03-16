@@ -20,6 +20,8 @@
 namespace faiss {
 namespace gpu_metal {
 
+class MetalResources;
+
 /// Calculate tile sizes for distance computation (mirrors CUDA's chooseTileSize).
 /// Determines optimal query and vector tile dimensions. \p availableMem is the
 /// byte budget for the tile working set (e.g. from system available memory).
@@ -62,7 +64,8 @@ bool runMetalDistance(
         int k,
         bool isL2,
         id<MTLBuffer> outDistances,
-        id<MTLBuffer> outIndices);
+        id<MTLBuffer> outIndices,
+        std::shared_ptr<MetalResources> resources = nullptr);
 
 /// Float16 variant: vectors buffer contains half-precision data.
 /// Queries remain float32. Computation is float32; only storage is fp16.
@@ -77,7 +80,8 @@ bool runMetalDistanceFP16(
         int k,
         bool isL2,
         id<MTLBuffer> outDistances,
-        id<MTLBuffer> outIndices);
+        id<MTLBuffer> outIndices,
+        std::shared_ptr<MetalResources> resources = nullptr);
 
 /// L2 distance computation (convenience wrapper).
 /// Computes L2 squared distance and returns top-k results.
@@ -276,8 +280,6 @@ bool runMetalIVFFlatFullSearch(
 // ============================================================
 //  Public brute-force k-NN on raw CPU pointers (mirrors CUDA bfKnn)
 // ============================================================
-
-class MetalResources; // forward declaration
 
 /// Brute-force k-nearest-neighbor search on externally-provided data.
 /// Vectors and queries are row-major float32 CPU pointers; results are

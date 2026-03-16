@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 namespace faiss {
 namespace gpu_metal {
@@ -93,6 +94,42 @@ size_t getAvailableMemoryForTiling() {
     return availableBytes;
 }
 
+class TempBufferArena {
+   public:
+    TempBufferArena(
+            id<MTLDevice> device,
+            std::shared_ptr<MetalResources> resources)
+            : device_(device), resources_(resources) {}
+
+    id<MTLBuffer> alloc(size_t bytes) {
+        id<MTLBuffer> buf = nil;
+        if (resources_) {
+            buf = resources_->allocBuffer(
+                    bytes, MetalAllocType::TemporaryMemoryBuffer);
+            if (buf) {
+                pooledBuffers_.push_back(buf);
+                return buf;
+            }
+        }
+        return [device_ newBufferWithLength:bytes
+                                    options:MTLResourceStorageModeShared];
+    }
+
+    ~TempBufferArena() {
+        if (!resources_) {
+            return;
+        }
+        for (id<MTLBuffer> b : pooledBuffers_) {
+            resources_->deallocBuffer(b, MetalAllocType::TemporaryMemoryBuffer);
+        }
+    }
+
+   private:
+    id<MTLDevice> device_;
+    std::shared_ptr<MetalResources> resources_;
+    std::vector<id<MTLBuffer>> pooledBuffers_;
+};
+
 } // namespace
 
 void chooseTileSize(
@@ -132,7 +169,8 @@ bool runMetalDistance(
         int nq, int nb, int d, int k,
         bool isL2,
         id<MTLBuffer> outDistances,
-        id<MTLBuffer> outIndices) {
+        id<MTLBuffer> outIndices,
+        std::shared_ptr<MetalResources> resources) {
     if (!device || !queue || !queries || !vectors ||
         !outDistances || !outIndices)
         return false;
@@ -150,6 +188,7 @@ bool runMetalDistance(
                    tileRows, tileCols);
     bool needsTiling = (tileCols < nb || tileRows < nq);
     int K_prime = needsTiling ? MetalKernels::computeKPrimeForTiling(k) : k;
+    TempBufferArena arena(device, resources);
 
     id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
@@ -158,9 +197,8 @@ bool runMetalDistance(
         K.encodeFusedDistTopK(enc, queries, vectors, outDistances, outIndices,
                               nq, nb, d, k, isL2);
     } else if (!needsTiling) {
-        id<MTLBuffer> distMat = [device
-                newBufferWithLength:(size_t)nq * nb * sizeof(float)
-                            options:MTLResourceStorageModeShared];
+        id<MTLBuffer> distMat =
+                arena.alloc((size_t)nq * nb * sizeof(float));
         if (!distMat) { [enc endEncoding]; return false; }
 
         if (isL2) K.encodeL2SquaredMatrix(enc, queries, vectors, distMat, nq, nb, d);
@@ -171,12 +209,10 @@ bool runMetalDistance(
         int numRowTiles = (nq + tileRows - 1) / tileRows;
         int numColTiles = (nb + tileCols - 1) / tileCols;
 
-        id<MTLBuffer> tileDistBuf = [device
-                newBufferWithLength:(size_t)nq * numColTiles * K_prime * sizeof(float)
-                            options:MTLResourceStorageModeShared];
-        id<MTLBuffer> tileIdxBuf = [device
-                newBufferWithLength:(size_t)nq * numColTiles * K_prime * sizeof(int32_t)
-                            options:MTLResourceStorageModeShared];
+        id<MTLBuffer> tileDistBuf =
+                arena.alloc((size_t)nq * numColTiles * K_prime * sizeof(float));
+        id<MTLBuffer> tileIdxBuf =
+                arena.alloc((size_t)nq * numColTiles * K_prime * sizeof(int32_t));
         if (!tileDistBuf || !tileIdxBuf) { [enc endEncoding]; return false; }
 
         for (int tr = 0; tr < numRowTiles; tr++) {
@@ -188,9 +224,8 @@ bool runMetalDistance(
                 size_t qOff = (size_t)(tr * tileRows) * d * sizeof(float);
                 size_t vOff = (size_t)(tc * tileCols) * d * sizeof(float);
 
-                id<MTLBuffer> distTile = [device
-                        newBufferWithLength:(size_t)curQS * curVS * sizeof(float)
-                                    options:MTLResourceStorageModeShared];
+                id<MTLBuffer> distTile =
+                        arena.alloc((size_t)curQS * curVS * sizeof(float));
                 if (!distTile) { [enc endEncoding]; return false; }
 
                 if (isL2) K.encodeL2SquaredMatrix(enc, queries, vectors, distTile,
@@ -198,12 +233,10 @@ bool runMetalDistance(
                 else      K.encodeIPMatrix(enc, queries, vectors, distTile,
                                             curQS, curVS, d, qOff, vOff);
 
-                id<MTLBuffer> topDist = [device
-                        newBufferWithLength:(size_t)curQS * K_prime * sizeof(float)
-                                    options:MTLResourceStorageModeShared];
-                id<MTLBuffer> topIdx = [device
-                        newBufferWithLength:(size_t)curQS * K_prime * sizeof(int32_t)
-                                    options:MTLResourceStorageModeShared];
+                id<MTLBuffer> topDist =
+                        arena.alloc((size_t)curQS * K_prime * sizeof(float));
+                id<MTLBuffer> topIdx =
+                        arena.alloc((size_t)curQS * K_prime * sizeof(int32_t));
                 if (!topDist || !topIdx) { [enc endEncoding]; return false; }
 
                 K.encodeTopKThreadgroup(enc, distTile, topDist, topIdx,
@@ -237,12 +270,10 @@ bool runMetalDistance(
             // Merge per-tile results
             if (numColTiles > 1) {
                 id<MTLBuffer> mBufA_D = tileDistBuf, mBufA_I = tileIdxBuf;
-                id<MTLBuffer> mBufB_D = [device
-                        newBufferWithLength:(size_t)curQS * numColTiles * K_prime * sizeof(float)
-                                    options:MTLResourceStorageModeShared];
-                id<MTLBuffer> mBufB_I = [device
-                        newBufferWithLength:(size_t)curQS * numColTiles * K_prime * sizeof(int32_t)
-                                    options:MTLResourceStorageModeShared];
+                id<MTLBuffer> mBufB_D = arena.alloc(
+                        (size_t)curQS * numColTiles * K_prime * sizeof(float));
+                id<MTLBuffer> mBufB_I = arena.alloc(
+                        (size_t)curQS * numColTiles * K_prime * sizeof(int32_t));
                 if (!mBufB_D || !mBufB_I) { [enc endEncoding]; return false; }
 
                 int nLists = numColTiles;
@@ -373,7 +404,8 @@ bool runMetalDistanceFP16(
         int nq, int nb, int d, int k,
         bool isL2,
         id<MTLBuffer> outDistances,
-        id<MTLBuffer> outIndices) {
+        id<MTLBuffer> outIndices,
+        std::shared_ptr<MetalResources> resources) {
     if (!device || !queue || !queries || !vectors ||
         !outDistances || !outIndices)
         return false;
@@ -391,6 +423,7 @@ bool runMetalDistanceFP16(
                    tileRows, tileCols);
     bool needsTiling = (tileCols < nb || tileRows < nq);
     int K_prime = needsTiling ? MetalKernels::computeKPrimeForTiling(k) : k;
+    TempBufferArena arena(device, resources);
 
     id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
@@ -399,9 +432,8 @@ bool runMetalDistanceFP16(
         K.encodeFusedDistTopKFP16(enc, queries, vectors, outDistances, outIndices,
                                   nq, nb, d, k, isL2);
     } else if (!needsTiling) {
-        id<MTLBuffer> distMat = [device
-                newBufferWithLength:(size_t)nq * nb * sizeof(float)
-                            options:MTLResourceStorageModeShared];
+        id<MTLBuffer> distMat =
+                arena.alloc((size_t)nq * nb * sizeof(float));
         if (!distMat) { [enc endEncoding]; return false; }
 
         if (isL2) K.encodeL2SquaredMatrixFP16(enc, queries, vectors, distMat, nq, nb, d);
@@ -412,12 +444,10 @@ bool runMetalDistanceFP16(
         int numRowTiles = (nq + tileRows - 1) / tileRows;
         int numColTiles = (nb + tileCols - 1) / tileCols;
 
-        id<MTLBuffer> tileDistBuf = [device
-                newBufferWithLength:(size_t)nq * numColTiles * K_prime * sizeof(float)
-                            options:MTLResourceStorageModeShared];
-        id<MTLBuffer> tileIdxBuf = [device
-                newBufferWithLength:(size_t)nq * numColTiles * K_prime * sizeof(int32_t)
-                            options:MTLResourceStorageModeShared];
+        id<MTLBuffer> tileDistBuf =
+                arena.alloc((size_t)nq * numColTiles * K_prime * sizeof(float));
+        id<MTLBuffer> tileIdxBuf =
+                arena.alloc((size_t)nq * numColTiles * K_prime * sizeof(int32_t));
         if (!tileDistBuf || !tileIdxBuf) { [enc endEncoding]; return false; }
 
         for (int tr = 0; tr < numRowTiles; tr++) {
@@ -429,9 +459,8 @@ bool runMetalDistanceFP16(
                 size_t qOff = (size_t)(tr * tileRows) * d * sizeof(float);
                 size_t vOff = (size_t)(tc * tileCols) * d * sizeof(uint16_t);
 
-                id<MTLBuffer> distTile = [device
-                        newBufferWithLength:(size_t)curQS * curVS * sizeof(float)
-                                    options:MTLResourceStorageModeShared];
+                id<MTLBuffer> distTile =
+                        arena.alloc((size_t)curQS * curVS * sizeof(float));
                 if (!distTile) { [enc endEncoding]; return false; }
 
                 if (isL2) K.encodeL2SquaredMatrixFP16(enc, queries, vectors, distTile,
@@ -439,12 +468,10 @@ bool runMetalDistanceFP16(
                 else      K.encodeIPMatrixFP16(enc, queries, vectors, distTile,
                                                 curQS, curVS, d, qOff, vOff);
 
-                id<MTLBuffer> topDist = [device
-                        newBufferWithLength:(size_t)curQS * K_prime * sizeof(float)
-                                    options:MTLResourceStorageModeShared];
-                id<MTLBuffer> topIdx = [device
-                        newBufferWithLength:(size_t)curQS * K_prime * sizeof(int32_t)
-                                    options:MTLResourceStorageModeShared];
+                id<MTLBuffer> topDist =
+                        arena.alloc((size_t)curQS * K_prime * sizeof(float));
+                id<MTLBuffer> topIdx =
+                        arena.alloc((size_t)curQS * K_prime * sizeof(int32_t));
                 if (!topDist || !topIdx) { [enc endEncoding]; return false; }
 
                 K.encodeTopKThreadgroup(enc, distTile, topDist, topIdx,
@@ -548,7 +575,7 @@ void bfKnn(
             device, queue, qBuf, vecBuf,
             (int)numQueries, (int)numVectors, dims, k,
             (metric == METRIC_L2),
-            distBuf, idxBuf);
+            distBuf, idxBuf, resources);
 
     resources->deallocBuffer(vecBuf, MetalAllocType::TemporaryMemoryBuffer);
     resources->deallocBuffer(qBuf,   MetalAllocType::TemporaryMemoryBuffer);

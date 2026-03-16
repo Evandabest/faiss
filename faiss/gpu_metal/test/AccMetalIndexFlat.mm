@@ -898,3 +898,58 @@ TEST_F(AccMetalIndexFlat, ClonerOptionsVerbose) {
 
     delete metalRaw;
 }
+
+TEST_F(AccMetalIndexFlat, TempPoolCachesSearchScratchBuffers) {
+    const size_t poolBudget = 64ULL * 1024 * 1024;
+    resources_->setTempMemoryPoolBytes(poolBudget);
+    resources_->clearTempMemoryPool();
+    EXPECT_EQ(resources_->getTempMemoryCachedBytes(), 0);
+
+    const int dim = 64, nb = 8000, nq = 64, k = 20;
+    std::vector<float> vecs((size_t)nb * dim), queries((size_t)nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 123);
+    faiss::float_rand(queries.data(), queries.size(), 456);
+
+    faiss::gpu_metal::MetalIndexFlat metalIdx(resources_, dim, faiss::METRIC_L2);
+    metalIdx.add(nb, vecs.data());
+
+    std::vector<float> dists((size_t)nq * k);
+    std::vector<faiss::idx_t> labels((size_t)nq * k);
+
+    metalIdx.search(nq, queries.data(), k, dists.data(), labels.data());
+    const size_t cachedAfterFirst = resources_->getTempMemoryCachedBytes();
+    EXPECT_GT(cachedAfterFirst, 0);
+    EXPECT_LE(cachedAfterFirst, poolBudget);
+
+    metalIdx.search(nq, queries.data(), k, dists.data(), labels.data());
+    const size_t cachedAfterSecond = resources_->getTempMemoryCachedBytes();
+    EXPECT_EQ(cachedAfterSecond, cachedAfterFirst);
+}
+
+TEST_F(AccMetalIndexFlat, TempPoolClearAndShrinkBudget) {
+    resources_->setTempMemoryPoolBytes(64ULL * 1024 * 1024);
+    resources_->clearTempMemoryPool();
+
+    const int dim = 32, nb = 6000, nq = 64, k = 10;
+    std::vector<float> vecs((size_t)nb * dim), queries((size_t)nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 321);
+    faiss::float_rand(queries.data(), queries.size(), 654);
+
+    faiss::gpu_metal::MetalIndexFlat metalIdx(resources_, dim, faiss::METRIC_L2);
+    metalIdx.add(nb, vecs.data());
+
+    std::vector<float> dists((size_t)nq * k);
+    std::vector<faiss::idx_t> labels((size_t)nq * k);
+    metalIdx.search(nq, queries.data(), k, dists.data(), labels.data());
+
+    const size_t cached = resources_->getTempMemoryCachedBytes();
+    EXPECT_GT(cached, 0);
+
+    const size_t smallerBudget = 2ULL * 1024 * 1024;
+    resources_->setTempMemoryPoolBytes(smallerBudget);
+    EXPECT_LE(resources_->getTempMemoryCachedBytes(), smallerBudget);
+    EXPECT_EQ(resources_->getTempMemoryPoolBytes(), smallerBudget);
+
+    resources_->clearTempMemoryPool();
+    EXPECT_EQ(resources_->getTempMemoryCachedBytes(), 0);
+}

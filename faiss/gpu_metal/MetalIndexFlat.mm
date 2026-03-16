@@ -167,12 +167,12 @@ void MetalIndexFlat::search(
         ok = runFlatSearchGPUFP16(
                 device, queue, queryBuf, vectorsBuffer_,
                 (int)n, (int)ntotal, d, (int)k, isL2,
-                outDistBuf, outIdxBuf);
+                outDistBuf, outIdxBuf, resources_);
     } else {
         ok = runFlatSearchGPU(
                 device, queue, queryBuf, vectorsBuffer_,
                 (int)n, (int)ntotal, d, (int)k, isL2,
-                outDistBuf, outIdxBuf);
+                outDistBuf, outIdxBuf, resources_);
     }
 
     resources_->deallocBuffer(queryBuf, MetalAllocType::TemporaryMemoryBuffer);

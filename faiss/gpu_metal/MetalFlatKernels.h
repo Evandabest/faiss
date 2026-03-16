@@ -15,9 +15,12 @@
 #import <Metal/Metal.h>
 
 #include <cstddef>
+#include <memory>
 
 namespace faiss {
 namespace gpu_metal {
+
+class MetalResources;
 
 /// FlatIndex-specific wrapper: runs GPU search for FlatIndex.
 /// Delegates to runMetalDistance() from MetalDistance.h.
@@ -37,7 +40,8 @@ bool runFlatSearchGPU(
         int k,
         bool isL2,                  // true = L2 squared, false = inner product
         id<MTLBuffer> outDistances, // (nq * k) float
-        id<MTLBuffer> outIndices);  // (nq * k) int32
+        id<MTLBuffer> outIndices,   // (nq * k) int32
+        std::shared_ptr<MetalResources> resources = nullptr);
 
 /// Float16 variant: vectors buffer is half-precision.
 bool runFlatSearchGPUFP16(
@@ -51,7 +55,8 @@ bool runFlatSearchGPUFP16(
         int k,
         bool isL2,
         id<MTLBuffer> outDistances,
-        id<MTLBuffer> outIndices);
+        id<MTLBuffer> outIndices,
+        std::shared_ptr<MetalResources> resources = nullptr);
 
 } // namespace gpu_metal
 } // namespace faiss
