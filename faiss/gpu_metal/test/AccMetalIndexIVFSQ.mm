@@ -168,6 +168,22 @@ INSTANTIATE_TEST_SUITE_P(
                                faiss::ScalarQuantizer::QT_fp16,
                                faiss::METRIC_INNER_PRODUCT, 0.85f}));
 
+INSTANTIATE_TEST_SUITE_P(
+        QT4_L2,
+        AccMetalIndexIVFSQ,
+        ::testing::Values(
+                IVFSQTestParam{64, 16, 5000, 50, 10,
+                               faiss::ScalarQuantizer::QT_4bit,
+                               faiss::METRIC_L2, 0.95f}));
+
+INSTANTIATE_TEST_SUITE_P(
+        QT6_L2,
+        AccMetalIndexIVFSQ,
+        ::testing::Values(
+                IVFSQTestParam{64, 16, 5000, 50, 10,
+                               faiss::ScalarQuantizer::QT_6bit,
+                               faiss::METRIC_L2, 0.95f}));
+
 // ============================================================
 //  Float16 coarse quantizer tests
 // ============================================================
@@ -236,6 +252,33 @@ TEST(AccMetalIndexIVFSQ_FP16Coarse, FP16_IP) {
     metalIdx.search(nq, queries.data(), k, gpuD.data(), gpuL.data());
 
     expectRecall(nq, k, 0.85f, cpuL.data(), gpuL.data());
+}
+
+TEST(AccMetalIndexIVFSQ_ExtraTypes, Qt4AndQt6ConstructAndSearch) {
+    auto res = std::make_shared<faiss::gpu_metal::MetalResources>();
+    if (!res->isAvailable()) {
+        GTEST_SKIP() << "Metal not available";
+    }
+
+    const int dim = 32, nlist = 8, nb = 2000, nq = 20, k = 8;
+    std::vector<float> data(nb * dim), queries(nq * dim);
+    faiss::float_rand(data.data(), data.size(), 501);
+    faiss::float_rand(queries.data(), queries.size(), 502);
+
+    for (auto qt : {faiss::ScalarQuantizer::QT_4bit, faiss::ScalarQuantizer::QT_6bit}) {
+        auto cpuIdx = makeCpuIVFSQ(dim, nlist, qt, faiss::METRIC_L2, nb, data.data());
+        cpuIdx->add(nb, data.data());
+        cpuIdx->nprobe = 6;
+
+        faiss::gpu_metal::MetalIndexIVFScalarQuantizer metalIdx(res, cpuIdx.get());
+        EXPECT_EQ(metalIdx.sqQuantizerType(), qt);
+
+        std::vector<float> cpuD(nq * k), gpuD(nq * k);
+        std::vector<faiss::idx_t> cpuL(nq * k), gpuL(nq * k);
+        cpuIdx->search(nq, queries.data(), k, cpuD.data(), cpuL.data());
+        metalIdx.search(nq, queries.data(), k, gpuD.data(), gpuL.data());
+        expectRecall(nq, k, 0.95f, cpuL.data(), gpuL.data());
+    }
 }
 
 } // namespace

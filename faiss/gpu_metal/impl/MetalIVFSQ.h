@@ -6,7 +6,8 @@
  * LICENSE file in the root directory of this source tree.
  *
  * Metal IVF Scalar Quantizer implementation: GPU-resident IVF list storage
- * for SQ-encoded codes (QT_8bit and QT_fp16).
+ * for SQ-encoded codes.
+ * GPU kernels currently consume SQ8 and FP16 code layouts.
  * Mirrors the roles of faiss/gpu/impl/IVFFlat.cuh (storage side only).
  */
 

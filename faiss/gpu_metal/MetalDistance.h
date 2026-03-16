@@ -195,13 +195,13 @@ bool runMetalIVFFlatScan(
         id<MTLBuffer> interleavedCodesOffset = nil);
 
 /// SQ quantizer type for IVF SQ scan.
-enum class MetalSQType { SQ8, FP16 };
+enum class MetalSQType { SQ4, SQ6, SQ8, FP16 };
 
 /// IVF Scalar Quantizer scan: scans SQ-encoded inverted lists on the GPU.
 ///
-/// @param sqType       Quantizer type (SQ8 or FP16)
-/// @param sqTables     SQ decode tables buffer (SQ8: vmin[d] + vdiff[d] = 2*d
-///                     floats; nil for FP16)
+/// @param sqType       Quantizer type (SQ4/SQ6/SQ8/FP16)
+/// @param sqTables     SQ decode tables buffer (SQ4/SQ6/SQ8:
+///                     vmin[d] + vdiff[d] = 2*d floats; nil for FP16)
 bool runMetalIVFSQScan(
         id<MTLDevice> device,
         id<MTLCommandQueue> queue,

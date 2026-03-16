@@ -2348,14 +2348,26 @@ bool runMetalIVFSQScan(
         !perListDistBuf || !perListIdxBuf)
         return false;
     if (k <= 0 || nq <= 0 || nprobe <= 0) return false;
-    if (sqType == MetalSQType::SQ8 && !sqTables) return false;
+    if (sqType != MetalSQType::FP16 && !sqTables) return false;
 
     MetalKernels& K = getMetalKernels(device);
     if (!K.isValid()) return false;
 
-    IVFScanVariant variant = (sqType == MetalSQType::SQ8)
-                                 ? IVFScanVariant::SQ8
-                                 : IVFScanVariant::FP16;
+    IVFScanVariant variant = IVFScanVariant::FP16;
+    switch (sqType) {
+        case MetalSQType::SQ4:
+            variant = IVFScanVariant::SQ4;
+            break;
+        case MetalSQType::SQ6:
+            variant = IVFScanVariant::SQ6;
+            break;
+        case MetalSQType::SQ8:
+            variant = IVFScanVariant::SQ8;
+            break;
+        case MetalSQType::FP16:
+            variant = IVFScanVariant::FP16;
+            break;
+    }
 
     uint32_t sp[5] = {(uint32_t)nq, (uint32_t)d, (uint32_t)k,
                       (uint32_t)nprobe, isL2 ? 1u : 0u};

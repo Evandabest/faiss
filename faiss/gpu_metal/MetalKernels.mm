@@ -427,6 +427,10 @@ void MetalKernels::encodeIVFScanList(
             name = "ivf_scan_list_small"; tgSize = 32; break;
         case IVFScanVariant::Interleaved:
             name = "ivf_scan_list_interleaved"; tgSize = 256; break;
+        case IVFScanVariant::SQ4:
+            name = "ivf_scan_list_sq4"; tgSize = 256; break;
+        case IVFScanVariant::SQ6:
+            name = "ivf_scan_list_sq6"; tgSize = 256; break;
         case IVFScanVariant::SQ8:
             name = "ivf_scan_list_sq8"; tgSize = 256; break;
         case IVFScanVariant::FP16:
@@ -447,7 +451,9 @@ void MetalKernels::encodeIVFScanList(
     if (variant == IVFScanVariant::Interleaved && ilCodesOffset) {
         [enc setBuffer:ilCodesOffset offset:0 atIndex:9];
     }
-    if (variant == IVFScanVariant::SQ8 && sqTables) {
+    if ((variant == IVFScanVariant::SQ4 ||
+         variant == IVFScanVariant::SQ6 ||
+         variant == IVFScanVariant::SQ8) && sqTables) {
         [enc setBuffer:sqTables offset:0 atIndex:9];
     }
     NSUInteger totalTGs = (NSUInteger)nq * (NSUInteger)nprobe;

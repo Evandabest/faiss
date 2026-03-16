@@ -1619,9 +1619,339 @@ kernel void ivf_merge_lists(
 //
 // QT_8bit:  codes are uchar[d] per vector; decode: vmin[dim] + code * vdiff[dim]
 //           SQ tables buffer layout: vmin[0..d-1], vdiff[0..d-1] (2*d floats)
+// QT_4bit:  packed 2 values per byte, low/high nibble
+// QT_6bit:  packed 4 values per 3 bytes
 // QT_fp16:  codes are half[d] per vector; no SQ tables needed
 //
 // Both share the same top-k selection as ivf_scan_list.
+
+inline float sq4_decode_component(device const uchar* code, uint i) {
+    uchar b = code[i >> 1];
+    uchar bits = (i & 1u) ? (b >> 4) : (b & 0x0Fu);
+    return (float(bits) + 0.5f) / 15.0f;
+}
+
+inline float sq6_decode_component(device const uchar* code, uint i) {
+    const device uchar* p = code + (i >> 2) * 3;
+    uchar bits = 0;
+    switch (i & 3u) {
+        case 0:
+            bits = p[0] & 0x3Fu;
+            break;
+        case 1:
+            bits = (p[0] >> 6) | ((p[1] & 0x0Fu) << 2);
+            break;
+        case 2:
+            bits = (p[1] >> 4) | ((p[2] & 0x03u) << 4);
+            break;
+        default:
+            bits = p[2] >> 2;
+            break;
+    }
+    return (float(bits) + 0.5f) / 63.0f;
+}
+
+kernel void ivf_scan_list_sq4(
+    device const float*      queries       [[buffer(0)]],
+    device const uchar*      codes         [[buffer(1)]],
+    device const long*       ids           [[buffer(2)]],
+    device const uint*       listOffset    [[buffer(3)]],
+    device const uint*       listLength    [[buffer(4)]],
+    device const int*        coarseAssign  [[buffer(5)]],
+    device       float*      perListDist   [[buffer(6)]],
+    device       long*       perListIdx    [[buffer(7)]],
+    device const uint*       params        [[buffer(8)]],
+    device const float*      sqTables      [[buffer(9)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]]
+) {
+    constexpr uint TG_SIZE = 256;
+    constexpr uint LOCAL_K = 4;
+
+    uint nq       = params[0];
+    uint d        = params[1];
+    uint k        = params[2];
+    uint nprobe   = params[3];
+    uint want_min = params[4];
+
+    uint qi = tgid / nprobe;
+    uint pi = tgid % nprobe;
+    if (qi >= nq || k == 0) return;
+
+    float sentinel = want_min ? 1e38f : -1e38f;
+    uint outBase = (qi * nprobe + pi) * k;
+
+    int list_no = coarseAssign[qi * nprobe + pi];
+    if (list_no < 0) {
+        for (uint i = tid; i < k; i += TG_SIZE) {
+            perListDist[outBase + i] = sentinel;
+            perListIdx [outBase + i] = -1;
+        }
+        return;
+    }
+
+    uint lOff = listOffset[(uint)list_no];
+    uint lLen = listLength[(uint)list_no];
+    if (lLen == 0) {
+        for (uint i = tid; i < k; i += TG_SIZE) {
+            perListDist[outBase + i] = sentinel;
+            perListIdx [outBase + i] = -1;
+        }
+        return;
+    }
+
+    threadgroup float tgQuery[512];
+    const device float* qvecDev = queries + qi * d;
+    for (uint i = tid; i < d; i += TG_SIZE) {
+        tgQuery[i] = qvecDev[i];
+    }
+
+    threadgroup float tgVmin[512];
+    threadgroup float tgVdiff[512];
+    for (uint i = tid; i < d; i += TG_SIZE) {
+        tgVmin [i] = sqTables[i];
+        tgVdiff[i] = sqTables[d + i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float localDist[LOCAL_K];
+    int   localIdx [LOCAL_K];
+    uint  localCount = 0;
+    for (uint i = 0; i < LOCAL_K; i++) {
+        localDist[i] = sentinel;
+        localIdx [i] = -1;
+    }
+
+    uint codeSize = (d + 1) >> 1;
+    for (uint li = tid; li < lLen; li += TG_SIZE) {
+        uint vecIdx = lOff + li;
+        const device uchar* cvec = codes + vecIdx * codeSize;
+
+        float dist = 0.0f;
+        for (uint t = 0; t < d; t++) {
+            float xi = sq4_decode_component(cvec, t);
+            float decoded = tgVmin[t] + xi * tgVdiff[t];
+            if (want_min) {
+                float diff = tgQuery[t] - decoded;
+                dist += diff * diff;
+            } else {
+                dist += tgQuery[t] * decoded;
+            }
+        }
+
+        int vi = (int)vecIdx;
+        bool better = want_min ? (dist < localDist[LOCAL_K-1])
+                               : (dist > localDist[LOCAL_K-1]);
+        if (localCount < LOCAL_K || better) {
+            uint pos = (localCount < LOCAL_K) ? localCount : LOCAL_K - 1;
+            localDist[pos] = dist;
+            localIdx [pos] = vi;
+            while (pos > 0) {
+                bool sw = want_min
+                    ? (localDist[pos] < localDist[pos-1] || (localDist[pos] == localDist[pos-1] && localIdx[pos] < localIdx[pos-1]))
+                    : (localDist[pos] > localDist[pos-1] || (localDist[pos] == localDist[pos-1] && localIdx[pos] < localIdx[pos-1]));
+                if (!sw) break;
+                float td = localDist[pos]; localDist[pos] = localDist[pos-1]; localDist[pos-1] = td;
+                int   ti = localIdx [pos]; localIdx [pos] = localIdx [pos-1]; localIdx [pos-1] = ti;
+                pos--;
+            }
+            if (localCount < LOCAL_K) localCount++;
+        }
+    }
+
+    constexpr uint CAND = TG_SIZE * LOCAL_K;
+    threadgroup float tgDist[CAND];
+    threadgroup int   tgIdx [CAND];
+    for (uint i = 0; i < LOCAL_K; i++) {
+        tgDist[tid * LOCAL_K + i] = (i < localCount) ? localDist[i] : sentinel;
+        tgIdx [tid * LOCAL_K + i] = (i < localCount) ? localIdx [i] : -1;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint k2 = 2; k2 <= CAND; k2 *= 2) {
+        for (uint j = k2 >> 1; j > 0; j >>= 1) {
+            for (uint idx = tid; idx < CAND; idx += TG_SIZE) {
+                uint partner = idx ^ j;
+                if (partner < CAND && partner > idx) {
+                    bool ascending = ((idx & k2) == 0);
+                    bool pB = want_min
+                        ? (tgDist[partner] < tgDist[idx] || (tgDist[partner] == tgDist[idx] && tgIdx[partner] < tgIdx[idx]))
+                        : (tgDist[partner] > tgDist[idx] || (tgDist[partner] == tgDist[idx] && tgIdx[partner] < tgIdx[idx]));
+                    bool iB = want_min
+                        ? (tgDist[idx] < tgDist[partner] || (tgDist[idx] == tgDist[partner] && tgIdx[idx] < tgIdx[partner]))
+                        : (tgDist[idx] > tgDist[partner] || (tgDist[idx] == tgDist[partner] && tgIdx[idx] < tgIdx[partner]));
+                    if (ascending ? pB : iB) {
+                        float td = tgDist[idx]; tgDist[idx] = tgDist[partner]; tgDist[partner] = td;
+                        int   ti = tgIdx [idx]; tgIdx [idx] = tgIdx [partner]; tgIdx [partner] = ti;
+                    }
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+
+    uint kk = min(k, CAND);
+    for (uint i = tid; i < kk; i += TG_SIZE) {
+        int vi = tgIdx[i];
+        perListDist[outBase + i] = tgDist[i];
+        perListIdx [outBase + i] = (vi < 0) ? -1L : ids[vi];
+    }
+    for (uint i = tid; i < k - kk; i += TG_SIZE) {
+        perListDist[outBase + kk + i] = sentinel;
+        perListIdx [outBase + kk + i] = -1L;
+    }
+}
+
+kernel void ivf_scan_list_sq6(
+    device const float*      queries       [[buffer(0)]],
+    device const uchar*      codes         [[buffer(1)]],
+    device const long*       ids           [[buffer(2)]],
+    device const uint*       listOffset    [[buffer(3)]],
+    device const uint*       listLength    [[buffer(4)]],
+    device const int*        coarseAssign  [[buffer(5)]],
+    device       float*      perListDist   [[buffer(6)]],
+    device       long*       perListIdx    [[buffer(7)]],
+    device const uint*       params        [[buffer(8)]],
+    device const float*      sqTables      [[buffer(9)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid  [[thread_position_in_threadgroup]]
+) {
+    constexpr uint TG_SIZE = 256;
+    constexpr uint LOCAL_K = 4;
+
+    uint nq       = params[0];
+    uint d        = params[1];
+    uint k        = params[2];
+    uint nprobe   = params[3];
+    uint want_min = params[4];
+
+    uint qi = tgid / nprobe;
+    uint pi = tgid % nprobe;
+    if (qi >= nq || k == 0) return;
+
+    float sentinel = want_min ? 1e38f : -1e38f;
+    uint outBase = (qi * nprobe + pi) * k;
+
+    int list_no = coarseAssign[qi * nprobe + pi];
+    if (list_no < 0) {
+        for (uint i = tid; i < k; i += TG_SIZE) {
+            perListDist[outBase + i] = sentinel;
+            perListIdx [outBase + i] = -1;
+        }
+        return;
+    }
+
+    uint lOff = listOffset[(uint)list_no];
+    uint lLen = listLength[(uint)list_no];
+    if (lLen == 0) {
+        for (uint i = tid; i < k; i += TG_SIZE) {
+            perListDist[outBase + i] = sentinel;
+            perListIdx [outBase + i] = -1;
+        }
+        return;
+    }
+
+    threadgroup float tgQuery[512];
+    const device float* qvecDev = queries + qi * d;
+    for (uint i = tid; i < d; i += TG_SIZE) {
+        tgQuery[i] = qvecDev[i];
+    }
+
+    threadgroup float tgVmin[512];
+    threadgroup float tgVdiff[512];
+    for (uint i = tid; i < d; i += TG_SIZE) {
+        tgVmin [i] = sqTables[i];
+        tgVdiff[i] = sqTables[d + i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float localDist[LOCAL_K];
+    int   localIdx [LOCAL_K];
+    uint  localCount = 0;
+    for (uint i = 0; i < LOCAL_K; i++) {
+        localDist[i] = sentinel;
+        localIdx [i] = -1;
+    }
+
+    uint codeSize = (d * 6 + 7) >> 3;
+    for (uint li = tid; li < lLen; li += TG_SIZE) {
+        uint vecIdx = lOff + li;
+        const device uchar* cvec = codes + vecIdx * codeSize;
+
+        float dist = 0.0f;
+        for (uint t = 0; t < d; t++) {
+            float xi = sq6_decode_component(cvec, t);
+            float decoded = tgVmin[t] + xi * tgVdiff[t];
+            if (want_min) {
+                float diff = tgQuery[t] - decoded;
+                dist += diff * diff;
+            } else {
+                dist += tgQuery[t] * decoded;
+            }
+        }
+
+        int vi = (int)vecIdx;
+        bool better = want_min ? (dist < localDist[LOCAL_K-1])
+                               : (dist > localDist[LOCAL_K-1]);
+        if (localCount < LOCAL_K || better) {
+            uint pos = (localCount < LOCAL_K) ? localCount : LOCAL_K - 1;
+            localDist[pos] = dist;
+            localIdx [pos] = vi;
+            while (pos > 0) {
+                bool sw = want_min
+                    ? (localDist[pos] < localDist[pos-1] || (localDist[pos] == localDist[pos-1] && localIdx[pos] < localIdx[pos-1]))
+                    : (localDist[pos] > localDist[pos-1] || (localDist[pos] == localDist[pos-1] && localIdx[pos] < localIdx[pos-1]));
+                if (!sw) break;
+                float td = localDist[pos]; localDist[pos] = localDist[pos-1]; localDist[pos-1] = td;
+                int   ti = localIdx [pos]; localIdx [pos] = localIdx [pos-1]; localIdx [pos-1] = ti;
+                pos--;
+            }
+            if (localCount < LOCAL_K) localCount++;
+        }
+    }
+
+    constexpr uint CAND = TG_SIZE * LOCAL_K;
+    threadgroup float tgDist[CAND];
+    threadgroup int   tgIdx [CAND];
+    for (uint i = 0; i < LOCAL_K; i++) {
+        tgDist[tid * LOCAL_K + i] = (i < localCount) ? localDist[i] : sentinel;
+        tgIdx [tid * LOCAL_K + i] = (i < localCount) ? localIdx [i] : -1;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint k2 = 2; k2 <= CAND; k2 *= 2) {
+        for (uint j = k2 >> 1; j > 0; j >>= 1) {
+            for (uint idx = tid; idx < CAND; idx += TG_SIZE) {
+                uint partner = idx ^ j;
+                if (partner < CAND && partner > idx) {
+                    bool ascending = ((idx & k2) == 0);
+                    bool pB = want_min
+                        ? (tgDist[partner] < tgDist[idx] || (tgDist[partner] == tgDist[idx] && tgIdx[partner] < tgIdx[idx]))
+                        : (tgDist[partner] > tgDist[idx] || (tgDist[partner] == tgDist[idx] && tgIdx[partner] < tgIdx[idx]));
+                    bool iB = want_min
+                        ? (tgDist[idx] < tgDist[partner] || (tgDist[idx] == tgDist[partner] && tgIdx[idx] < tgIdx[partner]))
+                        : (tgDist[idx] > tgDist[partner] || (tgDist[idx] == tgDist[partner] && tgIdx[idx] < tgIdx[partner]));
+                    if (ascending ? pB : iB) {
+                        float td = tgDist[idx]; tgDist[idx] = tgDist[partner]; tgDist[partner] = td;
+                        int   ti = tgIdx [idx]; tgIdx [idx] = tgIdx [partner]; tgIdx [partner] = ti;
+                    }
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+
+    uint kk = min(k, CAND);
+    for (uint i = tid; i < kk; i += TG_SIZE) {
+        int vi = tgIdx[i];
+        perListDist[outBase + i] = tgDist[i];
+        perListIdx [outBase + i] = (vi < 0) ? -1L : ids[vi];
+    }
+    for (uint i = tid; i < k - kk; i += TG_SIZE) {
+        perListDist[outBase + kk + i] = sentinel;
+        perListIdx [outBase + kk + i] = -1L;
+    }
+}
 
 kernel void ivf_scan_list_sq8(
     device const float*      queries       [[buffer(0)]],

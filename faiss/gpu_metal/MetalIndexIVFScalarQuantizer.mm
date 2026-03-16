@@ -30,17 +30,24 @@ void floatToHalf(const float* src, uint16_t* dst, size_t n) {
 namespace faiss {
 namespace gpu_metal {
 
-static MetalSQType toMetalSQType(faiss::ScalarQuantizer::QuantizerType qt) {
+static bool toMetalSQType(
+        faiss::ScalarQuantizer::QuantizerType qt,
+        MetalSQType& out) {
     switch (qt) {
+        case faiss::ScalarQuantizer::QT_4bit:
+            out = MetalSQType::SQ4;
+            return true;
+        case faiss::ScalarQuantizer::QT_6bit:
+            out = MetalSQType::SQ6;
+            return true;
         case faiss::ScalarQuantizer::QT_8bit:
-            return MetalSQType::SQ8;
+            out = MetalSQType::SQ8;
+            return true;
         case faiss::ScalarQuantizer::QT_fp16:
-            return MetalSQType::FP16;
+            out = MetalSQType::FP16;
+            return true;
         default:
-            FAISS_THROW_FMT(
-                    "Metal IVFSQ: unsupported quantizer type %d "
-                    "(only QT_8bit and QT_fp16 supported)",
-                    (int)qt);
+            return false;
     }
 }
 
@@ -66,9 +73,11 @@ MetalIndexIVFScalarQuantizer::MetalIndexIVFScalarQuantizer(
             quantizer, (size_t)d, (size_t)nlist, sqType, metric, false);
     cpuIndex_->own_fields = true;
 
-    MetalSQType mst = toMetalSQType(sqType);
-    gpuIvf_ = std::make_unique<MetalIVFSQImpl>(
-            resources, dims, nlist, mst, metric, metricArg);
+    MetalSQType mst = MetalSQType::SQ8;
+    if (toMetalSQType(sqType, mst)) {
+        gpuIvf_ = std::make_unique<MetalIVFSQImpl>(
+                resources, dims, nlist, mst, metric, metricArg);
+    }
 }
 
 MetalIndexIVFScalarQuantizer::MetalIndexIVFScalarQuantizer(
@@ -81,7 +90,8 @@ MetalIndexIVFScalarQuantizer::MetalIndexIVFScalarQuantizer(
                   cpuIndex->metric_type,
                   cpuIndex->metric_arg,
                   config) {
-    MetalSQType mst = toMetalSQType(cpuIndex->sq.qtype);
+    MetalSQType mst = MetalSQType::SQ8;
+    bool gpuSqSupported = toMetalSQType(cpuIndex->sq.qtype, mst);
 
     faiss::IndexFlat* quantizer =
             (cpuIndex->metric_type == METRIC_INNER_PRODUCT)
@@ -96,13 +106,15 @@ MetalIndexIVFScalarQuantizer::MetalIndexIVFScalarQuantizer(
             /*by_residual=*/false);
     cpuIndex_->own_fields = true;
 
-    gpuIvf_ = std::make_unique<MetalIVFSQImpl>(
-            resources,
-            (int)cpuIndex->d,
-            cpuIndex->nlist,
-            mst,
-            cpuIndex->metric_type,
-            cpuIndex->metric_arg);
+    if (gpuSqSupported) {
+        gpuIvf_ = std::make_unique<MetalIVFSQImpl>(
+                resources,
+                (int)cpuIndex->d,
+                cpuIndex->nlist,
+                mst,
+                cpuIndex->metric_type,
+                cpuIndex->metric_arg);
+    }
 
     copyFrom(cpuIndex);
 }
@@ -171,7 +183,7 @@ void MetalIndexIVFScalarQuantizer::uploadCentroids_() const {
 
 void MetalIndexIVFScalarQuantizer::uploadSQTables_() const {
     if (!cpuIndex_ || !gpuIvf_) return;
-    if (gpuIvf_->sqType() != MetalSQType::SQ8) return;
+    if (gpuIvf_->sqType() == MetalSQType::FP16) return;
 
     const auto& trained = cpuIndex_->sq.trained;
     if (trained.size() < (size_t)d * 2) return;

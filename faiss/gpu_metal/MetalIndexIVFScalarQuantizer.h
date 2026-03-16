@@ -5,7 +5,9 @@
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *
- * Metal IVF Scalar Quantizer wrapper — supports QT_8bit and QT_fp16.
+ * Metal IVF Scalar Quantizer wrapper.
+ * GPU scan kernels support QT_8bit and QT_fp16.
+ * QT_4bit / QT_6bit are accepted with CPU-search fallback.
  */
 
 #pragma once

@@ -19,6 +19,10 @@ namespace gpu_metal {
 
 static size_t sqCodeSize(MetalSQType sqType, int dim) {
     switch (sqType) {
+        case MetalSQType::SQ4:
+            return ((size_t)dim + 1) / 2;
+        case MetalSQType::SQ6:
+            return ((size_t)dim * 6 + 7) / 8;
         case MetalSQType::SQ8:
             return (size_t)dim * sizeof(uint8_t);
         case MetalSQType::FP16:
@@ -166,8 +170,8 @@ void MetalIVFSQImpl::appendCodes(
 
 void MetalIVFSQImpl::setSQTables(const float* tables) {
     FAISS_THROW_IF_NOT_MSG(
-            sqType_ == MetalSQType::SQ8,
-            "setSQTables only needed for SQ8");
+            sqType_ != MetalSQType::FP16,
+            "setSQTables only needed for non-FP16 SQ types");
     FAISS_THROW_IF_NOT(tables != nullptr);
 
     size_t tableBytes = 2 * (size_t)dim_ * sizeof(float);
