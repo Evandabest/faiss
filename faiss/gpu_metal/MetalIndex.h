@@ -38,6 +38,9 @@ struct MetalIndexConfig {
 
     /// Whether IVF list data should use interleaved layout for scan kernels.
     bool interleavedLayout = true;
+
+    /// Store Flat vectors in transposed layout (d x n) for API parity.
+    bool storeTransposed = false;
 };
 
 /// Base class for Metal-backed indexes. Mirrors faiss::gpu::GpuIndex.

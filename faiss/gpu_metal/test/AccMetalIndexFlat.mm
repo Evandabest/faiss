@@ -902,6 +902,68 @@ TEST_F(AccMetalIndexFlat, ClonerOptionsVerbose) {
     delete metalRaw;
 }
 
+TEST_F(AccMetalIndexFlat, StoreTransposedAddSearchReconstruct) {
+    const int dim = 48, nb = 700, nq = 24, k = 8;
+    std::vector<float> vecs(nb * dim), queries(nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 3301);
+    faiss::float_rand(queries.data(), queries.size(), 3302);
+
+    faiss::gpu_metal::MetalIndexConfig config;
+    config.storeTransposed = true;
+    faiss::gpu_metal::MetalIndexFlat metalIdx(
+            resources_, dim, faiss::METRIC_L2, 0.0f, config);
+    EXPECT_TRUE(metalIdx.storeTransposed());
+    metalIdx.add(nb, vecs.data());
+
+    faiss::IndexFlatL2 cpuIdx(dim);
+    cpuIdx.add(nb, vecs.data());
+
+    std::vector<float> cpuDist(nq * k), metalDist(nq * k);
+    std::vector<faiss::idx_t> cpuLab(nq * k), metalLab(nq * k);
+    cpuIdx.search(nq, queries.data(), k, cpuDist.data(), cpuLab.data());
+    metalIdx.search(nq, queries.data(), k, metalDist.data(), metalLab.data());
+
+    float recall = computeRecall(nq, k, cpuLab.data(), metalLab.data());
+    EXPECT_GE(recall, 0.95f) << "storeTransposed recall = " << recall;
+
+    std::vector<float> recons(dim);
+    metalIdx.reconstruct(17, recons.data());
+    const float* ref = vecs.data() + 17 * dim;
+    for (int j = 0; j < dim; ++j) {
+        EXPECT_NEAR(recons[j], ref[j], 1e-5f);
+    }
+}
+
+TEST_F(AccMetalIndexFlat, ClonerOptionsStoreTransposed) {
+    const int dim = 40, nb = 500, nq = 20, k = 6;
+    std::vector<float> vecs(nb * dim), queries(nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 3401);
+    faiss::float_rand(queries.data(), queries.size(), 3402);
+
+    faiss::IndexFlatL2 cpuIdx(dim);
+    cpuIdx.add(nb, vecs.data());
+
+    faiss::gpu_metal::StandardMetalResources stdRes;
+    faiss::gpu_metal::MetalClonerOptions opts;
+    opts.storeTransposed = true;
+    faiss::Index* metalRaw = faiss::gpu_metal::index_cpu_to_metal_gpu(
+            &stdRes, 0, &cpuIdx, &opts);
+    ASSERT_NE(metalRaw, nullptr);
+
+    auto* metalFlat = dynamic_cast<faiss::gpu_metal::MetalIndexFlat*>(metalRaw);
+    ASSERT_NE(metalFlat, nullptr);
+    EXPECT_TRUE(metalFlat->storeTransposed());
+
+    std::vector<float> cpuDist(nq * k), metalDist(nq * k);
+    std::vector<faiss::idx_t> cpuLab(nq * k), metalLab(nq * k);
+    cpuIdx.search(nq, queries.data(), k, cpuDist.data(), cpuLab.data());
+    metalFlat->search(nq, queries.data(), k, metalDist.data(), metalLab.data());
+    float recall = computeRecall(nq, k, cpuLab.data(), metalLab.data());
+    EXPECT_GE(recall, 0.95f) << "cloner storeTransposed recall = " << recall;
+
+    delete metalRaw;
+}
+
 TEST_F(AccMetalIndexFlat, TempPoolCachesSearchScratchBuffers) {
     const size_t poolBudget = 64ULL * 1024 * 1024;
     resources_->setTempMemoryPoolBytes(poolBudget);

@@ -57,6 +57,7 @@ faiss::Index* index_cpu_to_metal_gpu(
     config.useFloat16CoarseQuantizer = opts.useFloat16CoarseQuantizer;
     config.indicesOptions = opts.indicesOptions;
     config.interleavedLayout = opts.interleavedLayout;
+    config.storeTransposed = opts.storeTransposed;
 
     auto coarseQuantizerAllowed = [&](const faiss::IndexIVF* ivf) {
         if (!ivf || !ivf->quantizer) {

@@ -78,6 +78,7 @@ public:
 
     /// Whether this index stores vectors as float16 (half).
     bool useFloat16() const { return useFloat16_; }
+    bool storeTransposed() const { return storeTransposed_; }
 
 private:
     void ensureCapacity(idx_t newNtotal);
@@ -86,6 +87,7 @@ private:
     size_t elementSize() const { return useFloat16_ ? 2 : 4; }
 
     bool useFloat16_;
+    bool storeTransposed_;
 
     /// Vector storage (row-major). float32 or half depending on useFloat16_.
     id<MTLBuffer> vectorsBuffer_;

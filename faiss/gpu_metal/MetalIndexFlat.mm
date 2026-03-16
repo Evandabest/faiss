@@ -30,6 +30,73 @@ static void halfToFloat(const uint16_t* src, float* dst, size_t n) {
     }
 }
 
+static void copyF32RowMajorToTransposed(
+        const float* srcRowMajor,
+        float* dstTransposed,
+        idx_t n,
+        int d,
+        idx_t startVec,
+        size_t leadingDim) {
+    for (idx_t i = 0; i < n; ++i) {
+        for (int j = 0; j < d; ++j) {
+            dstTransposed[(size_t)j * leadingDim + (size_t)(startVec + i)] =
+                    srcRowMajor[(size_t)i * (size_t)d + (size_t)j];
+        }
+    }
+}
+
+static void copyF16RowMajorToTransposed(
+        const float* srcRowMajor,
+        uint16_t* dstTransposed,
+        idx_t n,
+        int d,
+        idx_t startVec,
+        size_t leadingDim) {
+    for (idx_t i = 0; i < n; ++i) {
+        for (int j = 0; j < d; ++j) {
+            __fp16 h = (__fp16)srcRowMajor[(size_t)i * (size_t)d + (size_t)j];
+            std::memcpy(
+                    &dstTransposed[(size_t)j * leadingDim + (size_t)(startVec + i)],
+                    &h,
+                    sizeof(uint16_t));
+        }
+    }
+}
+
+static void copyF32TransposedToRowMajor(
+        const float* srcTransposed,
+        float* dstRowMajor,
+        idx_t n,
+        int d,
+        idx_t startVec,
+        size_t leadingDim) {
+    for (idx_t i = 0; i < n; ++i) {
+        for (int j = 0; j < d; ++j) {
+            dstRowMajor[(size_t)i * (size_t)d + (size_t)j] =
+                    srcTransposed[(size_t)j * leadingDim + (size_t)(startVec + i)];
+        }
+    }
+}
+
+static void copyF16TransposedToRowMajor(
+        const uint16_t* srcTransposed,
+        float* dstRowMajor,
+        idx_t n,
+        int d,
+        idx_t startVec,
+        size_t leadingDim) {
+    for (idx_t i = 0; i < n; ++i) {
+        for (int j = 0; j < d; ++j) {
+            __fp16 h;
+            std::memcpy(
+                    &h,
+                    &srcTransposed[(size_t)j * leadingDim + (size_t)(startVec + i)],
+                    sizeof(uint16_t));
+            dstRowMajor[(size_t)i * (size_t)d + (size_t)j] = (float)h;
+        }
+    }
+}
+
 MetalIndexFlat::MetalIndexFlat(
         std::shared_ptr<MetalResources> resources,
         int dims,
@@ -38,6 +105,7 @@ MetalIndexFlat::MetalIndexFlat(
         MetalIndexConfig config)
         : MetalIndex(resources, dims, metric, metricArg, config),
           useFloat16_(config.useFloat16),
+          storeTransposed_(config.storeTransposed),
           vectorsBuffer_(nil),
           capacityVecs_(0) {
     FAISS_THROW_IF_NOT(metric_type == METRIC_L2 || metric_type == METRIC_INNER_PRODUCT);
@@ -63,10 +131,36 @@ void MetalIndexFlat::ensureCapacity(idx_t newNtotal) {
             resources_->allocBuffer(newSize, MetalAllocType::FlatData);
     FAISS_THROW_IF_NOT_MSG(newBuf != nil, "MetalIndexFlat: failed to allocate buffer");
     if (ntotal > 0 && vectorsBuffer_ != nil) {
-        std::memcpy(
-                [newBuf contents],
-                [vectorsBuffer_ contents],
-                (size_t)ntotal * (size_t)d * elementSize());
+        if (!storeTransposed_) {
+            std::memcpy(
+                    [newBuf contents],
+                    [vectorsBuffer_ contents],
+                    (size_t)ntotal * (size_t)d * elementSize());
+        } else {
+            const size_t oldLd = capacityVecs_;
+            const size_t newLd = newCap;
+            if (useFloat16_) {
+                const auto* src =
+                        reinterpret_cast<const uint16_t*>([vectorsBuffer_ contents]);
+                auto* dst = reinterpret_cast<uint16_t*>([newBuf contents]);
+                for (int j = 0; j < d; ++j) {
+                    std::memcpy(
+                            dst + (size_t)j * newLd,
+                            src + (size_t)j * oldLd,
+                            (size_t)ntotal * sizeof(uint16_t));
+                }
+            } else {
+                const auto* src =
+                        reinterpret_cast<const float*>([vectorsBuffer_ contents]);
+                auto* dst = reinterpret_cast<float*>([newBuf contents]);
+                for (int j = 0; j < d; ++j) {
+                    std::memcpy(
+                            dst + (size_t)j * newLd,
+                            src + (size_t)j * oldLd,
+                            (size_t)ntotal * sizeof(float));
+                }
+            }
+        }
         resources_->deallocBuffer(vectorsBuffer_, MetalAllocType::FlatData);
     }
     vectorsBuffer_ = newBuf;
@@ -79,13 +173,22 @@ void MetalIndexFlat::add(idx_t n, const float* x) {
     }
     ensureCapacity(ntotal + n);
     size_t count = (size_t)n * (size_t)d;
-    size_t offset = (size_t)ntotal * (size_t)d;
     if (useFloat16_) {
         auto* dst = reinterpret_cast<uint16_t*>([vectorsBuffer_ contents]);
-        floatToHalf(x, dst + offset, count);
+        if (storeTransposed_) {
+            copyF16RowMajorToTransposed(x, dst, n, d, ntotal, capacityVecs_);
+        } else {
+            size_t offset = (size_t)ntotal * (size_t)d;
+            floatToHalf(x, dst + offset, count);
+        }
     } else {
         auto* dst = reinterpret_cast<float*>([vectorsBuffer_ contents]);
-        std::memcpy(dst + offset, x, count * sizeof(float));
+        if (storeTransposed_) {
+            copyF32RowMajorToTransposed(x, dst, n, d, ntotal, capacityVecs_);
+        } else {
+            size_t offset = (size_t)ntotal * (size_t)d;
+            std::memcpy(dst + offset, x, count * sizeof(float));
+        }
     }
     for (idx_t i = 0; i < n; ++i) {
         ids_.push_back(ntotal + i);
@@ -100,13 +203,22 @@ void MetalIndexFlat::add_with_ids(idx_t n, const float* x, const idx_t* xids) {
     FAISS_THROW_IF_NOT(xids != nullptr);
     ensureCapacity(ntotal + n);
     size_t count = (size_t)n * (size_t)d;
-    size_t offset = (size_t)ntotal * (size_t)d;
     if (useFloat16_) {
         auto* dst = reinterpret_cast<uint16_t*>([vectorsBuffer_ contents]);
-        floatToHalf(x, dst + offset, count);
+        if (storeTransposed_) {
+            copyF16RowMajorToTransposed(x, dst, n, d, ntotal, capacityVecs_);
+        } else {
+            size_t offset = (size_t)ntotal * (size_t)d;
+            floatToHalf(x, dst + offset, count);
+        }
     } else {
         auto* dst = reinterpret_cast<float*>([vectorsBuffer_ contents]);
-        std::memcpy(dst + offset, x, count * sizeof(float));
+        if (storeTransposed_) {
+            copyF32RowMajorToTransposed(x, dst, n, d, ntotal, capacityVecs_);
+        } else {
+            size_t offset = (size_t)ntotal * (size_t)d;
+            std::memcpy(dst + offset, x, count * sizeof(float));
+        }
     }
     for (idx_t i = 0; i < n; ++i) {
         ids_.push_back(xids[i]);
@@ -162,20 +274,57 @@ void MetalIndexFlat::search(
     std::memcpy([queryBuf contents], x, queryBytes);
 
     const bool isL2 = (metric_type == METRIC_L2);
+    id<MTLBuffer> searchVectorsBuf = vectorsBuffer_;
+    id<MTLBuffer> transposedScratchBuf = nil;
+    if (storeTransposed_) {
+        const size_t vecBytes = (size_t)ntotal * (size_t)d * elementSize();
+        transposedScratchBuf = resources_->allocBuffer(
+                vecBytes, MetalAllocType::TemporaryMemoryBuffer);
+        FAISS_THROW_IF_NOT_MSG(
+                transposedScratchBuf != nil,
+                "MetalIndexFlat: failed to allocate transposed scratch buffer");
+        if (useFloat16_) {
+            const auto* src =
+                    reinterpret_cast<const uint16_t*>([vectorsBuffer_ contents]);
+            auto* dst = reinterpret_cast<uint16_t*>([transposedScratchBuf contents]);
+            for (idx_t i = 0; i < ntotal; ++i) {
+                for (int j = 0; j < d; ++j) {
+                    dst[(size_t)i * (size_t)d + (size_t)j] =
+                            src[(size_t)j * capacityVecs_ + (size_t)i];
+                }
+            }
+        } else {
+            const auto* src =
+                    reinterpret_cast<const float*>([vectorsBuffer_ contents]);
+            auto* dst = reinterpret_cast<float*>([transposedScratchBuf contents]);
+            for (idx_t i = 0; i < ntotal; ++i) {
+                for (int j = 0; j < d; ++j) {
+                    dst[(size_t)i * (size_t)d + (size_t)j] =
+                            src[(size_t)j * capacityVecs_ + (size_t)i];
+                }
+            }
+        }
+        searchVectorsBuf = transposedScratchBuf;
+    }
+
     bool ok;
     if (useFloat16_) {
         ok = runFlatSearchGPUFP16(
-                device, queue, queryBuf, vectorsBuffer_,
+                device, queue, queryBuf, searchVectorsBuf,
                 (int)n, (int)ntotal, d, (int)k, isL2,
                 outDistBuf, outIdxBuf, resources_);
     } else {
         ok = runFlatSearchGPU(
-                device, queue, queryBuf, vectorsBuffer_,
+                device, queue, queryBuf, searchVectorsBuf,
                 (int)n, (int)ntotal, d, (int)k, isL2,
                 outDistBuf, outIdxBuf, resources_);
     }
 
     resources_->deallocBuffer(queryBuf, MetalAllocType::TemporaryMemoryBuffer);
+    if (transposedScratchBuf != nil) {
+        resources_->deallocBuffer(
+                transposedScratchBuf, MetalAllocType::TemporaryMemoryBuffer);
+    }
     if (!ok) {
         resources_->deallocBuffer(outDistBuf, MetalAllocType::TemporaryMemoryBuffer);
         resources_->deallocBuffer(outIdxBuf, MetalAllocType::TemporaryMemoryBuffer);
@@ -202,10 +351,29 @@ void MetalIndexFlat::copyTo(faiss::IndexFlat* index) const {
     }
     size_t count = (size_t)ntotal * (size_t)d;
     std::vector<float> host(count);
-    if (useFloat16_) {
+    if (storeTransposed_) {
+        if (useFloat16_) {
+            copyF16TransposedToRowMajor(
+                    reinterpret_cast<const uint16_t*>([vectorsBuffer_ contents]),
+                    host.data(),
+                    ntotal,
+                    d,
+                    0,
+                    capacityVecs_);
+        } else {
+            copyF32TransposedToRowMajor(
+                    reinterpret_cast<const float*>([vectorsBuffer_ contents]),
+                    host.data(),
+                    ntotal,
+                    d,
+                    0,
+                    capacityVecs_);
+        }
+    } else if (useFloat16_) {
         halfToFloat(
                 reinterpret_cast<const uint16_t*>([vectorsBuffer_ contents]),
-                host.data(), count);
+                host.data(),
+                count);
     } else {
         std::memcpy(host.data(), [vectorsBuffer_ contents], count * sizeof(float));
     }
@@ -228,10 +396,29 @@ void MetalIndexFlat::copyFrom(const faiss::IndexFlat* index) {
 
     const float* src = index->get_xb();
     size_t count = (size_t)n * (size_t)d;
-    if (useFloat16_) {
-        floatToHalf(src,
+    if (storeTransposed_) {
+        if (useFloat16_) {
+            copyF16RowMajorToTransposed(
+                    src,
                     reinterpret_cast<uint16_t*>([vectorsBuffer_ contents]),
-                    count);
+                    n,
+                    d,
+                    0,
+                    capacityVecs_);
+        } else {
+            copyF32RowMajorToTransposed(
+                    src,
+                    reinterpret_cast<float*>([vectorsBuffer_ contents]),
+                    n,
+                    d,
+                    0,
+                    capacityVecs_);
+        }
+    } else if (useFloat16_) {
+        floatToHalf(
+                src,
+                reinterpret_cast<uint16_t*>([vectorsBuffer_ contents]),
+                count);
     } else {
         std::memcpy([vectorsBuffer_ contents], src, count * sizeof(float));
     }
@@ -281,14 +468,36 @@ void MetalIndexFlat::reconstruct_n(idx_t i0, idx_t ni, float* recons) const {
             (size_t)i0, (size_t)(i0 + ni), (size_t)ntotal);
     if (ni == 0) return;
     FAISS_THROW_IF_NOT(vectorsBuffer_ != nil);
-    size_t count = (size_t)ni * (size_t)d;
-    size_t offset = (size_t)i0 * (size_t)d;
-    if (useFloat16_) {
-        const auto* src = reinterpret_cast<const uint16_t*>([vectorsBuffer_ contents]);
-        halfToFloat(src + offset, recons, count);
+    if (storeTransposed_) {
+        if (useFloat16_) {
+            copyF16TransposedToRowMajor(
+                    reinterpret_cast<const uint16_t*>([vectorsBuffer_ contents]),
+                    recons,
+                    ni,
+                    d,
+                    i0,
+                    capacityVecs_);
+        } else {
+            copyF32TransposedToRowMajor(
+                    reinterpret_cast<const float*>([vectorsBuffer_ contents]),
+                    recons,
+                    ni,
+                    d,
+                    i0,
+                    capacityVecs_);
+        }
     } else {
-        const auto* src = reinterpret_cast<const float*>([vectorsBuffer_ contents]);
-        std::memcpy(recons, src + offset, count * sizeof(float));
+        size_t count = (size_t)ni * (size_t)d;
+        size_t offset = (size_t)i0 * (size_t)d;
+        if (useFloat16_) {
+            const auto* src =
+                    reinterpret_cast<const uint16_t*>([vectorsBuffer_ contents]);
+            halfToFloat(src + offset, recons, count);
+        } else {
+            const auto* src =
+                    reinterpret_cast<const float*>([vectorsBuffer_ contents]);
+            std::memcpy(recons, src + offset, count * sizeof(float));
+        }
     }
 }
 
