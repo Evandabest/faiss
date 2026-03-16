@@ -82,11 +82,30 @@ static std::unique_ptr<faiss::IndexIVFPQ> makeCpuIVFPQ(
 
 int main(int argc, char** argv) {
     int M = 16;
+    int fp16LutMode = -1; // -1=both, 0=f32 LUT, 1=f16 LUT
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--m") == 0 && i + 1 < argc) {
             M = std::atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--fp16-lut") == 0 && i + 1 < argc) {
+            const char* v = argv[++i];
+            if (strcmp(v, "0") == 0) {
+                fp16LutMode = 0;
+            } else if (strcmp(v, "1") == 0) {
+                fp16LutMode = 1;
+            } else if (strcmp(v, "both") == 0) {
+                fp16LutMode = -1;
+            } else {
+                std::fprintf(
+                        stderr,
+                        "Invalid --fp16-lut value '%s' (expected 0, 1, or both)\n",
+                        v);
+                return 2;
+            }
         } else {
-            std::fprintf(stderr, "Usage: %s [--m <subquantizers>]\n", argv[0]);
+            std::fprintf(
+                    stderr,
+                    "Usage: %s [--m <subquantizers>] [--fp16-lut <0|1|both>]\n",
+                    argv[0]);
             return 2;
         }
     }
@@ -134,9 +153,12 @@ int main(int argc, char** argv) {
     auto cpuIndex = makeCpuIVFPQ(d, nlist, M, nbits, nb, xb.data());
     cpuIndex->nprobe = static_cast<size_t>(nprobe);
 
-    faiss::gpu_metal::MetalIndexIVFPQ gpuIndex(
-            metalRes->getResources(),
-            cpuIndex.get());
+    std::vector<int> lutModes;
+    if (fp16LutMode == -1) {
+        lutModes = {0, 1};
+    } else {
+        lutModes = {fp16LutMode};
+    }
 
     const double payloadMemMB = (static_cast<double>(nb) *
                                  (cpuIndex->code_size + sizeof(faiss::idx_t))) /
@@ -148,12 +170,9 @@ int main(int argc, char** argv) {
 
         std::vector<float> cpuDist(static_cast<size_t>(nq) * k);
         std::vector<faiss::idx_t> cpuLabels(static_cast<size_t>(nq) * k);
-        std::vector<float> gpuDist(static_cast<size_t>(nq) * k);
-        std::vector<faiss::idx_t> gpuLabels(static_cast<size_t>(nq) * k);
 
         for (int i = 0; i < nWarmup; ++i) {
             cpuIndex->search(nq, xq.data(), k, cpuDist.data(), cpuLabels.data());
-            gpuIndex.search(nq, xq.data(), k, gpuDist.data(), gpuLabels.data());
         }
 
         double t0 = nowSeconds();
@@ -162,46 +181,66 @@ int main(int argc, char** argv) {
         }
         const double cpuMs = (nowSeconds() - t0) * 1000.0 / nRuns;
 
-        t0 = nowSeconds();
-        for (int i = 0; i < nRuns; ++i) {
-            gpuIndex.search(nq, xq.data(), k, gpuDist.data(), gpuLabels.data());
-        }
-        const double gpuMs = (nowSeconds() - t0) * 1000.0 / nRuns;
-
-        const double rec = recallAtK(nq, k, cpuLabels.data(), gpuLabels.data());
-
         std::printf("CPU IVFPQ:  %.3f ms per search (avg of %d runs)\n", cpuMs, nRuns);
-        std::printf(
-                "Metal IVFPQ: %.3f ms per search (avg of %d runs)\n",
-                gpuMs,
-                nRuns);
-        if (gpuMs > 0) {
-            std::printf("Speedup (CPU/Metal): %.2fx\n", cpuMs / gpuMs);
+
+        for (int mode : lutModes) {
+            const bool useFp16Lut = (mode == 1);
+            faiss::gpu_metal::MetalIndexConfig cfg;
+            cfg.useFloat16 = useFp16Lut;
+            faiss::gpu_metal::MetalIndexIVFPQ gpuIndex(
+                    metalRes->getResources(),
+                    cpuIndex.get(),
+                    cfg);
+
+            std::vector<float> gpuDist(static_cast<size_t>(nq) * k);
+            std::vector<faiss::idx_t> gpuLabels(static_cast<size_t>(nq) * k);
+
+            for (int i = 0; i < nWarmup; ++i) {
+                gpuIndex.search(nq, xq.data(), k, gpuDist.data(), gpuLabels.data());
+            }
+
+            t0 = nowSeconds();
+            for (int i = 0; i < nRuns; ++i) {
+                gpuIndex.search(nq, xq.data(), k, gpuDist.data(), gpuLabels.data());
+            }
+            const double gpuMs = (nowSeconds() - t0) * 1000.0 / nRuns;
+
+            const double rec = recallAtK(nq, k, cpuLabels.data(), gpuLabels.data());
+
+            std::printf(
+                    "Metal IVFPQ (%s LUT): %.3f ms per search (avg of %d runs)\n",
+                    useFp16Lut ? "fp16" : "fp32",
+                    gpuMs,
+                    nRuns);
+            if (gpuMs > 0) {
+                std::printf("Speedup (CPU/Metal): %.2fx\n", cpuMs / gpuMs);
+            }
+            std::printf("Queries/sec CPU:  %.0f\n", nq / (cpuMs / 1000.0));
+            std::printf("Queries/sec Metal: %.0f\n", nq / (gpuMs / 1000.0));
+            std::printf("Recall@%d (Metal vs CPU labels): %.6f\n", k, rec);
+            std::printf(
+                    "SUMMARY,index=IVFPQ,metric=L2,nb=%d,nq=%d,d=%d,nlist=%d,nprobe=%d,"
+                    "m=%d,nbits=%d,fp16_lut=%d,k=%d,cpu_ms=%.6f,gpu_ms=%.6f,cpu_qps=%.2f,"
+                    "gpu_qps=%.2f,speedup=%.6f,cpu_mem_mb=%.3f,metal_mem_mb=%.3f,"
+                    "recall_at_k=%.6f\n",
+                    nb,
+                    nq,
+                    d,
+                    nlist,
+                    nprobe,
+                    M,
+                    nbits,
+                    useFp16Lut ? 1 : 0,
+                    k,
+                    cpuMs,
+                    gpuMs,
+                    cpuMs > 0.0 ? (nq / (cpuMs / 1000.0)) : 0.0,
+                    gpuMs > 0.0 ? (nq / (gpuMs / 1000.0)) : 0.0,
+                    (cpuMs > 0.0 && gpuMs > 0.0) ? (cpuMs / gpuMs) : 0.0,
+                    payloadMemMB,
+                    payloadMemMB,
+                    rec);
         }
-        std::printf("Queries/sec CPU:  %.0f\n", nq / (cpuMs / 1000.0));
-        std::printf("Queries/sec Metal: %.0f\n", nq / (gpuMs / 1000.0));
-        std::printf("Recall@%d (Metal vs CPU labels): %.6f\n", k, rec);
-        std::printf(
-                "SUMMARY,index=IVFPQ,metric=L2,nb=%d,nq=%d,d=%d,nlist=%d,nprobe=%d,"
-                "m=%d,nbits=%d,k=%d,cpu_ms=%.6f,gpu_ms=%.6f,cpu_qps=%.2f,"
-                "gpu_qps=%.2f,speedup=%.6f,cpu_mem_mb=%.3f,metal_mem_mb=%.3f,"
-                "recall_at_k=%.6f\n",
-                nb,
-                nq,
-                d,
-                nlist,
-                nprobe,
-                M,
-                nbits,
-                k,
-                cpuMs,
-                gpuMs,
-                cpuMs > 0.0 ? (nq / (cpuMs / 1000.0)) : 0.0,
-                gpuMs > 0.0 ? (nq / (gpuMs / 1000.0)) : 0.0,
-                (cpuMs > 0.0 && gpuMs > 0.0) ? (cpuMs / gpuMs) : 0.0,
-                payloadMemMB,
-                payloadMemMB,
-                rec);
         std::printf("\n");
     }
 
