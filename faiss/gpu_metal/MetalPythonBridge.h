@@ -83,6 +83,9 @@ struct MetalBridgeDistanceParams {
 
 /// Same names as GPU API for unified Python binding.
 int get_num_gpus();
+void gpu_profiler_start();
+void gpu_profiler_stop();
+void gpu_sync_all_devices();
 
 /// Clone CPU index to Metal GPU. Caller owns returned index.
 /// options supports a Metal-compatible subset of GpuClonerOptions.

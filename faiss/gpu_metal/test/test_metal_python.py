@@ -29,6 +29,12 @@ class TestMetalPython(unittest.TestCase):
         res = faiss.StandardGpuResources()
         self.assertIsNotNone(res)
 
+    def test_profiler_and_sync_hooks(self):
+        """Profiler/sync hooks are wired on Metal Python API."""
+        faiss.gpu_profiler_start()
+        faiss.gpu_sync_all_devices()
+        faiss.gpu_profiler_stop()
+
     def test_index_cpu_to_gpu_flat_search(self):
         if faiss.get_num_gpus() == 0:
             self.skipTest("No Metal device")

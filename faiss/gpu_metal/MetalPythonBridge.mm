@@ -11,12 +11,17 @@
 #import "MetalDistance.h"
 #import "StandardMetalResources.h"
 #include <faiss/impl/FaissAssert.h>
+#include <atomic>
+#include <cstdlib>
+#include <cstdio>
 #include <memory>
 
 namespace faiss {
 namespace gpu_metal {
 
 namespace {
+
+std::atomic<int> gMetalProfilerDepth{0};
 
 ::faiss::gpu_metal::MetalClonerOptions toCoreClonerOptions(
         const MetalBridgeClonerOptions* opts) {
@@ -60,6 +65,32 @@ StandardMetalResourcesHolder::~StandardMetalResourcesHolder() {
 }
 
 // get_num_gpus() is implemented in MetalCloner.mm; bridge header declares it for SWIG.
+void gpu_profiler_start() {
+    const int depth = gMetalProfilerDepth.fetch_add(1) + 1;
+    if (std::getenv("FAISS_METAL_PROFILE_LOG")) {
+        std::fprintf(stderr, "[faiss_metal] gpu_profiler_start depth=%d\n", depth);
+    }
+}
+
+void gpu_profiler_stop() {
+    int depth = gMetalProfilerDepth.load();
+    while (depth > 0 &&
+           !gMetalProfilerDepth.compare_exchange_weak(depth, depth - 1)) {
+    }
+    if (std::getenv("FAISS_METAL_PROFILE_LOG")) {
+        std::fprintf(
+                stderr,
+                "[faiss_metal] gpu_profiler_stop depth=%d\n",
+                gMetalProfilerDepth.load());
+    }
+}
+
+void gpu_sync_all_devices() {
+    auto res = std::make_shared<MetalResources>();
+    if (res && res->isAvailable()) {
+        res->synchronize();
+    }
+}
 
 faiss::Index* index_cpu_to_gpu(
         StandardMetalResourcesHolder* res,

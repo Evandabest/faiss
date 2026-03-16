@@ -462,7 +462,7 @@ int64_t cast_cudastream_t_to_integer(cudaStream_t x) {
 %{
 #include <faiss/gpu_metal/MetalPythonBridge.h>
 using faiss::idx_t;
-using faiss::gpu_metal::MetalClonerOptions;
+using faiss::gpu_metal::MetalBridgeClonerOptions;
 
 int get_num_gpus()
 {
@@ -471,14 +471,17 @@ int get_num_gpus()
 
 void gpu_profiler_start()
 {
+    return faiss::gpu_metal::gpu_profiler_start();
 }
 
 void gpu_profiler_stop()
 {
+    return faiss::gpu_metal::gpu_profiler_stop();
 }
 
 void gpu_sync_all_devices()
 {
+    return faiss::gpu_metal::gpu_sync_all_devices();
 }
 %}
 
