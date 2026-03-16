@@ -2590,6 +2590,100 @@ kernel void ivfpq_build_lut_ip(
     outLookup[(tgid * 256) + c] = acc;
 }
 
+kernel void ivfpq_build_lut_l2_f16(
+    device const float* queries         [[buffer(0)]],
+    device const int*   coarseAssign    [[buffer(1)]],
+    device const float* coarseCentroids [[buffer(2)]],
+    device const float* pqCentroids     [[buffer(3)]],
+    device half*        outLookup       [[buffer(4)]],
+    constant uint*      params          [[buffer(5)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid [[thread_position_in_threadgroup]]
+) {
+    uint nq = params[0];
+    uint d = params[1];
+    uint M = params[2];
+    uint nprobe = params[3];
+    if (M == 0 || nprobe == 0) return;
+    uint dsub = d / M;
+    if (dsub == 0) return;
+
+    uint totalTG = nq * nprobe * M;
+    if (tgid >= totalTG || tid >= 256) return;
+    uint m = tgid % M;
+    uint qp = tgid / M;
+    uint pi = qp % nprobe;
+    uint qi = qp / nprobe;
+    if (qi >= nq) return;
+    uint c = tid;
+
+    int listNo = coarseAssign[qi * nprobe + pi];
+    if (listNo < 0) {
+        outLookup[(tgid * 256) + c] = half(65504.0f);
+        return;
+    }
+
+    threadgroup float tgResidual[256];
+    uint qbase = qi * d + m * dsub;
+    uint cbase = uint(listNo) * d + m * dsub;
+    uint pqbase = ((m * 256 + c) * dsub);
+    for (uint j = tid; j < dsub; j += 256) {
+        tgResidual[j] = queries[qbase + j] - coarseCentroids[cbase + j];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float acc = 0.0f;
+    for (uint j = 0; j < dsub; ++j) {
+        float diff = tgResidual[j] - pqCentroids[pqbase + j];
+        acc += diff * diff;
+    }
+    outLookup[(tgid * 256) + c] = half(acc);
+}
+
+kernel void ivfpq_build_lut_ip_f16(
+    device const float* queries         [[buffer(0)]],
+    device const int*   coarseAssign    [[buffer(1)]],
+    device const float* coarseCentroids [[buffer(2)]],
+    device const float* pqCentroids     [[buffer(3)]],
+    device half*        outLookup       [[buffer(4)]],
+    constant uint*      params          [[buffer(5)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint tid [[thread_position_in_threadgroup]]
+) {
+    (void)coarseAssign;
+    (void)coarseCentroids;
+
+    uint nq = params[0];
+    uint d = params[1];
+    uint M = params[2];
+    uint nprobe = params[3];
+    if (M == 0 || nprobe == 0) return;
+    uint dsub = d / M;
+    if (dsub == 0) return;
+
+    uint totalTG = nq * nprobe * M;
+    if (tgid >= totalTG || tid >= 256) return;
+    uint m = tgid % M;
+    uint qp = tgid / M;
+    uint qi = qp / nprobe;
+    if (qi >= nq) return;
+    uint c = tid;
+
+    threadgroup float tgQuery[256];
+    uint qbase = qi * d + m * dsub;
+    uint pqbase = ((m * 256 + c) * dsub);
+    for (uint j = tid; j < dsub; j += 256) {
+        tgQuery[j] = queries[qbase + j];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float acc = 0.0f;
+    for (uint j = 0; j < dsub; ++j) {
+        acc += tgQuery[j] * pqCentroids[pqbase + j];
+    }
+    outLookup[(tgid * 256) + c] = half(acc);
+}
+
 kernel void ivf_scan_list_pq8(
     device const float* lookupTable [[buffer(0)]],
     device const uchar* codes       [[buffer(1)]],

@@ -236,6 +236,7 @@ public:
     void encodeIVFPQBuildLookupTables(
             id<MTLComputeCommandEncoder> enc,
             bool isL2,
+            bool outFp16,
             id<MTLBuffer> queries,
             id<MTLBuffer> coarseAssign,
             id<MTLBuffer> coarseCentroids,

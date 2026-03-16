@@ -2491,6 +2491,7 @@ bool runMetalBuildIVFPQLookupTables(
         int M,
         int nprobe,
         bool isL2,
+        bool lookupFp16,
         id<MTLBuffer> outLookup) {
     if (!device || !queue || !queries || !coarseAssign || !pqCentroids ||
         !outLookup) {
@@ -2507,6 +2508,7 @@ bool runMetalBuildIVFPQLookupTables(
     K.encodeIVFPQBuildLookupTables(
             enc,
             isL2,
+            lookupFp16,
             queries,
             coarseAssign,
             coarseCentroids,
@@ -2569,6 +2571,7 @@ bool runMetalIVFPQFullSearch(
     K.encodeIVFPQBuildLookupTables(
             enc,
             isL2,
+            lookupFp16,
             queries,
             coarseAssign,
             coarseCentroids,

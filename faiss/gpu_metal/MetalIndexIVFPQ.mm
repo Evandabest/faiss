@@ -381,7 +381,7 @@ void MetalIndexIVFPQ::search(
             : 0;
     bool lutBuiltOnGpu = false;
     bool ok = false;
-    if (!useFp16Lut && gpuIvf_->pqCentroidsBuffer()) {
+    if (gpuIvf_->pqCentroidsBuffer()) {
         ok = runMetalIVFPQFullSearch(
                 device,
                 queue,
@@ -400,7 +400,7 @@ void MetalIndexIVFPQ::search(
                 (int)k,
                 (int)nprobe,
                 avgListLen,
-                false,
+                useFp16Lut,
                 isL2,
                 searchOutDistBuf_,
                 searchOutIdxBuf_,

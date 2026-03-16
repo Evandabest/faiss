@@ -269,6 +269,7 @@ bool runMetalBuildIVFPQLookupTables(
         int M,
         int nprobe,
         bool isL2,
+        bool lookupFp16,
         id<MTLBuffer> outLookup);
 
 /// Fused IVFPQ path: build LUT on GPU + scan lists + merge in one command

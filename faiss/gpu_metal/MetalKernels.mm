@@ -525,6 +525,7 @@ void MetalKernels::encodeConvertF32ToF16(
 void MetalKernels::encodeIVFPQBuildLookupTables(
         id<MTLComputeCommandEncoder> enc,
         bool isL2,
+        bool outFp16,
         id<MTLBuffer> queries,
         id<MTLBuffer> coarseAssign,
         id<MTLBuffer> coarseCentroids,
@@ -534,8 +535,13 @@ void MetalKernels::encodeIVFPQBuildLookupTables(
         int d,
         int M,
         int nprobe) {
-    [enc setComputePipelineState:
-            pipeline(isL2 ? "ivfpq_build_lut_l2" : "ivfpq_build_lut_ip")];
+    const char* name = nullptr;
+    if (isL2) {
+        name = outFp16 ? "ivfpq_build_lut_l2_f16" : "ivfpq_build_lut_l2";
+    } else {
+        name = outFp16 ? "ivfpq_build_lut_ip_f16" : "ivfpq_build_lut_ip";
+    }
+    [enc setComputePipelineState:pipeline(name)];
     [enc setBuffer:queries         offset:0 atIndex:0];
     [enc setBuffer:coarseAssign    offset:0 atIndex:1];
     [enc setBuffer:coarseCentroids offset:0 atIndex:2];
