@@ -18,6 +18,7 @@
 #import <mach/mach.h>
 #import <mach/vm_statistics.h>
 #include <faiss/impl/FaissAssert.h>
+#include <faiss/utils/bf16.h>
 #include <faiss/utils/fp16.h>
 #include <algorithm>
 #include <cstdlib>
@@ -1042,6 +1043,51 @@ void bfKnn_tilingFP16_(
     }
 }
 
+const float* materializeQueryF32_(
+        const MetalDistanceParams& args,
+        std::vector<float>& convertedQueries) {
+    const size_t numQueryElems = (size_t)args.numQueries * args.dims;
+    if (args.queryType == MetalDistanceDataType::F32) {
+        return static_cast<const float*>(args.queries);
+    }
+    if (args.queryType == MetalDistanceDataType::F16) {
+        const uint16_t* qh = static_cast<const uint16_t*>(args.queries);
+        convertedQueries.resize(numQueryElems);
+        for (size_t i = 0; i < numQueryElems; ++i) {
+            convertedQueries[i] = faiss::decode_fp16(qh[i]);
+        }
+        return convertedQueries.data();
+    }
+    if (args.queryType == MetalDistanceDataType::BF16) {
+        const uint16_t* qh = static_cast<const uint16_t*>(args.queries);
+        convertedQueries.resize(numQueryElems);
+        for (size_t i = 0; i < numQueryElems; ++i) {
+            convertedQueries[i] = faiss::decode_bf16(qh[i]);
+        }
+        return convertedQueries.data();
+    }
+    FAISS_THROW_MSG("bfKnn(params): unknown queryType");
+    return nullptr;
+}
+
+const float* materializeVectorF32IfNeeded_(
+        const MetalDistanceParams& args,
+        std::vector<float>& convertedVectors) {
+    if (args.vectorType == MetalDistanceDataType::F32) {
+        return static_cast<const float*>(args.vectors);
+    }
+    if (args.vectorType == MetalDistanceDataType::BF16) {
+        const size_t numVectorElems = (size_t)args.numVectors * args.dims;
+        const uint16_t* vh = static_cast<const uint16_t*>(args.vectors);
+        convertedVectors.resize(numVectorElems);
+        for (size_t i = 0; i < numVectorElems; ++i) {
+            convertedVectors[i] = faiss::decode_bf16(vh[i]);
+        }
+        return convertedVectors.data();
+    }
+    return nullptr;
+}
+
 void bfKnn(
         std::shared_ptr<MetalResources> resources,
         const MetalDistanceParams& args) {
@@ -1051,12 +1097,6 @@ void bfKnn(
     FAISS_THROW_IF_NOT_MSG(
             args.vectorsRowMajor && args.queriesRowMajor,
             "bfKnn(params): only row-major vectors/queries are supported");
-    FAISS_THROW_IF_NOT_MSG(
-            args.vectorType != MetalDistanceDataType::BF16,
-            "bfKnn(params): vectorType BF16 is not yet supported on Metal");
-    FAISS_THROW_IF_NOT_MSG(
-            args.queryType != MetalDistanceDataType::BF16,
-            "bfKnn(params): queryType BF16 is not yet supported on Metal");
     FAISS_THROW_IF_NOT_MSG(
             args.metric != METRIC_Lp,
             "bfKnn(params): METRIC_Lp is not supported on Metal");
@@ -1068,21 +1108,10 @@ void bfKnn(
     FAISS_THROW_IF_NOT(args.numQueries > 0);
     FAISS_THROW_IF_NOT(args.dims > 0);
 
-    const size_t numQueryElems = (size_t)args.numQueries * args.dims;
     std::vector<float> convertedQueries;
-    const float* queries = nullptr;
-    if (args.queryType == MetalDistanceDataType::F32) {
-        queries = static_cast<const float*>(args.queries);
-    } else if (args.queryType == MetalDistanceDataType::F16) {
-        const uint16_t* qh = static_cast<const uint16_t*>(args.queries);
-        convertedQueries.resize(numQueryElems);
-        for (size_t i = 0; i < numQueryElems; ++i) {
-            convertedQueries[i] = faiss::decode_fp16(qh[i]);
-        }
-        queries = convertedQueries.data();
-    } else {
-        FAISS_THROW_MSG("bfKnn(params): unknown queryType");
-    }
+    const float* queries = materializeQueryF32_(args, convertedQueries);
+    std::vector<float> convertedVectors;
+    const float* vectorsF32 = materializeVectorF32IfNeeded_(args, convertedVectors);
 
     std::vector<float> tmpDistances;
     if (args.ignoreOutDistances) {
@@ -1107,11 +1136,12 @@ void bfKnn(
                     args.metric,
                     outDist,
                     outIdx);
-        } else if (args.vectorType == MetalDistanceDataType::F32) {
-            const float* vectors = static_cast<const float*>(args.vectors);
+        } else if (
+                args.vectorType == MetalDistanceDataType::F32 ||
+                args.vectorType == MetalDistanceDataType::BF16) {
             bfKnn(
                     resources,
-                    vectors,
+                    vectorsF32,
                     args.numVectors,
                     queries,
                     args.numQueries,
@@ -1141,11 +1171,12 @@ void bfKnn(
                     args.metric,
                     outDist,
                     tmpIdx.data());
-        } else if (args.vectorType == MetalDistanceDataType::F32) {
-            const float* vectors = static_cast<const float*>(args.vectors);
+        } else if (
+                args.vectorType == MetalDistanceDataType::F32 ||
+                args.vectorType == MetalDistanceDataType::BF16) {
             bfKnn(
                     resources,
-                    vectors,
+                    vectorsF32,
                     args.numVectors,
                     queries,
                     args.numQueries,
@@ -1179,12 +1210,6 @@ void bfKnn_tiling(
             args.vectorsRowMajor && args.queriesRowMajor,
             "bfKnn_tiling(params): only row-major vectors/queries are supported");
     FAISS_THROW_IF_NOT_MSG(
-            args.vectorType != MetalDistanceDataType::BF16,
-            "bfKnn_tiling(params): vectorType BF16 is not yet supported on Metal");
-    FAISS_THROW_IF_NOT_MSG(
-            args.queryType != MetalDistanceDataType::BF16,
-            "bfKnn_tiling(params): queryType BF16 is not yet supported on Metal");
-    FAISS_THROW_IF_NOT_MSG(
             args.metric != METRIC_Lp,
             "bfKnn_tiling(params): METRIC_Lp is not supported on Metal");
     FAISS_THROW_IF_NOT(args.vectors);
@@ -1195,21 +1220,10 @@ void bfKnn_tiling(
     FAISS_THROW_IF_NOT(args.numQueries > 0);
     FAISS_THROW_IF_NOT(args.dims > 0);
 
-    const size_t numQueryElems = (size_t)args.numQueries * args.dims;
     std::vector<float> convertedQueries;
-    const float* queries = nullptr;
-    if (args.queryType == MetalDistanceDataType::F32) {
-        queries = static_cast<const float*>(args.queries);
-    } else if (args.queryType == MetalDistanceDataType::F16) {
-        const uint16_t* qh = static_cast<const uint16_t*>(args.queries);
-        convertedQueries.resize(numQueryElems);
-        for (size_t i = 0; i < numQueryElems; ++i) {
-            convertedQueries[i] = faiss::decode_fp16(qh[i]);
-        }
-        queries = convertedQueries.data();
-    } else {
-        FAISS_THROW_MSG("bfKnn_tiling(params): unknown queryType");
-    }
+    const float* queries = materializeQueryF32_(args, convertedQueries);
+    std::vector<float> convertedVectors;
+    const float* vectorsF32 = materializeVectorF32IfNeeded_(args, convertedVectors);
 
     std::vector<float> tmpDistances;
     if (args.ignoreOutDistances) {
@@ -1236,11 +1250,12 @@ void bfKnn_tiling(
                     outIdx,
                     vectorsMemoryLimit,
                     queriesMemoryLimit);
-        } else if (args.vectorType == MetalDistanceDataType::F32) {
-            const float* vectors = static_cast<const float*>(args.vectors);
+        } else if (
+                args.vectorType == MetalDistanceDataType::F32 ||
+                args.vectorType == MetalDistanceDataType::BF16) {
             bfKnn_tiling(
                     resources,
-                    vectors,
+                    vectorsF32,
                     args.numVectors,
                     queries,
                     args.numQueries,
@@ -1274,11 +1289,12 @@ void bfKnn_tiling(
                     tmpIdx.data(),
                     vectorsMemoryLimit,
                     queriesMemoryLimit);
-        } else if (args.vectorType == MetalDistanceDataType::F32) {
-            const float* vectors = static_cast<const float*>(args.vectors);
+        } else if (
+                args.vectorType == MetalDistanceDataType::F32 ||
+                args.vectorType == MetalDistanceDataType::BF16) {
             bfKnn_tiling(
                     resources,
-                    vectors,
+                    vectorsF32,
                     args.numVectors,
                     queries,
                     args.numQueries,

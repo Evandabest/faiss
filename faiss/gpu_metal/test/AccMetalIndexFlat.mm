@@ -14,6 +14,7 @@
 #include <faiss/gpu_metal/MetalIndexFlat.h>
 #include <faiss/gpu_metal/MetalResources.h>
 #include <faiss/gpu_metal/StandardMetalResources.h>
+#include <faiss/utils/bf16.h>
 #include <faiss/utils/random.h>
 #include <faiss/utils/fp16.h>
 #include <gtest/gtest.h>
@@ -1144,6 +1145,65 @@ TEST_F(AccMetalIndexFlat, BfKnnParamsF16MatchesQuantizedCpuL2) {
     args.numVectors = nb;
     args.queries = queriesF16.data();
     args.queryType = faiss::gpu_metal::MetalDistanceDataType::F16;
+    args.numQueries = nq;
+    args.outDistances = testDist.data();
+    args.outIndicesType = faiss::gpu_metal::MetalIndicesDataType::I64;
+    args.outIndices = testLab.data();
+
+    faiss::gpu_metal::bfKnn(resources_, args);
+
+    compareSearchResultsAllowTieBreak(
+            nq,
+            k,
+            refDist.data(),
+            refLab.data(),
+            testDist.data(),
+            testLab.data());
+}
+
+TEST_F(AccMetalIndexFlat, BfKnnParamsBF16MatchesQuantizedCpuL2) {
+    const int dim = 48;
+    const int nb = 7000;
+    const int nq = 56;
+    const int k = 8;
+
+    std::vector<float> vecsF32((size_t)nb * dim);
+    std::vector<float> queriesF32((size_t)nq * dim);
+    faiss::float_rand(vecsF32.data(), vecsF32.size(), 707);
+    faiss::float_rand(queriesF32.data(), queriesF32.size(), 808);
+
+    std::vector<uint16_t> vecsBF16((size_t)nb * dim);
+    std::vector<uint16_t> queriesBF16((size_t)nq * dim);
+    std::vector<float> vecsQuantF32((size_t)nb * dim);
+    std::vector<float> queriesQuantF32((size_t)nq * dim);
+    for (size_t i = 0; i < vecsF32.size(); ++i) {
+        vecsBF16[i] = faiss::encode_bf16(vecsF32[i]);
+        vecsQuantF32[i] = faiss::decode_bf16(vecsBF16[i]);
+    }
+    for (size_t i = 0; i < queriesF32.size(); ++i) {
+        queriesBF16[i] = faiss::encode_bf16(queriesF32[i]);
+        queriesQuantF32[i] = faiss::decode_bf16(queriesBF16[i]);
+    }
+
+    faiss::IndexFlatL2 cpuIndex(dim);
+    cpuIndex.add(nb, vecsQuantF32.data());
+
+    std::vector<float> refDist((size_t)nq * k);
+    std::vector<faiss::idx_t> refLab((size_t)nq * k, -1);
+    cpuIndex.search(nq, queriesQuantF32.data(), k, refDist.data(), refLab.data());
+
+    std::vector<float> testDist((size_t)nq * k);
+    std::vector<faiss::idx_t> testLab((size_t)nq * k, -1);
+
+    faiss::gpu_metal::MetalDistanceParams args;
+    args.metric = faiss::METRIC_L2;
+    args.k = k;
+    args.dims = dim;
+    args.vectors = vecsBF16.data();
+    args.vectorType = faiss::gpu_metal::MetalDistanceDataType::BF16;
+    args.numVectors = nb;
+    args.queries = queriesBF16.data();
+    args.queryType = faiss::gpu_metal::MetalDistanceDataType::BF16;
     args.numQueries = nq;
     args.outDistances = testDist.data();
     args.outIndicesType = faiss::gpu_metal::MetalIndicesDataType::I64;

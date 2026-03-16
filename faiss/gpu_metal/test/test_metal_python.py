@@ -205,15 +205,17 @@ class TestMetalPython(unittest.TestCase):
         np.testing.assert_allclose(D, D_cpu, rtol=2e-3, atol=2e-3)
         np.testing.assert_array_equal(I, I_cpu)
 
-    def test_bfknn_params_bf16_still_rejected(self):
-        """BF16 enum is exposed but not implemented on Metal yet."""
+    def test_bfknn_params_bf16_supported(self):
+        """Params API accepts BF16 vectors/queries (converted to F32 internally)."""
         if faiss.get_num_gpus() == 0:
             self.skipTest("No Metal device")
+        if not hasattr(np, "bfloat16"):
+            self.skipTest("numpy bfloat16 dtype not available")
 
-        d, nb, nq, k = 16, 128, 10, 4
+        d, nb, nq, k = 16, 1200, 24, 6
         np.random.seed(9300)
-        xb = np.random.randn(nb, d).astype(np.float32)
-        xq = np.random.randn(nq, d).astype(np.float32)
+        xb = np.random.randn(nb, d).astype(np.float32).astype(np.bfloat16)
+        xq = np.random.randn(nq, d).astype(np.float32).astype(np.bfloat16)
         D = np.empty((nq, k), dtype=np.float32)
         I = np.empty((nq, k), dtype=np.int64)
 
@@ -235,9 +237,15 @@ class TestMetalPython(unittest.TestCase):
         args.device = 0
         args.use_cuvs = False
 
+        cpu_index = faiss.IndexFlatL2(d)
+        cpu_index.add(xb.astype(np.float32))
+        D_cpu, I_cpu = cpu_index.search(xq.astype(np.float32), k)
+
         res = faiss.StandardGpuResources()
-        with self.assertRaises(RuntimeError):
-            faiss.bfKnn(res, args)
+        faiss.bfKnn(res, args)
+
+        np.testing.assert_allclose(D, D_cpu, rtol=2e-3, atol=2e-3)
+        np.testing.assert_array_equal(I, I_cpu)
 
 
 if __name__ == "__main__":
