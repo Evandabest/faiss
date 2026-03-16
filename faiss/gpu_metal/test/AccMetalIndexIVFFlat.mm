@@ -10,8 +10,8 @@
  */
 
 #include <faiss/IndexFlat.h>
-#include <faiss/IndexIDMap.h>
 #include <faiss/IndexIVFFlat.h>
+#include <faiss/IndexScalarQuantizer.h>
 #include <faiss/invlists/DirectMap.h>
 #include <faiss/gpu_metal/MetalCloner.h>
 #include <faiss/gpu_metal/MetalIndexIVFFlat.h>
@@ -811,9 +811,10 @@ TEST_F(AccMetalIndexIVFFlat, ClonerRejectsNonFlatCoarseQuantizerByDefault) {
     std::vector<float> vecs(nb * dim);
     faiss::float_rand(vecs.data(), vecs.size(), 414);
 
-    auto* idMapQ = new faiss::IndexIDMap(new faiss::IndexFlatL2(dim));
+    auto* sqQ = new faiss::IndexScalarQuantizer(
+            dim, faiss::ScalarQuantizer::QT_8bit, faiss::METRIC_L2);
     auto cpuIdx = std::make_unique<faiss::IndexIVFFlat>(
-            idMapQ, (size_t)dim, (size_t)nlist, faiss::METRIC_L2);
+            sqQ, (size_t)dim, (size_t)nlist, faiss::METRIC_L2);
     cpuIdx->own_fields = true;
     cpuIdx->train(nb, vecs.data());
     cpuIdx->add(nb, vecs.data());
@@ -829,9 +830,10 @@ TEST_F(AccMetalIndexIVFFlat, ClonerAllowsNonFlatCoarseQuantizerWhenEnabled) {
     faiss::float_rand(vecs.data(), vecs.size(), 515);
     faiss::float_rand(queries.data(), queries.size(), 516);
 
-    auto* idMapQ = new faiss::IndexIDMap(new faiss::IndexFlatL2(dim));
+    auto* sqQ = new faiss::IndexScalarQuantizer(
+            dim, faiss::ScalarQuantizer::QT_8bit, faiss::METRIC_L2);
     auto cpuIdx = std::make_unique<faiss::IndexIVFFlat>(
-            idMapQ, (size_t)dim, (size_t)nlist, faiss::METRIC_L2);
+            sqQ, (size_t)dim, (size_t)nlist, faiss::METRIC_L2);
     cpuIdx->own_fields = true;
     cpuIdx->train(nb, vecs.data());
     cpuIdx->add(nb, vecs.data());
