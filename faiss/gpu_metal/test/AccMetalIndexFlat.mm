@@ -1042,3 +1042,60 @@ TEST_F(AccMetalIndexFlat, BfKnnTilingMatchesCpuL2) {
             testDist.data(),
             testLab.data());
 }
+
+TEST_F(AccMetalIndexFlat, BfKnnParamsTilingI32MatchesCpuL2) {
+    const int dim = 64;
+    const int nb = 12000;
+    const int nq = 96;
+    const int k = 10;
+
+    std::vector<float> vecs((size_t)nb * dim);
+    std::vector<float> queries((size_t)nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 303);
+    faiss::float_rand(queries.data(), queries.size(), 404);
+
+    faiss::IndexFlatL2 cpuIndex(dim);
+    cpuIndex.add(nb, vecs.data());
+
+    std::vector<float> refDist((size_t)nq * k);
+    std::vector<faiss::idx_t> refLab((size_t)nq * k, -1);
+    cpuIndex.search(nq, queries.data(), k, refDist.data(), refLab.data());
+
+    std::vector<float> testDist((size_t)nq * k);
+    std::vector<int32_t> testLabI32((size_t)nq * k, -1);
+
+    faiss::gpu_metal::MetalDistanceParams args;
+    args.metric = faiss::METRIC_L2;
+    args.k = k;
+    args.dims = dim;
+    args.vectors = vecs.data();
+    args.numVectors = nb;
+    args.queries = queries.data();
+    args.numQueries = nq;
+    args.outDistances = testDist.data();
+    args.outIndicesType = faiss::gpu_metal::MetalIndicesDataType::I32;
+    args.outIndices = testLabI32.data();
+
+    const size_t vectorsMemoryLimit = (size_t)dim * sizeof(float) * 1800;
+    const size_t queriesMemoryLimit =
+            ((size_t)dim * sizeof(float) + (size_t)k * (sizeof(float) + sizeof(int32_t))) * 32;
+
+    faiss::gpu_metal::bfKnn_tiling(
+            resources_,
+            args,
+            vectorsMemoryLimit,
+            queriesMemoryLimit);
+
+    std::vector<faiss::idx_t> testLab((size_t)nq * k, -1);
+    for (size_t i = 0; i < testLab.size(); ++i) {
+        testLab[i] = (faiss::idx_t)testLabI32[i];
+    }
+
+    compareSearchResultsAllowTieBreak(
+            nq,
+            k,
+            refDist.data(),
+            refLab.data(),
+            testDist.data(),
+            testLab.data());
+}

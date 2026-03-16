@@ -15,12 +15,49 @@
 
 #include <faiss/MetricType.h>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 
 namespace faiss {
 namespace gpu_metal {
 
 class MetalResources;
+
+/// Scalar type of distance input vectors for params-based API.
+enum class MetalDistanceDataType {
+    F32 = 1,
+};
+
+/// Scalar type of output indices for params-based API.
+enum class MetalIndicesDataType {
+    I64 = 1,
+    I32,
+};
+
+/// Arguments to brute-force Metal k-nearest-neighbor searching.
+/// This is a Metal-side counterpart to CUDA's GpuDistanceParams with a reduced
+/// supported surface (row-major F32 vectors/queries only).
+struct MetalDistanceParams {
+    faiss::MetricType metric = METRIC_L2;
+    float metricArg = 0.0f;
+    int k = 0;
+    int dims = 0;
+
+    const void* vectors = nullptr;
+    MetalDistanceDataType vectorType = MetalDistanceDataType::F32;
+    bool vectorsRowMajor = true;
+    idx_t numVectors = 0;
+
+    const void* queries = nullptr;
+    MetalDistanceDataType queryType = MetalDistanceDataType::F32;
+    bool queriesRowMajor = true;
+    idx_t numQueries = 0;
+
+    float* outDistances = nullptr;
+    bool ignoreOutDistances = false;
+    MetalIndicesDataType outIndicesType = MetalIndicesDataType::I64;
+    void* outIndices = nullptr;
+};
 
 /// Calculate tile sizes for distance computation (mirrors CUDA's chooseTileSize).
 /// Determines optimal query and vector tile dimensions. \p availableMem is the
@@ -308,6 +345,11 @@ void bfKnn(
         float* outDistances,
         idx_t* outIndices);
 
+/// Params-based bfKnn overload (GpuDistanceParams-like API).
+void bfKnn(
+        std::shared_ptr<MetalResources> resources,
+        const MetalDistanceParams& args);
+
 /// Memory-budgeted brute-force k-NN (Metal equivalent of CUDA bfKnn_tiling).
 /// If limits are non-zero, vectors and/or queries are processed in CPU-side
 /// shards and merged into final top-k results.
@@ -327,6 +369,13 @@ void bfKnn_tiling(
         faiss::MetricType metric,
         float* outDistances,
         idx_t* outIndices,
+        size_t vectorsMemoryLimit,
+        size_t queriesMemoryLimit);
+
+/// Params-based bfKnn_tiling overload (GpuDistanceParams-like API).
+void bfKnn_tiling(
+        std::shared_ptr<MetalResources> resources,
+        const MetalDistanceParams& args,
         size_t vectorsMemoryLimit,
         size_t queriesMemoryLimit);
 

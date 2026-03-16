@@ -800,6 +800,158 @@ void bfKnn_tiling(
     }
 }
 
+void bfKnn(
+        std::shared_ptr<MetalResources> resources,
+        const MetalDistanceParams& args) {
+    FAISS_THROW_IF_NOT_MSG(
+            args.metric == METRIC_L2 || args.metric == METRIC_INNER_PRODUCT,
+            "bfKnn(params): only METRIC_L2 and METRIC_INNER_PRODUCT are supported");
+    FAISS_THROW_IF_NOT_MSG(
+            args.vectorsRowMajor && args.queriesRowMajor,
+            "bfKnn(params): only row-major vectors/queries are supported");
+    FAISS_THROW_IF_NOT_MSG(
+            args.vectorType == MetalDistanceDataType::F32 &&
+                    args.queryType == MetalDistanceDataType::F32,
+            "bfKnn(params): only F32 vectors/queries are supported");
+    FAISS_THROW_IF_NOT_MSG(
+            args.metric != METRIC_Lp,
+            "bfKnn(params): METRIC_Lp is not supported on Metal");
+    FAISS_THROW_IF_NOT(args.vectors);
+    FAISS_THROW_IF_NOT(args.queries);
+    FAISS_THROW_IF_NOT(args.outIndices);
+    FAISS_THROW_IF_NOT(args.k > 0);
+    FAISS_THROW_IF_NOT(args.numVectors > 0);
+    FAISS_THROW_IF_NOT(args.numQueries > 0);
+    FAISS_THROW_IF_NOT(args.dims > 0);
+
+    const float* vectors = static_cast<const float*>(args.vectors);
+    const float* queries = static_cast<const float*>(args.queries);
+    std::vector<float> tmpDistances;
+    if (args.ignoreOutDistances) {
+        tmpDistances.resize((size_t)args.numQueries * args.k);
+    } else {
+        FAISS_THROW_IF_NOT(args.outDistances);
+    }
+    float* outDist = args.ignoreOutDistances ? tmpDistances.data() : args.outDistances;
+
+    if (args.outIndicesType == MetalIndicesDataType::I64) {
+        idx_t* outIdx = static_cast<idx_t*>(args.outIndices);
+        bfKnn(
+                resources,
+                vectors,
+                args.numVectors,
+                queries,
+                args.numQueries,
+                args.dims,
+                args.k,
+                args.metric,
+                outDist,
+                outIdx);
+        return;
+    }
+
+    if (args.outIndicesType == MetalIndicesDataType::I32) {
+        std::vector<idx_t> tmpIdx((size_t)args.numQueries * args.k);
+        bfKnn(
+                resources,
+                vectors,
+                args.numVectors,
+                queries,
+                args.numQueries,
+                args.dims,
+                args.k,
+                args.metric,
+                outDist,
+                tmpIdx.data());
+        int32_t* outIdx32 = static_cast<int32_t*>(args.outIndices);
+        for (size_t i = 0; i < tmpIdx.size(); ++i) {
+            outIdx32[i] = static_cast<int32_t>(tmpIdx[i]);
+        }
+        return;
+    }
+
+    FAISS_THROW_MSG("bfKnn(params): unknown outIndicesType");
+}
+
+void bfKnn_tiling(
+        std::shared_ptr<MetalResources> resources,
+        const MetalDistanceParams& args,
+        size_t vectorsMemoryLimit,
+        size_t queriesMemoryLimit) {
+    FAISS_THROW_IF_NOT_MSG(
+            args.metric == METRIC_L2 || args.metric == METRIC_INNER_PRODUCT,
+            "bfKnn_tiling(params): only METRIC_L2 and METRIC_INNER_PRODUCT are supported");
+    FAISS_THROW_IF_NOT_MSG(
+            args.vectorsRowMajor && args.queriesRowMajor,
+            "bfKnn_tiling(params): only row-major vectors/queries are supported");
+    FAISS_THROW_IF_NOT_MSG(
+            args.vectorType == MetalDistanceDataType::F32 &&
+                    args.queryType == MetalDistanceDataType::F32,
+            "bfKnn_tiling(params): only F32 vectors/queries are supported");
+    FAISS_THROW_IF_NOT_MSG(
+            args.metric != METRIC_Lp,
+            "bfKnn_tiling(params): METRIC_Lp is not supported on Metal");
+    FAISS_THROW_IF_NOT(args.vectors);
+    FAISS_THROW_IF_NOT(args.queries);
+    FAISS_THROW_IF_NOT(args.outIndices);
+    FAISS_THROW_IF_NOT(args.k > 0);
+    FAISS_THROW_IF_NOT(args.numVectors > 0);
+    FAISS_THROW_IF_NOT(args.numQueries > 0);
+    FAISS_THROW_IF_NOT(args.dims > 0);
+
+    const float* vectors = static_cast<const float*>(args.vectors);
+    const float* queries = static_cast<const float*>(args.queries);
+    std::vector<float> tmpDistances;
+    if (args.ignoreOutDistances) {
+        tmpDistances.resize((size_t)args.numQueries * args.k);
+    } else {
+        FAISS_THROW_IF_NOT(args.outDistances);
+    }
+    float* outDist = args.ignoreOutDistances ? tmpDistances.data() : args.outDistances;
+
+    if (args.outIndicesType == MetalIndicesDataType::I64) {
+        idx_t* outIdx = static_cast<idx_t*>(args.outIndices);
+        bfKnn_tiling(
+                resources,
+                vectors,
+                args.numVectors,
+                queries,
+                args.numQueries,
+                args.dims,
+                args.k,
+                args.metric,
+                outDist,
+                outIdx,
+                vectorsMemoryLimit,
+                queriesMemoryLimit);
+        return;
+    }
+
+    if (args.outIndicesType == MetalIndicesDataType::I32) {
+        std::vector<idx_t> tmpIdx((size_t)args.numQueries * args.k);
+        bfKnn_tiling(
+                resources,
+                vectors,
+                args.numVectors,
+                queries,
+                args.numQueries,
+                args.dims,
+                args.k,
+                args.metric,
+                outDist,
+                tmpIdx.data(),
+                vectorsMemoryLimit,
+                queriesMemoryLimit);
+        int32_t* outIdx32 = static_cast<int32_t*>(args.outIndices);
+        for (size_t i = 0; i < tmpIdx.size(); ++i) {
+            outIdx32[i] = static_cast<int32_t>(tmpIdx[i]);
+        }
+        return;
+    }
+
+    FAISS_THROW_MSG("bfKnn_tiling(params): unknown outIndicesType");
+}
+
 // ============================================================
 //  runMetalIVFFlatScan
 // ============================================================
