@@ -213,6 +213,7 @@ public:
 
     void encodeIVFPQScanList(
             id<MTLComputeCommandEncoder> enc,
+            bool useSmall,
             id<MTLBuffer> lookupTable,
             id<MTLBuffer> codes,
             id<MTLBuffer> ids,

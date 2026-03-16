@@ -474,6 +474,7 @@ void MetalKernels::encodeIVFScanList(
 
 void MetalKernels::encodeIVFPQScanList(
         id<MTLComputeCommandEncoder> enc,
+        bool useSmall,
         id<MTLBuffer> lookupTable,
         id<MTLBuffer> codes,
         id<MTLBuffer> ids,
@@ -485,7 +486,8 @@ void MetalKernels::encodeIVFPQScanList(
         id<MTLBuffer> paramsBuf,
         int nq,
         int nprobe) {
-    [enc setComputePipelineState:pipeline("ivf_scan_list_pq8")];
+    [enc setComputePipelineState:
+            pipeline(useSmall ? "ivf_scan_list_pq8_small" : "ivf_scan_list_pq8")];
     [enc setBuffer:lookupTable  offset:0 atIndex:0];
     [enc setBuffer:codes        offset:0 atIndex:1];
     [enc setBuffer:ids          offset:0 atIndex:2];
@@ -496,7 +498,7 @@ void MetalKernels::encodeIVFPQScanList(
     [enc setBuffer:perListIdx   offset:0 atIndex:7];
     [enc setBuffer:paramsBuf    offset:0 atIndex:8];
     [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)nq * (NSUInteger)nprobe, 1, 1)
-        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        threadsPerThreadgroup:MTLSizeMake(useSmall ? 32 : 256, 1, 1)];
 }
 
 void MetalKernels::encodeHammingDistanceTopK(

@@ -2439,7 +2439,7 @@ bool runMetalIVFPQScan(
         id<MTLBuffer> codes, id<MTLBuffer> ids,
         id<MTLBuffer> listOffset, id<MTLBuffer> listLength,
         id<MTLBuffer> coarseAssign,
-        int nq, int M, int k, int nprobe, bool isL2,
+        int nq, int M, int k, int nprobe, int avgListLen, bool isL2,
         id<MTLBuffer> outDistances, id<MTLBuffer> outIndices,
         id<MTLBuffer> perListDistBuf, id<MTLBuffer> perListIdxBuf) {
     if (!device || !queue || !lookupTable || !codes || !ids ||
@@ -2462,7 +2462,8 @@ bool runMetalIVFPQScan(
     id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
 
-    K.encodeIVFPQScanList(enc, lookupTable, codes, ids,
+    bool useSmall = (avgListLen > 0 && avgListLen <= 32);
+    K.encodeIVFPQScanList(enc, useSmall, lookupTable, codes, ids,
                            listOffset, listLength, coarseAssign,
                            perListDistBuf, perListIdxBuf, paramsBuf,
                            nq, nprobe);

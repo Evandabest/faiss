@@ -247,6 +247,7 @@ bool runMetalIVFPQScan(
         int M,
         int k,
         int nprobe,
+        int avgListLen,
         bool isL2,
         id<MTLBuffer> outDistances,
         id<MTLBuffer> outIndices,

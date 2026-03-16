@@ -13,6 +13,7 @@
 #include <faiss/gpu_metal/MetalDistance.h>
 #include <faiss/gpu_metal/impl/MetalIVFPQ.h>
 
+#include <algorithm>
 #include <cstring>
 #include <limits>
 #include <vector>
@@ -126,70 +127,80 @@ void MetalIndexIVFPQ::computeLookupTables_(
         const float* queries,
         int nprobe,
         const idx_t* coarseAssign,
+        const float* coarseDist,
         float* tables) const {
     const auto& pq = cpuIndex_->pq;
     int M = (int)pq.M;
-    int dsub = (int)pq.dsub;
     int ksub = (int)pq.ksub;
-    const float* centroids_data = pq.centroids.data();
     const bool isL2 = (metric_type == METRIC_L2);
+    const int tableStride = M * ksub;
+    const bool canUsePrecomputedL2 =
+            isL2 && cpuIndex_->by_residual &&
+            cpuIndex_->use_precomputed_table == 1 &&
+            cpuIndex_->precomputed_table.size() >=
+                    (size_t)cpuIndex_->nlist * (size_t)tableStride;
 
     auto* flatQ = dynamic_cast<faiss::IndexFlat*>(cpuIndex_->quantizer);
     const float* coarseCentroids = flatQ ? flatQ->get_xb() : nullptr;
 
+#pragma omp parallel for if (nq * nprobe > 512)
     for (int qi = 0; qi < nq; ++qi) {
         const float* query = queries + qi * d;
+        std::vector<float> residual((size_t)d);
+        float* firstTab = tables + (size_t)qi * (size_t)nprobe * (size_t)tableStride;
+
+        if (!isL2) {
+            // IP tables do not depend on probe/list assignment.
+            pq.compute_inner_prod_table(query, firstTab);
+            for (int pi = 1; pi < nprobe; ++pi) {
+                float* tab = firstTab + (size_t)pi * (size_t)tableStride;
+                std::memcpy(tab, firstTab, (size_t)tableStride * sizeof(float));
+            }
+            continue;
+        }
+
+        if (canUsePrecomputedL2) {
+            std::vector<float> sim2((size_t)tableStride);
+            pq.compute_inner_prod_table(query, sim2.data());
+            for (int pi = 0; pi < nprobe; ++pi) {
+                idx_t listId = coarseAssign[qi * nprobe + pi];
+                float* tab = firstTab + (size_t)pi * (size_t)tableStride;
+                if (listId < 0) {
+                    std::fill_n(tab, tableStride, 1e38f);
+                    continue;
+                }
+
+                const float* pc = cpuIndex_->precomputed_table.data() +
+                        (size_t)listId * (size_t)tableStride;
+                const float coarse = coarseDist ? coarseDist[qi * nprobe + pi] : 0.0f;
+                const float bias = coarse / (float)M;
+                for (int i = 0; i < tableStride; ++i) {
+                    tab[i] = pc[i] - 2.0f * sim2[(size_t)i] + bias;
+                }
+            }
+            continue;
+        }
+
         for (int pi = 0; pi < nprobe; ++pi) {
             idx_t listId = coarseAssign[qi * nprobe + pi];
             float* tab = tables + ((size_t)qi * nprobe + pi) * M * ksub;
 
             if (listId < 0) {
                 float sentinel = isL2 ? 1e38f : -1e38f;
-                for (int i = 0; i < M * ksub; ++i) tab[i] = sentinel;
+                std::fill_n(tab, tableStride, sentinel);
                 continue;
             }
 
-            if (isL2) {
-                // For L2: compute residual = query - coarse_centroid
-                // Then for each (m, c): table[m * ksub + c] =
-                //   ||residual_m - pq_centroid[m][c]||²
-                std::vector<float> residual(d);
-                if (coarseCentroids) {
-                    const float* cc = coarseCentroids + listId * d;
-                    for (int j = 0; j < d; ++j)
-                        residual[j] = query[j] - cc[j];
-                } else {
-                    for (int j = 0; j < d; ++j)
-                        residual[j] = query[j];
-                }
-
-                for (int m = 0; m < M; ++m) {
-                    const float* rslice = residual.data() + m * dsub;
-                    for (int c = 0; c < ksub; ++c) {
-                        const float* pqc = centroids_data +
-                                ((size_t)m * ksub + c) * dsub;
-                        float dist = 0.0f;
-                        for (int j = 0; j < dsub; ++j) {
-                            float diff = rslice[j] - pqc[j];
-                            dist += diff * diff;
-                        }
-                        tab[m * ksub + c] = dist;
-                    }
+            // L2 tables depend on coarse centroid via residual query.
+            if (coarseCentroids) {
+                const float* cc = coarseCentroids + listId * d;
+                for (int j = 0; j < d; ++j) {
+                    residual[(size_t)j] = query[j] - cc[j];
                 }
             } else {
-                // For IP: table[m * ksub + c] = query_m · pq_centroid[m][c]
-                for (int m = 0; m < M; ++m) {
-                    const float* qslice = query + m * dsub;
-                    for (int c = 0; c < ksub; ++c) {
-                        const float* pqc = centroids_data +
-                                ((size_t)m * ksub + c) * dsub;
-                        float dot = 0.0f;
-                        for (int j = 0; j < dsub; ++j)
-                            dot += qslice[j] * pqc[j];
-                        tab[m * ksub + c] = dot;
-                    }
-                }
+                std::memcpy(residual.data(), query, (size_t)d * sizeof(float));
             }
+            pq.compute_distance_table(residual.data(), tab);
         }
     }
 }
@@ -201,6 +212,9 @@ void MetalIndexIVFPQ::computeLookupTables_(
 void MetalIndexIVFPQ::train(idx_t n, const float* x) {
     FAISS_THROW_IF_NOT(cpuIndex_);
     cpuIndex_->train(n, x);
+    if (cpuIndex_->metric_type == METRIC_L2 && cpuIndex_->by_residual) {
+        cpuIndex_->precompute_table();
+    }
     is_trained = cpuIndex_->is_trained;
     if (is_trained) {
         uploadCentroids_();
@@ -323,12 +337,9 @@ void MetalIndexIVFPQ::search(
     int M = (int)cpuIndex_->pq.M;
     int ksub = (int)cpuIndex_->pq.ksub;
 
-    // Compute lookup tables on CPU.
+    // Compute lookup tables on CPU directly into the upload buffer.
     size_t tableSize = (size_t)n * nprobe * M * ksub;
-    std::vector<float> lookupTables(tableSize);
-    computeLookupTables_(
-            (int)n, x, (int)nprobe, coarseAssignVec.data(),
-            lookupTables.data());
+    size_t tableBytes = tableSize * sizeof(float);
 
     // Allocate GPU buffers.
     size_t outDistBytes = (size_t)n * (size_t)k * sizeof(float);
@@ -336,7 +347,6 @@ void MetalIndexIVFPQ::search(
     size_t perListBytes = (size_t)n * nprobe * (size_t)k * sizeof(float);
     size_t perListIdxB = (size_t)n * nprobe * (size_t)k * sizeof(int64_t);
     size_t coarseBytes = (size_t)n * nprobe * sizeof(int32_t);
-    size_t tableBytes = tableSize * sizeof(float);
 
     ensureSearchBuf_(searchOutDistBuf_, searchOutDistCap_, outDistBytes);
     ensureSearchBuf_(searchOutIdxBuf_, searchOutIdxCap_, outIdxBytes);
@@ -352,13 +362,22 @@ void MetalIndexIVFPQ::search(
         return;
     }
 
+    auto* lookupDst = reinterpret_cast<float*>([lookupTableBuf_ contents]);
+    computeLookupTables_(
+            (int)n,
+            x,
+            (int)nprobe,
+            coarseAssignVec.data(),
+            coarseDistVec.data(),
+            lookupDst);
+
     // Upload coarse assignments.
     auto* coarseDst = reinterpret_cast<int32_t*>([searchCoarseBuf_ contents]);
     for (size_t i = 0; i < (size_t)n * nprobe; ++i)
         coarseDst[i] = (int32_t)coarseAssignVec[i];
-
-    // Upload lookup tables.
-    std::memcpy([lookupTableBuf_ contents], lookupTables.data(), tableBytes);
+    int avgListLen = cpuIndex_->nlist > 0
+            ? (int)(cpuIndex_->ntotal / cpuIndex_->nlist)
+            : 0;
 
     bool ok = runMetalIVFPQScan(
             device, queue,
@@ -368,7 +387,7 @@ void MetalIndexIVFPQ::search(
             gpuIvf_->listOffsetGpuBuffer(),
             gpuIvf_->listLengthGpuBuffer(),
             searchCoarseBuf_,
-            (int)n, M, (int)k, (int)nprobe, isL2,
+            (int)n, M, (int)k, (int)nprobe, avgListLen, isL2,
             searchOutDistBuf_, searchOutIdxBuf_,
             searchPerListDistBuf_, searchPerListIdxBuf_);
 
@@ -429,6 +448,9 @@ void MetalIndexIVFPQ::copyFrom(const faiss::IndexIVFPQ* src) {
     cpuIndex_->nprobe = src->nprobe;
     cpuIndex_->by_residual = src->by_residual;
     cpuIndex_->use_precomputed_table = src->use_precomputed_table;
+    if (cpuIndex_->metric_type == METRIC_L2 && cpuIndex_->by_residual) {
+        cpuIndex_->precompute_table();
+    }
     is_trained = true;
 
     // Gather IVF list data.

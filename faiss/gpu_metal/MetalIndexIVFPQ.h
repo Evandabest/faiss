@@ -110,6 +110,7 @@ private:
             const float* queries,
             int nprobe,
             const idx_t* coarseAssign,
+            const float* coarseDist,
             float* tables) const;
 };
 
