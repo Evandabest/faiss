@@ -53,6 +53,23 @@ def index_cpu_to_gpus_list(index, co=None, gpus=None, ngpu=-1):
     index_gpu = index_cpu_to_gpu_multiple_py(res, index, co, gpus)
     return index_gpu
 
+# Metal path helper: provide CUDA-like constructor surface when
+# native GpuIndexFlat class is not exposed.
+if "GpuIndexFlat" not in globals():
+    def GpuIndexFlat(res, d, metric=METRIC_L2, device=0):
+        """Construct a GPU flat index directly from Python.
+
+        On backends without a native GpuIndexFlat class (e.g. Metal),
+        this creates a CPU IndexFlat and clones it to GPU.
+        """
+        if metric == METRIC_L2:
+            cpu_index = IndexFlatL2(d)
+        elif metric == METRIC_INNER_PRODUCT:
+            cpu_index = IndexFlatIP(d)
+        else:
+            raise TypeError("GpuIndexFlat helper supports METRIC_L2 or METRIC_INNER_PRODUCT")
+        return index_cpu_to_gpu(res, device, cpu_index)
+
 # allows numpy ndarray usage with bfKnn
 
 
