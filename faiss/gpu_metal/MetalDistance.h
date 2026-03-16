@@ -47,6 +47,7 @@ struct MetalDistanceParams {
     MetalDistanceDataType vectorType = MetalDistanceDataType::F32;
     bool vectorsRowMajor = true;
     idx_t numVectors = 0;
+    const float* vectorNorms = nullptr;
 
     const void* queries = nullptr;
     MetalDistanceDataType queryType = MetalDistanceDataType::F32;
@@ -57,6 +58,9 @@ struct MetalDistanceParams {
     bool ignoreOutDistances = false;
     MetalIndicesDataType outIndicesType = MetalIndicesDataType::I64;
     void* outIndices = nullptr;
+
+    int device = -1;
+    bool use_cuvs = false;
 };
 
 /// Calculate tile sizes for distance computation (mirrors CUDA's chooseTileSize).

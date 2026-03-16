@@ -27,6 +27,44 @@ struct StandardMetalResourcesHolder {
     StandardMetalResourcesHolder& operator=(const StandardMetalResourcesHolder&) = delete;
 };
 
+/// Bridge enum for vector/query scalar type in distance API.
+enum class MetalBridgeDistanceDataType {
+    F32 = 1,
+};
+
+/// Bridge enum for output index type in distance API.
+enum class MetalBridgeIndicesDataType {
+    I64 = 1,
+    I32,
+};
+
+/// Bridge struct mirroring CUDA-style distance params for Python wrappers.
+struct MetalBridgeDistanceParams {
+    faiss::MetricType metric = METRIC_L2;
+    float metricArg = 0.0f;
+    int k = 0;
+    int dims = 0;
+
+    const void* vectors = nullptr;
+    MetalBridgeDistanceDataType vectorType = MetalBridgeDistanceDataType::F32;
+    bool vectorsRowMajor = true;
+    idx_t numVectors = 0;
+    const float* vectorNorms = nullptr;
+
+    const void* queries = nullptr;
+    MetalBridgeDistanceDataType queryType = MetalBridgeDistanceDataType::F32;
+    bool queriesRowMajor = true;
+    idx_t numQueries = 0;
+
+    float* outDistances = nullptr;
+    bool ignoreOutDistances = false;
+    MetalBridgeIndicesDataType outIndicesType = MetalBridgeIndicesDataType::I64;
+    void* outIndices = nullptr;
+
+    int device = -1;
+    bool use_cuvs = false;
+};
+
 /// Same names as GPU API for unified Python binding.
 int get_num_gpus();
 
@@ -47,6 +85,17 @@ faiss::Index* index_cpu_to_gpu_multiple(
 
 /// Copy Metal index back to CPU. Caller owns returned index.
 faiss::Index* index_gpu_to_cpu(const faiss::Index* index);
+
+/// Distance API parity helpers for Python wrappers.
+void bfKnn(
+        StandardMetalResourcesHolder* res,
+        const MetalBridgeDistanceParams& args);
+
+void bfKnn_tiling(
+        StandardMetalResourcesHolder* res,
+        const MetalBridgeDistanceParams& args,
+        size_t vectorsMemoryLimit,
+        size_t queriesMemoryLimit);
 
 } // namespace gpu_metal
 } // namespace faiss

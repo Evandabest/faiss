@@ -8,7 +8,9 @@
 
 #import "MetalPythonBridge.h"
 #import "MetalCloner.h"
+#import "MetalDistance.h"
 #import "StandardMetalResources.h"
+#include <faiss/impl/FaissAssert.h>
 #include <memory>
 
 namespace faiss {
@@ -51,6 +53,78 @@ faiss::Index* index_cpu_to_gpu_multiple(
 
 faiss::Index* index_gpu_to_cpu(const faiss::Index* index) {
     return index_metal_gpu_to_cpu(index);
+}
+
+void bfKnn(
+        StandardMetalResourcesHolder* res,
+        const MetalBridgeDistanceParams& args) {
+    FAISS_THROW_IF_NOT_MSG(
+            res && res->impl,
+            "bfKnn (MetalPythonBridge): resources must be non-null");
+    auto* impl = static_cast<StandardMetalResources*>(res->impl);
+    ::faiss::gpu_metal::MetalDistanceParams coreArgs;
+    coreArgs.metric = args.metric;
+    coreArgs.metricArg = args.metricArg;
+    coreArgs.k = args.k;
+    coreArgs.dims = args.dims;
+    coreArgs.vectors = args.vectors;
+    coreArgs.vectorType = ::faiss::gpu_metal::MetalDistanceDataType::F32;
+    coreArgs.vectorsRowMajor = args.vectorsRowMajor;
+    coreArgs.numVectors = args.numVectors;
+    coreArgs.vectorNorms = args.vectorNorms;
+    coreArgs.queries = args.queries;
+    coreArgs.queryType = ::faiss::gpu_metal::MetalDistanceDataType::F32;
+    coreArgs.queriesRowMajor = args.queriesRowMajor;
+    coreArgs.numQueries = args.numQueries;
+    coreArgs.outDistances = args.outDistances;
+    coreArgs.ignoreOutDistances = args.ignoreOutDistances;
+    coreArgs.outIndicesType =
+            (args.outIndicesType == MetalBridgeIndicesDataType::I32)
+            ? ::faiss::gpu_metal::MetalIndicesDataType::I32
+            : ::faiss::gpu_metal::MetalIndicesDataType::I64;
+    coreArgs.outIndices = args.outIndices;
+    coreArgs.device = args.device;
+    coreArgs.use_cuvs = args.use_cuvs;
+    ::faiss::gpu_metal::bfKnn(impl->getResources(), coreArgs);
+}
+
+void bfKnn_tiling(
+        StandardMetalResourcesHolder* res,
+        const MetalBridgeDistanceParams& args,
+        size_t vectorsMemoryLimit,
+        size_t queriesMemoryLimit) {
+    FAISS_THROW_IF_NOT_MSG(
+            res && res->impl,
+            "bfKnn_tiling (MetalPythonBridge): resources must be non-null");
+    auto* impl = static_cast<StandardMetalResources*>(res->impl);
+    ::faiss::gpu_metal::MetalDistanceParams coreArgs;
+    coreArgs.metric = args.metric;
+    coreArgs.metricArg = args.metricArg;
+    coreArgs.k = args.k;
+    coreArgs.dims = args.dims;
+    coreArgs.vectors = args.vectors;
+    coreArgs.vectorType = ::faiss::gpu_metal::MetalDistanceDataType::F32;
+    coreArgs.vectorsRowMajor = args.vectorsRowMajor;
+    coreArgs.numVectors = args.numVectors;
+    coreArgs.vectorNorms = args.vectorNorms;
+    coreArgs.queries = args.queries;
+    coreArgs.queryType = ::faiss::gpu_metal::MetalDistanceDataType::F32;
+    coreArgs.queriesRowMajor = args.queriesRowMajor;
+    coreArgs.numQueries = args.numQueries;
+    coreArgs.outDistances = args.outDistances;
+    coreArgs.ignoreOutDistances = args.ignoreOutDistances;
+    coreArgs.outIndicesType =
+            (args.outIndicesType == MetalBridgeIndicesDataType::I32)
+            ? ::faiss::gpu_metal::MetalIndicesDataType::I32
+            : ::faiss::gpu_metal::MetalIndicesDataType::I64;
+    coreArgs.outIndices = args.outIndices;
+    coreArgs.device = args.device;
+    coreArgs.use_cuvs = args.use_cuvs;
+    ::faiss::gpu_metal::bfKnn_tiling(
+            impl->getResources(),
+            coreArgs,
+            vectorsMemoryLimit,
+            queriesMemoryLimit);
 }
 
 } // namespace gpu_metal
