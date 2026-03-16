@@ -394,6 +394,49 @@ class TestMetalPython(unittest.TestCase):
         D = faiss.pairwise_distance_gpu(res, xq, xb, metric=faiss.METRIC_L1)
         np.testing.assert_allclose(D, cpu, rtol=1e-5, atol=1e-5)
 
+    def test_bfknn_params_lp_metric(self):
+        """Params API supports METRIC_Lp with metricArg via fallback path."""
+        if faiss.get_num_gpus() == 0:
+            self.skipTest("No Metal device")
+
+        d, nb, nq, k = 12, 900, 20, 4
+        p = 3.0
+        np.random.seed(9900)
+        xb = np.random.randn(nb, d).astype(np.float32)
+        xq = np.random.randn(nq, d).astype(np.float32)
+
+        cpu_index = faiss.IndexFlat(d, faiss.METRIC_Lp)
+        cpu_index.metric_arg = p
+        cpu_index.add(xb)
+        D_cpu, I_cpu = cpu_index.search(xq, k)
+
+        D = np.empty((nq, k), dtype=np.float32)
+        I = np.empty((nq, k), dtype=np.int64)
+
+        args = faiss.GpuDistanceParams()
+        args.metric = faiss.METRIC_Lp
+        args.metricArg = p
+        args.k = k
+        args.dims = d
+        args.vectors = faiss.swig_ptr(xb)
+        args.vectorType = faiss.DistanceDataType_F32
+        args.vectorsRowMajor = True
+        args.numVectors = nb
+        args.queries = faiss.swig_ptr(xq)
+        args.queryType = faiss.DistanceDataType_F32
+        args.queriesRowMajor = True
+        args.numQueries = nq
+        args.outDistances = faiss.swig_ptr(D)
+        args.outIndicesType = faiss.IndicesDataType_I64
+        args.outIndices = faiss.swig_ptr(I)
+        args.device = 0
+        args.use_cuvs = False
+
+        res = faiss.StandardGpuResources()
+        faiss.bfKnn(res, args)
+        np.testing.assert_allclose(D, D_cpu, rtol=1e-5, atol=1e-5)
+        np.testing.assert_array_equal(I, I_cpu)
+
 
 if __name__ == "__main__":
     unittest.main()

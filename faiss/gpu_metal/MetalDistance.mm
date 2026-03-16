@@ -1890,11 +1890,7 @@ void bfKnn(
     }
 
     const bool useVectorNorms =
-            args.metric == METRIC_L2 && args.vectorNorms != nullptr &&
-            args.vectorType != MetalDistanceDataType::F16;
-    FAISS_THROW_IF_NOT_MSG(
-            !(args.vectorNorms && args.vectorType == MetalDistanceDataType::F16),
-            "bfKnn(params): vectorNorms are not supported with F16 vectors");
+            args.metric == METRIC_L2 && args.vectorNorms != nullptr;
 
     std::vector<float> tmpDistances;
     if (args.ignoreOutDistances) {
@@ -1907,17 +1903,31 @@ void bfKnn(
     if (args.outIndicesType == MetalIndicesDataType::I64) {
         idx_t* outIdx = static_cast<idx_t*>(args.outIndices);
         if (args.vectorType == MetalDistanceDataType::F16) {
-            bfKnnFP16Vectors_(
-                    resources,
-                    vectorsF16,
-                    args.numVectors,
-                    queries,
-                    args.numQueries,
-                    args.dims,
-                    args.k,
-                    args.metric,
-                    outDist,
-                    outIdx);
+            if (useVectorNorms) {
+                bfKnnWithVectorNormsF32_(
+                        resources,
+                        vectorsF32FromF16,
+                        vectorNormsF32,
+                        args.numVectors,
+                        queries,
+                        args.numQueries,
+                        args.dims,
+                        args.k,
+                        outDist,
+                        outIdx);
+            } else {
+                bfKnnFP16Vectors_(
+                        resources,
+                        vectorsF16,
+                        args.numVectors,
+                        queries,
+                        args.numQueries,
+                        args.dims,
+                        args.k,
+                        args.metric,
+                        outDist,
+                        outIdx);
+            }
         } else if (
                 args.vectorType == MetalDistanceDataType::F32 ||
                 args.vectorType == MetalDistanceDataType::BF16) {
@@ -1955,17 +1965,31 @@ void bfKnn(
     if (args.outIndicesType == MetalIndicesDataType::I32) {
         std::vector<idx_t> tmpIdx((size_t)args.numQueries * args.k);
         if (args.vectorType == MetalDistanceDataType::F16) {
-            bfKnnFP16Vectors_(
-                    resources,
-                    vectorsF16,
-                    args.numVectors,
-                    queries,
-                    args.numQueries,
-                    args.dims,
-                    args.k,
-                    args.metric,
-                    outDist,
-                    tmpIdx.data());
+            if (useVectorNorms) {
+                bfKnnWithVectorNormsF32_(
+                        resources,
+                        vectorsF32FromF16,
+                        vectorNormsF32,
+                        args.numVectors,
+                        queries,
+                        args.numQueries,
+                        args.dims,
+                        args.k,
+                        outDist,
+                        tmpIdx.data());
+            } else {
+                bfKnnFP16Vectors_(
+                        resources,
+                        vectorsF16,
+                        args.numVectors,
+                        queries,
+                        args.numQueries,
+                        args.dims,
+                        args.k,
+                        args.metric,
+                        outDist,
+                        tmpIdx.data());
+            }
         } else if (
                 args.vectorType == MetalDistanceDataType::F32 ||
                 args.vectorType == MetalDistanceDataType::BF16) {
@@ -2095,11 +2119,7 @@ void bfKnn_tiling(
     }
 
     const bool useVectorNorms =
-            args.metric == METRIC_L2 && args.vectorNorms != nullptr &&
-            args.vectorType != MetalDistanceDataType::F16;
-    FAISS_THROW_IF_NOT_MSG(
-            !(args.vectorNorms && args.vectorType == MetalDistanceDataType::F16),
-            "bfKnn_tiling(params): vectorNorms are not supported with F16 vectors");
+            args.metric == METRIC_L2 && args.vectorNorms != nullptr;
 
     std::vector<float> tmpDistances;
     if (args.ignoreOutDistances) {
@@ -2112,19 +2132,35 @@ void bfKnn_tiling(
     if (args.outIndicesType == MetalIndicesDataType::I64) {
         idx_t* outIdx = static_cast<idx_t*>(args.outIndices);
         if (args.vectorType == MetalDistanceDataType::F16) {
-            bfKnn_tilingFP16_(
-                    resources,
-                    vectorsF16,
-                    args.numVectors,
-                    queries,
-                    args.numQueries,
-                    args.dims,
-                    args.k,
-                    args.metric,
-                    outDist,
-                    outIdx,
-                    vectorsMemoryLimit,
-                    queriesMemoryLimit);
+            if (useVectorNorms) {
+                bfKnn_tilingWithNormsF32_(
+                        resources,
+                        vectorsF32FromF16,
+                        vectorNormsF32,
+                        args.numVectors,
+                        queries,
+                        args.numQueries,
+                        args.dims,
+                        args.k,
+                        outDist,
+                        outIdx,
+                        vectorsMemoryLimit,
+                        queriesMemoryLimit);
+            } else {
+                bfKnn_tilingFP16_(
+                        resources,
+                        vectorsF16,
+                        args.numVectors,
+                        queries,
+                        args.numQueries,
+                        args.dims,
+                        args.k,
+                        args.metric,
+                        outDist,
+                        outIdx,
+                        vectorsMemoryLimit,
+                        queriesMemoryLimit);
+            }
         } else if (
                 args.vectorType == MetalDistanceDataType::F32 ||
                 args.vectorType == MetalDistanceDataType::BF16) {
@@ -2166,19 +2202,35 @@ void bfKnn_tiling(
     if (args.outIndicesType == MetalIndicesDataType::I32) {
         std::vector<idx_t> tmpIdx((size_t)args.numQueries * args.k);
         if (args.vectorType == MetalDistanceDataType::F16) {
-            bfKnn_tilingFP16_(
-                    resources,
-                    vectorsF16,
-                    args.numVectors,
-                    queries,
-                    args.numQueries,
-                    args.dims,
-                    args.k,
-                    args.metric,
-                    outDist,
-                    tmpIdx.data(),
-                    vectorsMemoryLimit,
-                    queriesMemoryLimit);
+            if (useVectorNorms) {
+                bfKnn_tilingWithNormsF32_(
+                        resources,
+                        vectorsF32FromF16,
+                        vectorNormsF32,
+                        args.numVectors,
+                        queries,
+                        args.numQueries,
+                        args.dims,
+                        args.k,
+                        outDist,
+                        tmpIdx.data(),
+                        vectorsMemoryLimit,
+                        queriesMemoryLimit);
+            } else {
+                bfKnn_tilingFP16_(
+                        resources,
+                        vectorsF16,
+                        args.numVectors,
+                        queries,
+                        args.numQueries,
+                        args.dims,
+                        args.k,
+                        args.metric,
+                        outDist,
+                        tmpIdx.data(),
+                        vectorsMemoryLimit,
+                        queriesMemoryLimit);
+            }
         } else if (
                 args.vectorType == MetalDistanceDataType::F32 ||
                 args.vectorType == MetalDistanceDataType::BF16) {
