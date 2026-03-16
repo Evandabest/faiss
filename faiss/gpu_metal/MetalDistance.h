@@ -38,7 +38,8 @@ enum class MetalIndicesDataType {
 
 /// Arguments to brute-force Metal k-nearest-neighbor searching.
 /// This is a Metal-side counterpart to CUDA's GpuDistanceParams with a reduced
-/// supported surface (row-major vectors/queries only; no column-major path yet).
+/// supported surface (L2/IP only; non-F32 inputs and column-major layout may be
+/// materialized on CPU before dispatch).
 struct MetalDistanceParams {
     faiss::MetricType metric = METRIC_L2;
     float metricArg = 0.0f;

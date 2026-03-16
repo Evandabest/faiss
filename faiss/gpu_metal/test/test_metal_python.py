@@ -247,6 +247,102 @@ class TestMetalPython(unittest.TestCase):
         np.testing.assert_allclose(D, D_cpu, rtol=2e-3, atol=2e-3)
         np.testing.assert_array_equal(I, I_cpu)
 
+    def test_bfknn_params_column_major_f32(self):
+        """Params API accepts column-major vectors/queries via row-major flags."""
+        if faiss.get_num_gpus() == 0:
+            self.skipTest("No Metal device")
+
+        d, nb, nq, k = 24, 2500, 32, 6
+        np.random.seed(9400)
+        xb = np.random.randn(nb, d).astype(np.float32)
+        xq = np.random.randn(nq, d).astype(np.float32)
+        xb_col = np.asfortranarray(xb)
+        xq_col = np.asfortranarray(xq)
+
+        D = np.empty((nq, k), dtype=np.float32)
+        I = np.empty((nq, k), dtype=np.int64)
+
+        args = faiss.GpuDistanceParams()
+        args.metric = faiss.METRIC_L2
+        args.k = k
+        args.dims = d
+        args.vectors = faiss.swig_ptr(xb_col)
+        args.vectorType = faiss.DistanceDataType_F32
+        args.vectorsRowMajor = False
+        args.numVectors = nb
+        args.queries = faiss.swig_ptr(xq_col)
+        args.queryType = faiss.DistanceDataType_F32
+        args.queriesRowMajor = False
+        args.numQueries = nq
+        args.outDistances = faiss.swig_ptr(D)
+        args.outIndicesType = faiss.IndicesDataType_I64
+        args.outIndices = faiss.swig_ptr(I)
+        args.device = 0
+        args.use_cuvs = False
+
+        cpu_index = faiss.IndexFlatL2(d)
+        cpu_index.add(xb)
+        D_cpu, I_cpu = cpu_index.search(xq, k)
+
+        res = faiss.StandardGpuResources()
+        faiss.bfKnn_tiling(
+            res,
+            args,
+            d * 4 * 800,
+            (d * 4 + k * (4 + 8)) * 16,
+        )
+
+        np.testing.assert_allclose(D, D_cpu, rtol=1e-5, atol=1e-5)
+        np.testing.assert_array_equal(I, I_cpu)
+
+    def test_bfknn_params_vector_norms_l2(self):
+        """L2 params path accepts precomputed vector norms."""
+        if faiss.get_num_gpus() == 0:
+            self.skipTest("No Metal device")
+
+        d, nb, nq, k = 24, 2200, 28, 6
+        np.random.seed(9500)
+        xb = np.random.randn(nb, d).astype(np.float32)
+        xq = np.random.randn(nq, d).astype(np.float32)
+        xb_norms = np.sum(xb * xb, axis=1).astype(np.float32)
+
+        D = np.empty((nq, k), dtype=np.float32)
+        I = np.empty((nq, k), dtype=np.int64)
+
+        args = faiss.GpuDistanceParams()
+        args.metric = faiss.METRIC_L2
+        args.k = k
+        args.dims = d
+        args.vectors = faiss.swig_ptr(xb)
+        args.vectorType = faiss.DistanceDataType_F32
+        args.vectorsRowMajor = True
+        args.numVectors = nb
+        args.vectorNorms = faiss.swig_ptr(xb_norms)
+        args.queries = faiss.swig_ptr(xq)
+        args.queryType = faiss.DistanceDataType_F32
+        args.queriesRowMajor = True
+        args.numQueries = nq
+        args.outDistances = faiss.swig_ptr(D)
+        args.outIndicesType = faiss.IndicesDataType_I64
+        args.outIndices = faiss.swig_ptr(I)
+        args.device = 0
+        args.use_cuvs = False
+
+        cpu_index = faiss.IndexFlatL2(d)
+        cpu_index.add(xb)
+        D_cpu, I_cpu = cpu_index.search(xq, k)
+
+        res = faiss.StandardGpuResources()
+        faiss.bfKnn_tiling(
+            res,
+            args,
+            d * 4 * 900,
+            (d * 4 + k * (4 + 8)) * 16,
+        )
+
+        np.testing.assert_allclose(D, D_cpu, rtol=1e-5, atol=1e-5)
+        np.testing.assert_array_equal(I, I_cpu)
+
 
 if __name__ == "__main__":
     unittest.main()
