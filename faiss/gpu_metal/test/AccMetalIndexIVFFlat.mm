@@ -806,6 +806,47 @@ TEST_F(AccMetalIndexIVFFlat, Indices32BitRejectsOutOfRangeIds) {
     EXPECT_ANY_THROW(metalIdx.add_with_ids(nb, vecs.data(), ids.data()));
 }
 
+TEST_F(AccMetalIndexIVFFlat, UserProvidedCoarseQuantizer) {
+    const int dim = 24, nlist = 8, nb = 1800, nq = 24, k = 8;
+    const size_t nprobe = 4;
+    std::vector<float> vecs(nb * dim), queries(nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 9011);
+    faiss::float_rand(queries.data(), queries.size(), 9012);
+
+    auto* cpuQ = new faiss::IndexScalarQuantizer(
+            dim, faiss::ScalarQuantizer::QT_8bit, faiss::METRIC_L2);
+    auto cpuIdx = std::make_unique<faiss::IndexIVFFlat>(
+            cpuQ, (size_t)dim, (size_t)nlist, faiss::METRIC_L2);
+    cpuIdx->own_fields = true;
+    cpuIdx->train(nb, vecs.data());
+    cpuIdx->add(nb, vecs.data());
+    cpuIdx->nprobe = nprobe;
+
+    auto* metalQ = new faiss::IndexScalarQuantizer(
+            dim, faiss::ScalarQuantizer::QT_8bit, faiss::METRIC_L2);
+    faiss::gpu_metal::MetalIndexIVFFlat metalIdx(
+            resources_,
+            metalQ,
+            dim,
+            nlist,
+            faiss::METRIC_L2,
+            0.0f,
+            faiss::gpu_metal::MetalIndexConfig(),
+            true);
+    metalIdx.train(nb, vecs.data());
+    metalIdx.add(nb, vecs.data());
+
+    faiss::IVFSearchParameters ivfParams;
+    ivfParams.nprobe = nprobe;
+
+    std::vector<float> refD((size_t)nq * k), testD((size_t)nq * k);
+    std::vector<faiss::idx_t> refL((size_t)nq * k, -1), testL((size_t)nq * k, -1);
+    cpuIdx->search(nq, queries.data(), k, refD.data(), refL.data());
+    metalIdx.search(nq, queries.data(), k, testD.data(), testL.data(), &ivfParams);
+
+    expectRecall(nq, k, 0.70f, refL.data(), testL.data());
+}
+
 TEST_F(AccMetalIndexIVFFlat, ClonerRejectsNonFlatCoarseQuantizerByDefault) {
     const int dim = 24, nlist = 8, nb = 1200;
     std::vector<float> vecs(nb * dim);

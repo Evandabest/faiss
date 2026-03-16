@@ -76,6 +76,34 @@ MetalIndexIVFFlat::MetalIndexIVFFlat(
 
 MetalIndexIVFFlat::MetalIndexIVFFlat(
         std::shared_ptr<MetalResources> resources,
+        faiss::Index* coarseQuantizer,
+        int dims,
+        idx_t nlist,
+        faiss::MetricType metric,
+        float metricArg,
+        MetalIndexConfig config,
+        bool ownFields)
+        : MetalIndex(resources, dims, metric, metricArg, config),
+          indicesOptions_(config.indicesOptions),
+          interleavedLayout_(config.interleavedLayout) {
+    FAISS_THROW_IF_NOT_MSG(
+            coarseQuantizer != nullptr,
+            "MetalIndexIVFFlat: coarseQuantizer must be non-null");
+    cpuIndex_ = std::make_unique<faiss::IndexIVFFlat>(
+            coarseQuantizer, (size_t)d, (size_t)nlist, metric);
+    cpuIndex_->own_fields = ownFields;
+    gpuIvf_ = std::make_unique<MetalIVFFlatImpl>(
+            resources,
+            (int)d,
+            nlist,
+            metric,
+            metricArg,
+            indicesOptions_,
+            interleavedLayout_);
+}
+
+MetalIndexIVFFlat::MetalIndexIVFFlat(
+        std::shared_ptr<MetalResources> resources,
         const faiss::IndexIVFFlat* cpuIndex,
         MetalIndexConfig config)
         : MetalIndex(
@@ -109,13 +137,16 @@ void MetalIndexIVFFlat::uploadCentroids_() const {
     if (!cpuIndex_ || !cpuIndex_->quantizer || !resources_) {
         return;
     }
-    auto* flatQ = dynamic_cast<faiss::IndexFlat*>(cpuIndex_->quantizer);
-    if (!flatQ || flatQ->ntotal == 0) {
+    auto* q = cpuIndex_->quantizer;
+    if (!q || q->ntotal == 0) {
         centroidBuf_ = nil;
         centroidNormsBuf_ = nil;
         return;
     }
-    size_t nCentroids = (size_t)flatQ->ntotal;
+    size_t nCentroids = (size_t)q->ntotal;
+    std::vector<float> centroids(nCentroids * (size_t)d);
+    q->reconstruct_n(0, (idx_t)nCentroids, centroids.data());
+
     const bool fp16 = config_.useFloat16CoarseQuantizer;
     size_t elemSize = fp16 ? sizeof(uint16_t) : sizeof(float);
     size_t bytes = nCentroids * (size_t)d * elemSize;
@@ -126,7 +157,7 @@ void MetalIndexIVFFlat::uploadCentroids_() const {
     centroidBuf_ = [device newBufferWithLength:bytes
                                        options:MTLResourceStorageModeShared];
     if (centroidBuf_) {
-        const float* src = flatQ->get_xb();
+        const float* src = centroids.data();
         if (fp16) {
             floatToHalf(src,
                         reinterpret_cast<uint16_t*>([centroidBuf_ contents]),
@@ -643,12 +674,15 @@ void MetalIndexIVFFlat::copyFrom(const faiss::IndexIVFFlat* src) {
     // Copy quantizer centroids (allow non-IndexFlat CPU coarse quantizers by
     // reconstructing centroid vectors).
     FAISS_THROW_IF_NOT_MSG(src->quantizer, "copyFrom: source quantizer is null");
-    auto* ourQ = dynamic_cast<faiss::IndexFlat*>(cpuIndex_->quantizer);
-    FAISS_THROW_IF_NOT_MSG(ourQ, "copyFrom: internal quantizer is not IndexFlat");
+    auto* ourQ = cpuIndex_->quantizer;
+    FAISS_THROW_IF_NOT_MSG(ourQ, "copyFrom: internal quantizer is null");
     ourQ->reset();
     if (src->nlist > 0) {
         std::vector<float> coarse((size_t)src->nlist * d);
         src->quantizer->reconstruct_n(0, src->nlist, coarse.data());
+        if (!ourQ->is_trained) {
+            ourQ->train(src->nlist, coarse.data());
+        }
         ourQ->add(src->nlist, coarse.data());
     }
     cpuIndex_->is_trained = true;
@@ -707,14 +741,19 @@ void MetalIndexIVFFlat::copyTo(faiss::IndexIVFFlat* dst) const {
     FAISS_THROW_IF_NOT(cpuIndex_);
     FAISS_THROW_IF_NOT(dst);
 
-    auto* srcQ = dynamic_cast<faiss::IndexFlat*>(cpuIndex_->quantizer);
-    auto* dstQ = dynamic_cast<faiss::IndexFlat*>(dst->quantizer);
-    FAISS_THROW_IF_NOT_MSG(srcQ, "copyTo: internal quantizer is not IndexFlat");
-    FAISS_THROW_IF_NOT_MSG(dstQ, "copyTo: destination quantizer is not IndexFlat");
+    auto* srcQ = cpuIndex_->quantizer;
+    auto* dstQ = dst->quantizer;
+    FAISS_THROW_IF_NOT_MSG(srcQ, "copyTo: internal quantizer is null");
+    FAISS_THROW_IF_NOT_MSG(dstQ, "copyTo: destination quantizer is null");
 
     dstQ->reset();
     if (srcQ->ntotal > 0) {
-        dstQ->add(srcQ->ntotal, srcQ->get_xb());
+        std::vector<float> coarse((size_t)srcQ->ntotal * d);
+        srcQ->reconstruct_n(0, srcQ->ntotal, coarse.data());
+        if (!dstQ->is_trained) {
+            dstQ->train(srcQ->ntotal, coarse.data());
+        }
+        dstQ->add(srcQ->ntotal, coarse.data());
     }
 
     dst->metric_type = cpuIndex_->metric_type;

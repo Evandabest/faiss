@@ -42,6 +42,18 @@ public:
             float metricArg = 0.0f,
             MetalIndexConfig config = MetalIndexConfig());
 
+    /// Construct empty IVFFlat index with caller-provided coarse quantizer.
+    /// If ownFields is true, this index takes ownership of `coarseQuantizer`.
+    MetalIndexIVFFlat(
+            std::shared_ptr<MetalResources> resources,
+            faiss::Index* coarseQuantizer,
+            int dims,
+            idx_t nlist,
+            faiss::MetricType metric,
+            float metricArg = 0.0f,
+            MetalIndexConfig config = MetalIndexConfig(),
+            bool ownFields = false);
+
     /// Construct from an existing CPU IndexIVFFlat (used by cloners later).
     MetalIndexIVFFlat(
             std::shared_ptr<MetalResources> resources,
