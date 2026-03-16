@@ -240,6 +240,36 @@ TEST_F(AccMetalIndexIVFPQ, ClonerRoundTrip) {
     delete cpuBack;
 }
 
+TEST_F(AccMetalIndexIVFPQ, ClonerOptionsUsePrecomputedIVFPQ) {
+    const int d = 64, nlist = 16, nb = 4000, M = 8;
+    std::vector<float> xb(nb * d);
+    faiss::float_rand(xb.data(), xb.size(), 777);
+
+    auto cpuIdx = makeCpuIVFPQ(d, nlist, M, 8, faiss::METRIC_L2, nb, xb.data());
+    cpuIdx->add(nb, xb.data());
+    cpuIdx->nprobe = 4;
+    cpuIdx->use_precomputed_table = 0;
+
+    faiss::gpu_metal::StandardMetalResources stdRes;
+    faiss::gpu_metal::MetalClonerOptions opts;
+    opts.usePrecomputed = true;
+
+    std::unique_ptr<faiss::Index> metalRaw(
+            faiss::gpu_metal::index_cpu_to_metal_gpu(
+                    &stdRes, 0, cpuIdx.get(), &opts));
+    ASSERT_NE(metalRaw.get(), nullptr);
+    auto* metal = dynamic_cast<faiss::gpu_metal::MetalIndexIVFPQ*>(metalRaw.get());
+    ASSERT_NE(metal, nullptr);
+    EXPECT_TRUE(metal->getUsePrecomputedTables());
+
+    std::unique_ptr<faiss::Index> cpuBack(
+            faiss::gpu_metal::index_metal_gpu_to_cpu(metalRaw.get()));
+    ASSERT_NE(cpuBack.get(), nullptr);
+    auto* ivfpqBack = dynamic_cast<faiss::IndexIVFPQ*>(cpuBack.get());
+    ASSERT_NE(ivfpqBack, nullptr);
+    EXPECT_EQ(ivfpqBack->use_precomputed_table, 1);
+}
+
 TEST_F(AccMetalIndexIVFPQ, TrainAndAdd) {
     const int d = 32, nlist = 8, nb = 2000, nq = 16, k = 10, M = 4;
     std::vector<float> xb(nb * d), xq(nq * d);

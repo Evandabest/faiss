@@ -166,6 +166,7 @@ faiss::Index* index_cpu_to_metal_gpu(
                 "Metal IVFPQ only supports 8-bit PQ codes");
         auto* metal = new MetalIndexIVFPQ(
                 res->getResources(), ivfPQ, config);
+        metal->setUsePrecomputedTables(opts.usePrecomputed);
         metal->verbose = opts.verbose;
         if (opts.reserveVecs > 0) {
             metal->reserveMemory(opts.reserveVecs);

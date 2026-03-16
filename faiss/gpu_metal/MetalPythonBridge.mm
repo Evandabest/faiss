@@ -32,6 +32,7 @@ std::atomic<int> gMetalProfilerDepth{0};
     out.indicesOptions = opts->indicesOptions;
     out.useFloat16 = opts->useFloat16;
     out.useFloat16CoarseQuantizer = opts->useFloat16CoarseQuantizer;
+    out.usePrecomputed = opts->usePrecomputed;
     out.reserveVecs = opts->reserveVecs;
     out.interleavedLayout = opts->interleavedLayout;
     out.useIVFScalarQuantizer = opts->useIVFScalarQuantizer;

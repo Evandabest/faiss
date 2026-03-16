@@ -72,6 +72,8 @@ public:
     idx_t nlist() const;
     size_t nprobe() const;
     int getNumSubQuantizers() const;
+    void setUsePrecomputedTables(bool enable);
+    bool getUsePrecomputedTables() const;
 
 private:
     std::unique_ptr<faiss::IndexIVFPQ> cpuIndex_;

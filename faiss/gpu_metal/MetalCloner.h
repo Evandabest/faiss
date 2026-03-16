@@ -32,6 +32,9 @@ struct MetalClonerOptions {
     /// Store IVF coarse-quantizer centroids as float16.
     bool useFloat16CoarseQuantizer = false;
 
+    /// Match CUDA cloner option for IVFPQ precomputed tables.
+    bool usePrecomputed = false;
+
     /// Reserve space for this many vectors in IVF inverted lists.
     long reserveVecs = 0;
 

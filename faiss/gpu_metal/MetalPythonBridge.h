@@ -35,6 +35,7 @@ struct MetalBridgeClonerOptions {
     faiss::gpu::IndicesOptions indicesOptions = faiss::gpu::INDICES_64_BIT;
     bool useFloat16 = false;
     bool useFloat16CoarseQuantizer = false;
+    bool usePrecomputed = false;
     long reserveVecs = 0;
     bool interleavedLayout = true;
     bool useIVFScalarQuantizer = false;

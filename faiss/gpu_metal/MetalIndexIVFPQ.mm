@@ -546,7 +546,10 @@ void MetalIndexIVFPQ::copyTo(faiss::IndexIVFPQ* dst) const {
     dst->nprobe = cpuIndex_->nprobe;
     dst->is_trained = cpuIndex_->is_trained;
     dst->by_residual = cpuIndex_->by_residual;
-    dst->use_precomputed_table = 0;
+    dst->use_precomputed_table = cpuIndex_->use_precomputed_table;
+    if (dst->use_precomputed_table && dst->metric_type == METRIC_L2 && dst->by_residual) {
+        dst->precompute_table();
+    }
 
     for (size_t l = 0; l < (size_t)cpuIndex_->nlist; ++l) {
         size_t ls = cpuIndex_->invlists->list_size(l);
@@ -596,6 +599,22 @@ size_t MetalIndexIVFPQ::nprobe() const {
 
 int MetalIndexIVFPQ::getNumSubQuantizers() const {
     return cpuIndex_ ? (int)cpuIndex_->pq.M : 0;
+}
+
+void MetalIndexIVFPQ::setUsePrecomputedTables(bool enable) {
+    if (!cpuIndex_) {
+        return;
+    }
+    cpuIndex_->use_precomputed_table = enable ? 1 : 0;
+    if (enable && cpuIndex_->metric_type == METRIC_L2 && cpuIndex_->by_residual) {
+        cpuIndex_->precompute_table();
+    } else if (!enable) {
+        cpuIndex_->precomputed_table.clear();
+    }
+}
+
+bool MetalIndexIVFPQ::getUsePrecomputedTables() const {
+    return cpuIndex_ && cpuIndex_->use_precomputed_table != 0;
 }
 
 } // namespace gpu_metal
