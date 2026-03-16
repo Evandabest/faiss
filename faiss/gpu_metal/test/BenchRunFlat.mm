@@ -22,7 +22,16 @@ static std::string dirOf(const char* path) {
 int main(int argc, char** argv) {
     const int ks[] = {10, 20, 50, 100, 128, 256, 512, 1024, 2048};
     const int numK = (int)(sizeof(ks) / sizeof(ks[0]));
-    int pauseSec = (argc >= 2) ? std::atoi(argv[1]) : 0;
+    int pauseSec = 0;
+    bool useFp16 = false;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg(argv[i]);
+        if (arg == "--fp16" || arg == "fp16") {
+            useFp16 = true;
+            continue;
+        }
+        pauseSec = std::atoi(argv[i]);
+    }
 
     std::string dir = dirOf(argv[0]);
     std::string exe = dir + "/BenchMetalFlatVsCpu";
@@ -33,6 +42,9 @@ int main(int argc, char** argv) {
         int k = ks[i];
         printf(">>> k = %d (new process)\n", k);
         std::string cmd = exe + " " + std::to_string(k);
+        if (useFp16) {
+            cmd += " --fp16";
+        }
         int ret = std::system(cmd.c_str());
         if (ret != 0) {
 #if defined(__APPLE__) || defined(__linux__)
