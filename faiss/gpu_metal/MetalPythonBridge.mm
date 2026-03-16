@@ -18,6 +18,23 @@ namespace gpu_metal {
 
 namespace {
 
+::faiss::gpu_metal::MetalClonerOptions toCoreClonerOptions(
+        const MetalBridgeClonerOptions* opts) {
+    ::faiss::gpu_metal::MetalClonerOptions out;
+    if (!opts) {
+        return out;
+    }
+    out.indicesOptions = opts->indicesOptions;
+    out.useFloat16 = opts->useFloat16;
+    out.useFloat16CoarseQuantizer = opts->useFloat16CoarseQuantizer;
+    out.reserveVecs = opts->reserveVecs;
+    out.interleavedLayout = opts->interleavedLayout;
+    out.storeTransposed = opts->storeTransposed;
+    out.allowCpuCoarseQuantizer = opts->allowCpuCoarseQuantizer;
+    out.verbose = opts->verbose;
+    return out;
+}
+
 ::faiss::gpu_metal::MetalDistanceDataType toCoreDistanceType(
         MetalBridgeDistanceDataType t) {
     switch (t) {
@@ -48,20 +65,21 @@ faiss::Index* index_cpu_to_gpu(
         StandardMetalResourcesHolder* res,
         int device,
         const faiss::Index* index,
-        const MetalClonerOptions* options) {
+        const MetalBridgeClonerOptions* options) {
     if (!res || !res->impl) {
         return nullptr;
     }
+    auto coreOpts = toCoreClonerOptions(options);
     return index_cpu_to_metal_gpu(
             static_cast<StandardMetalResources*>(res->impl),
-            device, index, options);
+            device, index, &coreOpts);
 }
 
 faiss::Index* index_cpu_to_gpu_multiple(
         std::vector<StandardMetalResourcesHolder*>& res,
         std::vector<int>& devices,
         const faiss::Index* index,
-        const MetalClonerOptions* options) {
+        const MetalBridgeClonerOptions* options) {
     if (res.size() != 1 || devices.size() != 1) {
         return nullptr;
     }
@@ -70,6 +88,36 @@ faiss::Index* index_cpu_to_gpu_multiple(
 
 faiss::Index* index_gpu_to_cpu(const faiss::Index* index) {
     return index_metal_gpu_to_cpu(index);
+}
+
+faiss::IndexBinary* index_binary_cpu_to_gpu(
+        StandardMetalResourcesHolder* res,
+        int device,
+        const faiss::IndexBinary* index,
+        const MetalBridgeClonerOptions* options) {
+    (void)options;
+    if (!res || !res->impl) {
+        return nullptr;
+    }
+    return index_binary_cpu_to_metal_gpu(
+            static_cast<StandardMetalResources*>(res->impl),
+            device,
+            index);
+}
+
+faiss::IndexBinary* index_binary_cpu_to_gpu_multiple(
+        std::vector<StandardMetalResourcesHolder*>& res,
+        std::vector<int>& devices,
+        const faiss::IndexBinary* index,
+        const MetalBridgeClonerOptions* options) {
+    if (res.size() != 1 || devices.size() != 1) {
+        return nullptr;
+    }
+    return index_binary_cpu_to_gpu(res[0], devices[0], index, options);
+}
+
+faiss::IndexBinary* index_binary_gpu_to_cpu(const faiss::IndexBinary* index) {
+    return index_binary_metal_gpu_to_cpu(index);
 }
 
 void bfKnn(
@@ -87,12 +135,12 @@ void bfKnn(
     coreArgs.vectors = args.vectors;
     coreArgs.vectorType = toCoreDistanceType(args.vectorType);
     coreArgs.vectorsRowMajor = args.vectorsRowMajor;
-    coreArgs.numVectors = args.numVectors;
+    coreArgs.numVectors = static_cast<faiss::idx_t>(args.numVectors);
     coreArgs.vectorNorms = args.vectorNorms;
     coreArgs.queries = args.queries;
     coreArgs.queryType = toCoreDistanceType(args.queryType);
     coreArgs.queriesRowMajor = args.queriesRowMajor;
-    coreArgs.numQueries = args.numQueries;
+    coreArgs.numQueries = static_cast<faiss::idx_t>(args.numQueries);
     coreArgs.outDistances = args.outDistances;
     coreArgs.ignoreOutDistances = args.ignoreOutDistances;
     coreArgs.outIndicesType =
@@ -122,12 +170,12 @@ void bfKnn_tiling(
     coreArgs.vectors = args.vectors;
     coreArgs.vectorType = toCoreDistanceType(args.vectorType);
     coreArgs.vectorsRowMajor = args.vectorsRowMajor;
-    coreArgs.numVectors = args.numVectors;
+    coreArgs.numVectors = static_cast<faiss::idx_t>(args.numVectors);
     coreArgs.vectorNorms = args.vectorNorms;
     coreArgs.queries = args.queries;
     coreArgs.queryType = toCoreDistanceType(args.queryType);
     coreArgs.queriesRowMajor = args.queriesRowMajor;
-    coreArgs.numQueries = args.numQueries;
+    coreArgs.numQueries = static_cast<faiss::idx_t>(args.numQueries);
     coreArgs.outDistances = args.outDistances;
     coreArgs.ignoreOutDistances = args.ignoreOutDistances;
     coreArgs.outIndicesType =

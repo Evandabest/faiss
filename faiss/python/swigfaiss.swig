@@ -483,7 +483,7 @@ void gpu_sync_all_devices()
 %}
 
 %rename(StandardGpuResources) faiss::gpu_metal::StandardMetalResourcesHolder;
-%rename(GpuClonerOptions) faiss::gpu_metal::MetalClonerOptions;
+%rename(GpuClonerOptions) faiss::gpu_metal::MetalBridgeClonerOptions;
 %rename(GpuDistanceParams) faiss::gpu_metal::MetalBridgeDistanceParams;
 %rename(DistanceDataType) faiss::gpu_metal::MetalBridgeDistanceDataType;
 %rename(IndicesDataType) faiss::gpu_metal::MetalBridgeIndicesDataType;
@@ -491,6 +491,9 @@ void gpu_sync_all_devices()
 %newobject index_cpu_to_gpu;
 %newobject index_cpu_to_gpu_multiple;
 %newobject index_gpu_to_cpu;
+%newobject index_binary_cpu_to_gpu;
+%newobject index_binary_cpu_to_gpu_multiple;
+%newobject index_binary_gpu_to_cpu;
 
 %include <faiss/gpu_metal/MetalPythonBridge.h>
 

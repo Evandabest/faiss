@@ -123,6 +123,18 @@ swig_add_library(swigfaiss
   SOURCES swigfaiss.swig
 )
 
+# Keep the package-local wrapper in sync with regenerated SWIG output so
+# `PYTHONPATH=build_*/faiss/python` imports the latest symbols.
+add_custom_command(TARGET swigfaiss POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/faiss
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_CURRENT_BINARY_DIR}/swigfaiss.py
+          ${CMAKE_CURRENT_BINARY_DIR}/faiss/swigfaiss.py
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          $<TARGET_FILE:swigfaiss>
+          ${CMAKE_CURRENT_BINARY_DIR}/faiss/_swigfaiss.so
+)
+
 if(TARGET swigfaiss AND NOT CMAKE_SYSTEM_NAME MATCHES "Darwin")
   set_target_properties(swigfaiss PROPERTIES
     CXX_VISIBILITY_PRESET hidden

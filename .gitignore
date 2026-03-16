@@ -9,6 +9,7 @@
 *~
 /build/
 /build_metal/
+/build_metal_py/
 /config.*
 /aclocal.m4
 /autom4te.cache/

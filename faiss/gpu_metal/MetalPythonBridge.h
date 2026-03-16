@@ -12,7 +12,9 @@
 #pragma once
 
 #include <faiss/Index.h>
+#include <faiss/IndexBinary.h>
 #include <faiss/gpu_metal/MetalCloner.h>
+#include <cstdint>
 #include <vector>
 
 namespace faiss {
@@ -25,6 +27,18 @@ struct StandardMetalResourcesHolder {
     ~StandardMetalResourcesHolder();
     StandardMetalResourcesHolder(const StandardMetalResourcesHolder&) = delete;
     StandardMetalResourcesHolder& operator=(const StandardMetalResourcesHolder&) = delete;
+};
+
+/// SWIG-facing cloner options mirror.
+struct MetalBridgeClonerOptions {
+    faiss::gpu::IndicesOptions indicesOptions = faiss::gpu::INDICES_64_BIT;
+    bool useFloat16 = false;
+    bool useFloat16CoarseQuantizer = false;
+    long reserveVecs = 0;
+    bool interleavedLayout = true;
+    bool storeTransposed = false;
+    bool allowCpuCoarseQuantizer = false;
+    bool verbose = false;
 };
 
 /// Bridge enum for vector/query scalar type in distance API.
@@ -50,13 +64,13 @@ struct MetalBridgeDistanceParams {
     const void* vectors = nullptr;
     MetalBridgeDistanceDataType vectorType = MetalBridgeDistanceDataType::F32;
     bool vectorsRowMajor = true;
-    idx_t numVectors = 0;
+    int64_t numVectors = 0;
     const float* vectorNorms = nullptr;
 
     const void* queries = nullptr;
     MetalBridgeDistanceDataType queryType = MetalBridgeDistanceDataType::F32;
     bool queriesRowMajor = true;
-    idx_t numQueries = 0;
+    int64_t numQueries = 0;
 
     float* outDistances = nullptr;
     bool ignoreOutDistances = false;
@@ -76,17 +90,35 @@ faiss::Index* index_cpu_to_gpu(
         StandardMetalResourcesHolder* res,
         int device,
         const faiss::Index* index,
-        const MetalClonerOptions* options = nullptr);
+        const MetalBridgeClonerOptions* options = nullptr);
 
 /// Multi-GPU clone: only single-device supported; calls index_cpu_to_gpu when size==1.
 faiss::Index* index_cpu_to_gpu_multiple(
         std::vector<StandardMetalResourcesHolder*>& res,
         std::vector<int>& devices,
         const faiss::Index* index,
-        const MetalClonerOptions* options = nullptr);
+        const MetalBridgeClonerOptions* options = nullptr);
 
 /// Copy Metal index back to CPU. Caller owns returned index.
 faiss::Index* index_gpu_to_cpu(const faiss::Index* index);
+
+/// Clone CPU binary index to Metal GPU. Caller owns returned index.
+faiss::IndexBinary* index_binary_cpu_to_gpu(
+        StandardMetalResourcesHolder* res,
+        int device,
+        const faiss::IndexBinary* index,
+        const MetalBridgeClonerOptions* options = nullptr);
+
+/// Multi-GPU binary clone: single-device only for Metal.
+faiss::IndexBinary* index_binary_cpu_to_gpu_multiple(
+        std::vector<StandardMetalResourcesHolder*>& res,
+        std::vector<int>& devices,
+        const faiss::IndexBinary* index,
+        const MetalBridgeClonerOptions* options = nullptr);
+
+/// Copy Metal binary index back to CPU. Caller owns returned index.
+faiss::IndexBinary* index_binary_gpu_to_cpu(
+        const faiss::IndexBinary* index);
 
 /// Distance API parity helpers for Python wrappers.
 void bfKnn(

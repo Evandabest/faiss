@@ -63,6 +63,33 @@ class TestMetalPython(unittest.TestCase):
         np.testing.assert_array_almost_equal(D_gpu, D_cpu)
         np.testing.assert_array_equal(I_gpu, I_cpu)
 
+    def test_index_binary_cpu_to_gpu_roundtrip(self):
+        """Binary cloner path is available from Python on Metal."""
+        if faiss.get_num_gpus() == 0:
+            self.skipTest("No Metal device")
+
+        d, nb, nq, k = 256, 300, 12, 7
+        rs = np.random.RandomState(1337)
+        xb = rs.randint(0, 256, size=(nb, d // 8), dtype=np.uint8)
+        xq = rs.randint(0, 256, size=(nq, d // 8), dtype=np.uint8)
+
+        cpu_index = faiss.IndexBinaryFlat(d)
+        cpu_index.add(xb)
+        D_cpu, I_cpu = cpu_index.search(xq, k)
+
+        res = faiss.StandardGpuResources()
+        gpu_index = faiss.index_binary_cpu_to_gpu(res, 0, cpu_index)
+        self.assertIsNotNone(gpu_index)
+        D_gpu, I_gpu = gpu_index.search(xq, k)
+        np.testing.assert_array_equal(D_gpu, D_cpu)
+        np.testing.assert_array_equal(I_gpu, I_cpu)
+
+        cpu_roundtrip = faiss.index_binary_gpu_to_cpu(gpu_index)
+        self.assertIsNotNone(cpu_roundtrip)
+        D_rt, I_rt = cpu_roundtrip.search(xq, k)
+        np.testing.assert_array_equal(D_rt, D_gpu)
+        np.testing.assert_array_equal(I_rt, I_gpu)
+
     def test_tiled_many_vectors(self):
         """Force vector tiling (nb > 131072): compare Metal vs CPU."""
         if faiss.get_num_gpus() == 0:
@@ -258,6 +285,9 @@ class TestMetalPython(unittest.TestCase):
         xq = np.random.randn(nq, d).astype(np.float32)
         xb_col = np.asfortranarray(xb)
         xq_col = np.asfortranarray(xq)
+        # swig_ptr requires C-contiguous arrays; transpose Fortran matrices.
+        xb_col_ptr = np.ascontiguousarray(xb_col.T)
+        xq_col_ptr = np.ascontiguousarray(xq_col.T)
 
         D = np.empty((nq, k), dtype=np.float32)
         I = np.empty((nq, k), dtype=np.int64)
@@ -266,11 +296,11 @@ class TestMetalPython(unittest.TestCase):
         args.metric = faiss.METRIC_L2
         args.k = k
         args.dims = d
-        args.vectors = faiss.swig_ptr(xb_col)
+        args.vectors = faiss.swig_ptr(xb_col_ptr)
         args.vectorType = faiss.DistanceDataType_F32
         args.vectorsRowMajor = False
         args.numVectors = nb
-        args.queries = faiss.swig_ptr(xq_col)
+        args.queries = faiss.swig_ptr(xq_col_ptr)
         args.queryType = faiss.DistanceDataType_F32
         args.queriesRowMajor = False
         args.numQueries = nq
