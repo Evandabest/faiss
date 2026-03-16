@@ -226,6 +226,19 @@ public:
             int nq,
             int nprobe);
 
+    void encodeIVFPQBuildLookupTables(
+            id<MTLComputeCommandEncoder> enc,
+            bool isL2,
+            id<MTLBuffer> queries,
+            id<MTLBuffer> coarseAssign,
+            id<MTLBuffer> coarseCentroids,
+            id<MTLBuffer> pqCentroids,
+            id<MTLBuffer> outLookup,
+            int nq,
+            int d,
+            int M,
+            int nprobe);
+
     void encodeIVFMergeLists(
             id<MTLComputeCommandEncoder> enc,
             id<MTLBuffer> perListDist,

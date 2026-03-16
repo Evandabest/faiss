@@ -2462,7 +2462,7 @@ bool runMetalIVFPQScan(
     id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
 
-    bool useSmall = (avgListLen > 0 && avgListLen <= 32);
+    bool useSmall = (avgListLen > 0 && avgListLen <= 32 && k <= 32);
     K.encodeIVFPQScanList(enc, useSmall, lookupTable, codes, ids,
                            listOffset, listLength, coarseAssign,
                            perListDistBuf, perListIdxBuf, paramsBuf,
@@ -2472,6 +2472,136 @@ bool runMetalIVFPQScan(
     // We overwrite params[1] (M → d is unused by merge, but nq/k/nprobe/want_min match).
     K.encodeIVFMergeLists(enc, perListDistBuf, perListIdxBuf,
                           outDistances, outIndices, paramsBuf, nq);
+
+    [enc endEncoding];
+    [cmdBuf commit];
+    [cmdBuf waitUntilCompleted];
+    return cmdBuf.status == MTLCommandBufferStatusCompleted;
+}
+
+bool runMetalBuildIVFPQLookupTables(
+        id<MTLDevice> device,
+        id<MTLCommandQueue> queue,
+        id<MTLBuffer> queries,
+        id<MTLBuffer> coarseAssign,
+        id<MTLBuffer> coarseCentroids,
+        id<MTLBuffer> pqCentroids,
+        int nq,
+        int d,
+        int M,
+        int nprobe,
+        bool isL2,
+        id<MTLBuffer> outLookup) {
+    if (!device || !queue || !queries || !coarseAssign || !pqCentroids ||
+        !outLookup) {
+        return false;
+    }
+    if (nq <= 0 || d <= 0 || M <= 0 || nprobe <= 0) return false;
+    if (isL2 && !coarseCentroids) return false;
+
+    MetalKernels& K = getMetalKernels(device);
+    if (!K.isValid()) return false;
+
+    id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+    K.encodeIVFPQBuildLookupTables(
+            enc,
+            isL2,
+            queries,
+            coarseAssign,
+            coarseCentroids,
+            pqCentroids,
+            outLookup,
+            nq,
+            d,
+            M,
+            nprobe);
+    [enc endEncoding];
+    [cmdBuf commit];
+    [cmdBuf waitUntilCompleted];
+    return cmdBuf.status == MTLCommandBufferStatusCompleted;
+}
+
+bool runMetalIVFPQFullSearch(
+        id<MTLDevice> device,
+        id<MTLCommandQueue> queue,
+        id<MTLBuffer> queries,
+        id<MTLBuffer> coarseAssign,
+        id<MTLBuffer> coarseCentroids,
+        id<MTLBuffer> pqCentroids,
+        id<MTLBuffer> lookupTable,
+        id<MTLBuffer> codes,
+        id<MTLBuffer> ids,
+        id<MTLBuffer> listOffset,
+        id<MTLBuffer> listLength,
+        int nq,
+        int d,
+        int M,
+        int k,
+        int nprobe,
+        int avgListLen,
+        bool isL2,
+        id<MTLBuffer> outDistances,
+        id<MTLBuffer> outIndices,
+        id<MTLBuffer> perListDistBuf,
+        id<MTLBuffer> perListIdxBuf) {
+    if (!device || !queue || !queries || !coarseAssign || !pqCentroids ||
+        !lookupTable || !codes || !ids || !listOffset || !listLength ||
+        !outDistances || !outIndices || !perListDistBuf || !perListIdxBuf) {
+        return false;
+    }
+    if (nq <= 0 || d <= 0 || M <= 0 || k <= 0 || nprobe <= 0) return false;
+    if (isL2 && !coarseCentroids) return false;
+
+    MetalKernels& K = getMetalKernels(device);
+    if (!K.isValid()) return false;
+
+    uint32_t sp[5] = {(uint32_t)nq, (uint32_t)M, (uint32_t)k,
+                      (uint32_t)nprobe, isL2 ? 1u : 0u};
+    id<MTLBuffer> paramsBuf = [device newBufferWithBytes:sp length:sizeof(sp)
+                                                 options:MTLResourceStorageModeShared];
+    if (!paramsBuf) return false;
+
+    id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+
+    K.encodeIVFPQBuildLookupTables(
+            enc,
+            isL2,
+            queries,
+            coarseAssign,
+            coarseCentroids,
+            pqCentroids,
+            lookupTable,
+            nq,
+            d,
+            M,
+            nprobe);
+
+    bool useSmall = (avgListLen > 0 && avgListLen <= 32 && k <= 32);
+    K.encodeIVFPQScanList(
+            enc,
+            useSmall,
+            lookupTable,
+            codes,
+            ids,
+            listOffset,
+            listLength,
+            coarseAssign,
+            perListDistBuf,
+            perListIdxBuf,
+            paramsBuf,
+            nq,
+            nprobe);
+
+    K.encodeIVFMergeLists(
+            enc,
+            perListDistBuf,
+            perListIdxBuf,
+            outDistances,
+            outIndices,
+            paramsBuf,
+            nq);
 
     [enc endEncoding];
     [cmdBuf commit];

@@ -344,10 +344,12 @@ void MetalIndexIVFPQ::search(
     // Allocate GPU buffers.
     size_t outDistBytes = (size_t)n * (size_t)k * sizeof(float);
     size_t outIdxBytes = (size_t)n * (size_t)k * sizeof(int64_t);
+    size_t queryBytes = (size_t)n * (size_t)d * sizeof(float);
     size_t perListBytes = (size_t)n * nprobe * (size_t)k * sizeof(float);
     size_t perListIdxB = (size_t)n * nprobe * (size_t)k * sizeof(int64_t);
     size_t coarseBytes = (size_t)n * nprobe * sizeof(int32_t);
 
+    ensureSearchBuf_(searchQueriesBuf_, searchQueriesCap_, queryBytes);
     ensureSearchBuf_(searchOutDistBuf_, searchOutDistCap_, outDistBytes);
     ensureSearchBuf_(searchOutIdxBuf_, searchOutIdxCap_, outIdxBytes);
     ensureSearchBuf_(searchPerListDistBuf_, searchPerListDistCap_, perListBytes);
@@ -355,21 +357,13 @@ void MetalIndexIVFPQ::search(
     ensureSearchBuf_(searchCoarseBuf_, searchCoarseCap_, coarseBytes);
     ensureSearchBuf_(lookupTableBuf_, lookupTableCap_, tableBytes);
 
-    if (!searchOutDistBuf_ || !searchOutIdxBuf_ ||
+    if (!searchQueriesBuf_ || !searchOutDistBuf_ || !searchOutIdxBuf_ ||
         !searchPerListDistBuf_ || !searchPerListIdxBuf_ ||
         !searchCoarseBuf_ || !lookupTableBuf_) {
         cpuIndex_->search(n, x, k, distances, labels);
         return;
     }
-
-    auto* lookupDst = reinterpret_cast<float*>([lookupTableBuf_ contents]);
-    computeLookupTables_(
-            (int)n,
-            x,
-            (int)nprobe,
-            coarseAssignVec.data(),
-            coarseDistVec.data(),
-            lookupDst);
+    std::memcpy([searchQueriesBuf_ contents], x, queryBytes);
 
     // Upload coarse assignments.
     auto* coarseDst = reinterpret_cast<int32_t*>([searchCoarseBuf_ contents]);
@@ -378,18 +372,55 @@ void MetalIndexIVFPQ::search(
     int avgListLen = cpuIndex_->nlist > 0
             ? (int)(cpuIndex_->ntotal / cpuIndex_->nlist)
             : 0;
-
-    bool ok = runMetalIVFPQScan(
-            device, queue,
-            lookupTableBuf_,
-            gpuIvf_->codesBuffer(),
-            gpuIvf_->idsBuffer(),
-            gpuIvf_->listOffsetGpuBuffer(),
-            gpuIvf_->listLengthGpuBuffer(),
-            searchCoarseBuf_,
-            (int)n, M, (int)k, (int)nprobe, avgListLen, isL2,
-            searchOutDistBuf_, searchOutIdxBuf_,
-            searchPerListDistBuf_, searchPerListIdxBuf_);
+    bool lutBuiltOnGpu = false;
+    bool ok = false;
+    if (gpuIvf_->pqCentroidsBuffer()) {
+        ok = runMetalIVFPQFullSearch(
+                device,
+                queue,
+                searchQueriesBuf_,
+                searchCoarseBuf_,
+                centroidBuf_,
+                gpuIvf_->pqCentroidsBuffer(),
+                lookupTableBuf_,
+                gpuIvf_->codesBuffer(),
+                gpuIvf_->idsBuffer(),
+                gpuIvf_->listOffsetGpuBuffer(),
+                gpuIvf_->listLengthGpuBuffer(),
+                (int)n,
+                d,
+                M,
+                (int)k,
+                (int)nprobe,
+                avgListLen,
+                isL2,
+                searchOutDistBuf_,
+                searchOutIdxBuf_,
+                searchPerListDistBuf_,
+                searchPerListIdxBuf_);
+        lutBuiltOnGpu = ok;
+    }
+    if (!lutBuiltOnGpu) {
+        auto* lookupDst = reinterpret_cast<float*>([lookupTableBuf_ contents]);
+        computeLookupTables_(
+                (int)n,
+                x,
+                (int)nprobe,
+                coarseAssignVec.data(),
+                coarseDistVec.data(),
+                lookupDst);
+        ok = runMetalIVFPQScan(
+                device, queue,
+                lookupTableBuf_,
+                gpuIvf_->codesBuffer(),
+                gpuIvf_->idsBuffer(),
+                gpuIvf_->listOffsetGpuBuffer(),
+                gpuIvf_->listLengthGpuBuffer(),
+                searchCoarseBuf_,
+                (int)n, M, (int)k, (int)nprobe, avgListLen, isL2,
+                searchOutDistBuf_, searchOutIdxBuf_,
+                searchPerListDistBuf_, searchPerListIdxBuf_);
+    }
 
     if (!ok) {
         cpuIndex_->search(n, x, k, distances, labels);

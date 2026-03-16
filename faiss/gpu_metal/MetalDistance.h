@@ -254,6 +254,48 @@ bool runMetalIVFPQScan(
         id<MTLBuffer> perListDistBuf,
         id<MTLBuffer> perListIdxBuf);
 
+/// Build IVFPQ lookup tables on GPU:
+/// outLookup layout is (nq * nprobe * M * 256) float.
+bool runMetalBuildIVFPQLookupTables(
+        id<MTLDevice> device,
+        id<MTLCommandQueue> queue,
+        id<MTLBuffer> queries,
+        id<MTLBuffer> coarseAssign,
+        id<MTLBuffer> coarseCentroids,
+        id<MTLBuffer> pqCentroids,
+        int nq,
+        int d,
+        int M,
+        int nprobe,
+        bool isL2,
+        id<MTLBuffer> outLookup);
+
+/// Fused IVFPQ path: build LUT on GPU + scan lists + merge in one command
+/// buffer to reduce synchronization overhead.
+bool runMetalIVFPQFullSearch(
+        id<MTLDevice> device,
+        id<MTLCommandQueue> queue,
+        id<MTLBuffer> queries,
+        id<MTLBuffer> coarseAssign,
+        id<MTLBuffer> coarseCentroids,
+        id<MTLBuffer> pqCentroids,
+        id<MTLBuffer> lookupTable,
+        id<MTLBuffer> codes,
+        id<MTLBuffer> ids,
+        id<MTLBuffer> listOffset,
+        id<MTLBuffer> listLength,
+        int nq,
+        int d,
+        int M,
+        int k,
+        int nprobe,
+        int avgListLen,
+        bool isL2,
+        id<MTLBuffer> outDistances,
+        id<MTLBuffer> outIndices,
+        id<MTLBuffer> perListDistBuf,
+        id<MTLBuffer> perListIdxBuf);
+
 /// Binary (Hamming) brute-force top-k search.
 ///
 /// @param queries   Binary query vectors (nq * code_size bytes)

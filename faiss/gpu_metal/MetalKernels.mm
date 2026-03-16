@@ -501,6 +501,34 @@ void MetalKernels::encodeIVFPQScanList(
         threadsPerThreadgroup:MTLSizeMake(useSmall ? 32 : 256, 1, 1)];
 }
 
+void MetalKernels::encodeIVFPQBuildLookupTables(
+        id<MTLComputeCommandEncoder> enc,
+        bool isL2,
+        id<MTLBuffer> queries,
+        id<MTLBuffer> coarseAssign,
+        id<MTLBuffer> coarseCentroids,
+        id<MTLBuffer> pqCentroids,
+        id<MTLBuffer> outLookup,
+        int nq,
+        int d,
+        int M,
+        int nprobe) {
+    [enc setComputePipelineState:
+            pipeline(isL2 ? "ivfpq_build_lut_l2" : "ivfpq_build_lut_ip")];
+    [enc setBuffer:queries         offset:0 atIndex:0];
+    [enc setBuffer:coarseAssign    offset:0 atIndex:1];
+    [enc setBuffer:coarseCentroids offset:0 atIndex:2];
+    [enc setBuffer:pqCentroids     offset:0 atIndex:3];
+    [enc setBuffer:outLookup       offset:0 atIndex:4];
+    uint32_t args[4] = {
+            (uint32_t)nq, (uint32_t)d, (uint32_t)M, (uint32_t)nprobe};
+    [enc setBytes:args length:sizeof(args) atIndex:5];
+    const NSUInteger totalTG =
+            (NSUInteger)nq * (NSUInteger)nprobe * (NSUInteger)M;
+    [enc dispatchThreadgroups:MTLSizeMake(totalTG, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+}
+
 void MetalKernels::encodeHammingDistanceTopK(
         id<MTLComputeCommandEncoder> enc,
         id<MTLBuffer> queries,
