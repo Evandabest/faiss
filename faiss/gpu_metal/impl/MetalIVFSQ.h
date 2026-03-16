@@ -59,7 +59,7 @@ public:
             const idx_t* list_nos,
             const idx_t* xids);
 
-    /// Upload per-dimension SQ decode tables (SQ8 only).
+    /// Upload per-dimension SQ decode tables (SQ4/SQ6/SQ8 only).
     /// tables: host pointer, vmin[0..d-1] then vdiff[0..d-1] = 2*d floats
     void setSQTables(const float* tables);
 

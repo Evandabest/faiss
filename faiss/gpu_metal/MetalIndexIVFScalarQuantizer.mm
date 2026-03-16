@@ -43,6 +43,12 @@ static bool toMetalSQType(
         case faiss::ScalarQuantizer::QT_8bit:
             out = MetalSQType::SQ8;
             return true;
+        case faiss::ScalarQuantizer::QT_8bit_uniform:
+            out = MetalSQType::SQ8;
+            return true;
+        case faiss::ScalarQuantizer::QT_8bit_direct:
+            out = MetalSQType::SQ8_DIRECT;
+            return true;
         case faiss::ScalarQuantizer::QT_fp16:
             out = MetalSQType::FP16;
             return true;
@@ -183,9 +189,26 @@ void MetalIndexIVFScalarQuantizer::uploadCentroids_() const {
 
 void MetalIndexIVFScalarQuantizer::uploadSQTables_() const {
     if (!cpuIndex_ || !gpuIvf_) return;
-    if (gpuIvf_->sqType() == MetalSQType::FP16) return;
+    if (gpuIvf_->sqType() == MetalSQType::FP16 ||
+        gpuIvf_->sqType() == MetalSQType::SQ8_DIRECT) {
+        return;
+    }
 
     const auto& trained = cpuIndex_->sq.trained;
+    std::vector<float> tables;
+    if (cpuIndex_->sq.qtype == faiss::ScalarQuantizer::QT_8bit_uniform) {
+        if (trained.size() < 2) {
+            return;
+        }
+        tables.resize((size_t)d * 2);
+        for (int i = 0; i < d; ++i) {
+            tables[(size_t)i] = trained[0];
+            tables[(size_t)d + (size_t)i] = trained[1];
+        }
+        gpuIvf_->setSQTables(tables.data());
+        return;
+    }
+
     if (trained.size() < (size_t)d * 2) return;
     gpuIvf_->setSQTables(trained.data());
 }

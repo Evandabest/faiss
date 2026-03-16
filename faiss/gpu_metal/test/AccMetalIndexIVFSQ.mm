@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 #import <cmath>
 #import <memory>
+#import <random>
 #import <set>
 #import <vector>
 
@@ -98,8 +99,20 @@ TEST_P(AccMetalIndexIVFSQ, RecallVsCpu) {
 
     std::vector<float> data(p.nb * p.dim);
     std::vector<float> queries(p.nq * p.dim);
-    faiss::float_rand(data.data(), data.size(), 42);
-    faiss::float_rand(queries.data(), queries.size(), 1337);
+    if (p.sqType == faiss::ScalarQuantizer::QT_8bit_direct) {
+        std::mt19937 rng(42);
+        std::uniform_int_distribution<int> u8(0, 255);
+        for (float& v : data) {
+            v = (float)u8(rng);
+        }
+        std::mt19937 rngQ(1337);
+        for (float& v : queries) {
+            v = (float)u8(rngQ);
+        }
+    } else {
+        faiss::float_rand(data.data(), data.size(), 42);
+        faiss::float_rand(queries.data(), queries.size(), 1337);
+    }
 
     auto cpuIdx = makeCpuIVFSQ(
             p.dim, p.nlist, p.sqType, p.metric, p.nb, data.data());
@@ -167,6 +180,22 @@ INSTANTIATE_TEST_SUITE_P(
                 IVFSQTestParam{128, 32, 10000, 100, 20,
                                faiss::ScalarQuantizer::QT_fp16,
                                faiss::METRIC_INNER_PRODUCT, 0.85f}));
+
+INSTANTIATE_TEST_SUITE_P(
+        SQ8Uniform_L2,
+        AccMetalIndexIVFSQ,
+        ::testing::Values(
+                IVFSQTestParam{64, 16, 5000, 50, 10,
+                               faiss::ScalarQuantizer::QT_8bit_uniform,
+                               faiss::METRIC_L2, 0.85f}));
+
+INSTANTIATE_TEST_SUITE_P(
+        SQ8Direct_L2,
+        AccMetalIndexIVFSQ,
+        ::testing::Values(
+                IVFSQTestParam{64, 16, 5000, 50, 10,
+                               faiss::ScalarQuantizer::QT_8bit_direct,
+                               faiss::METRIC_L2, 0.95f}));
 
 INSTANTIATE_TEST_SUITE_P(
         QT4_L2,

@@ -2348,7 +2348,11 @@ bool runMetalIVFSQScan(
         !perListDistBuf || !perListIdxBuf)
         return false;
     if (k <= 0 || nq <= 0 || nprobe <= 0) return false;
-    if (sqType != MetalSQType::FP16 && !sqTables) return false;
+    if (sqType != MetalSQType::FP16 &&
+        sqType != MetalSQType::SQ8_DIRECT &&
+        !sqTables) {
+        return false;
+    }
 
     MetalKernels& K = getMetalKernels(device);
     if (!K.isValid()) return false;
@@ -2363,6 +2367,9 @@ bool runMetalIVFSQScan(
             break;
         case MetalSQType::SQ8:
             variant = IVFScanVariant::SQ8;
+            break;
+        case MetalSQType::SQ8_DIRECT:
+            variant = IVFScanVariant::SQ8Direct;
             break;
         case MetalSQType::FP16:
             variant = IVFScanVariant::FP16;

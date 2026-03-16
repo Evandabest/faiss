@@ -433,6 +433,8 @@ void MetalKernels::encodeIVFScanList(
             name = "ivf_scan_list_sq6"; tgSize = 256; break;
         case IVFScanVariant::SQ8:
             name = "ivf_scan_list_sq8"; tgSize = 256; break;
+        case IVFScanVariant::SQ8Direct:
+            name = "ivf_scan_list_sq8_direct"; tgSize = 256; break;
         case IVFScanVariant::FP16:
             name = "ivf_scan_list_fp16"; tgSize = 256; break;
         default:

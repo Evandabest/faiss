@@ -24,6 +24,7 @@ static size_t sqCodeSize(MetalSQType sqType, int dim) {
         case MetalSQType::SQ6:
             return ((size_t)dim * 6 + 7) / 8;
         case MetalSQType::SQ8:
+        case MetalSQType::SQ8_DIRECT:
             return (size_t)dim * sizeof(uint8_t);
         case MetalSQType::FP16:
             return (size_t)dim * sizeof(uint16_t); // half = 2 bytes
@@ -170,7 +171,8 @@ void MetalIVFSQImpl::appendCodes(
 
 void MetalIVFSQImpl::setSQTables(const float* tables) {
     FAISS_THROW_IF_NOT_MSG(
-            sqType_ != MetalSQType::FP16,
+            sqType_ != MetalSQType::FP16 &&
+                    sqType_ != MetalSQType::SQ8_DIRECT,
             "setSQTables only needed for non-FP16 SQ types");
     FAISS_THROW_IF_NOT(tables != nullptr);
 

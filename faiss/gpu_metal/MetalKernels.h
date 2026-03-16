@@ -19,7 +19,16 @@
 namespace faiss {
 namespace gpu_metal {
 
-enum class IVFScanVariant { Standard, Small, Interleaved, SQ4, SQ6, SQ8, FP16 };
+enum class IVFScanVariant {
+    Standard,
+    Small,
+    Interleaved,
+    SQ4,
+    SQ6,
+    SQ8,
+    SQ8Direct,
+    FP16
+};
 
 class MetalKernels {
 public:
