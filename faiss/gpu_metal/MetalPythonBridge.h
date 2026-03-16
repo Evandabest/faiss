@@ -30,6 +30,8 @@ struct StandardMetalResourcesHolder {
 /// Bridge enum for vector/query scalar type in distance API.
 enum class MetalBridgeDistanceDataType {
     F32 = 1,
+    F16,
+    BF16,
 };
 
 /// Bridge enum for output index type in distance API.

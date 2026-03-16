@@ -810,9 +810,11 @@ void bfKnn(
             args.vectorsRowMajor && args.queriesRowMajor,
             "bfKnn(params): only row-major vectors/queries are supported");
     FAISS_THROW_IF_NOT_MSG(
-            args.vectorType == MetalDistanceDataType::F32 &&
-                    args.queryType == MetalDistanceDataType::F32,
-            "bfKnn(params): only F32 vectors/queries are supported");
+            args.vectorType == MetalDistanceDataType::F32,
+            "bfKnn(params): vectorType F16/BF16 is not yet supported on Metal");
+    FAISS_THROW_IF_NOT_MSG(
+            args.queryType == MetalDistanceDataType::F32,
+            "bfKnn(params): queryType F16/BF16 is not yet supported on Metal");
     FAISS_THROW_IF_NOT_MSG(
             args.metric != METRIC_Lp,
             "bfKnn(params): METRIC_Lp is not supported on Metal");
@@ -885,9 +887,11 @@ void bfKnn_tiling(
             args.vectorsRowMajor && args.queriesRowMajor,
             "bfKnn_tiling(params): only row-major vectors/queries are supported");
     FAISS_THROW_IF_NOT_MSG(
-            args.vectorType == MetalDistanceDataType::F32 &&
-                    args.queryType == MetalDistanceDataType::F32,
-            "bfKnn_tiling(params): only F32 vectors/queries are supported");
+            args.vectorType == MetalDistanceDataType::F32,
+            "bfKnn_tiling(params): vectorType F16/BF16 is not yet supported on Metal");
+    FAISS_THROW_IF_NOT_MSG(
+            args.queryType == MetalDistanceDataType::F32,
+            "bfKnn_tiling(params): queryType F16/BF16 is not yet supported on Metal");
     FAISS_THROW_IF_NOT_MSG(
             args.metric != METRIC_Lp,
             "bfKnn_tiling(params): METRIC_Lp is not supported on Metal");

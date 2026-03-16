@@ -165,6 +165,40 @@ class TestMetalPython(unittest.TestCase):
         np.testing.assert_allclose(D_gpu, D_cpu, rtol=1e-5, atol=1e-5)
         np.testing.assert_array_equal(I_gpu, I_cpu)
 
+    def test_bfknn_params_f16_not_supported_yet(self):
+        """F16/BF16 enums are exposed, but Metal params path currently rejects them clearly."""
+        if faiss.get_num_gpus() == 0:
+            self.skipTest("No Metal device")
+
+        d, nb, nq, k = 32, 256, 16, 5
+        np.random.seed(9200)
+        xb = np.random.randn(nb, d).astype(np.float16)
+        xq = np.random.randn(nq, d).astype(np.float16)
+        D = np.empty((nq, k), dtype=np.float32)
+        I = np.empty((nq, k), dtype=np.int64)
+
+        args = faiss.GpuDistanceParams()
+        args.metric = faiss.METRIC_L2
+        args.k = k
+        args.dims = d
+        args.vectors = faiss.swig_ptr(xb)
+        args.vectorType = faiss.DistanceDataType_F16
+        args.vectorsRowMajor = True
+        args.numVectors = nb
+        args.queries = faiss.swig_ptr(xq)
+        args.queryType = faiss.DistanceDataType_F16
+        args.queriesRowMajor = True
+        args.numQueries = nq
+        args.outDistances = faiss.swig_ptr(D)
+        args.outIndicesType = faiss.IndicesDataType_I64
+        args.outIndices = faiss.swig_ptr(I)
+        args.device = 0
+        args.use_cuvs = False
+
+        res = faiss.StandardGpuResources()
+        with self.assertRaises(RuntimeError):
+            faiss.bfKnn(res, args)
+
 
 if __name__ == "__main__":
     unittest.main()

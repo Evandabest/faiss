@@ -26,6 +26,8 @@ class MetalResources;
 /// Scalar type of distance input vectors for params-based API.
 enum class MetalDistanceDataType {
     F32 = 1,
+    F16,
+    BF16,
 };
 
 /// Scalar type of output indices for params-based API.

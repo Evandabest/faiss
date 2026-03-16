@@ -16,6 +16,23 @@
 namespace faiss {
 namespace gpu_metal {
 
+namespace {
+
+::faiss::gpu_metal::MetalDistanceDataType toCoreDistanceType(
+        MetalBridgeDistanceDataType t) {
+    switch (t) {
+        case MetalBridgeDistanceDataType::F32:
+            return ::faiss::gpu_metal::MetalDistanceDataType::F32;
+        case MetalBridgeDistanceDataType::F16:
+            return ::faiss::gpu_metal::MetalDistanceDataType::F16;
+        case MetalBridgeDistanceDataType::BF16:
+            return ::faiss::gpu_metal::MetalDistanceDataType::BF16;
+    }
+    return ::faiss::gpu_metal::MetalDistanceDataType::F32;
+}
+
+} // namespace
+
 StandardMetalResourcesHolder::StandardMetalResourcesHolder() {
     impl = new StandardMetalResources();
 }
@@ -68,12 +85,12 @@ void bfKnn(
     coreArgs.k = args.k;
     coreArgs.dims = args.dims;
     coreArgs.vectors = args.vectors;
-    coreArgs.vectorType = ::faiss::gpu_metal::MetalDistanceDataType::F32;
+    coreArgs.vectorType = toCoreDistanceType(args.vectorType);
     coreArgs.vectorsRowMajor = args.vectorsRowMajor;
     coreArgs.numVectors = args.numVectors;
     coreArgs.vectorNorms = args.vectorNorms;
     coreArgs.queries = args.queries;
-    coreArgs.queryType = ::faiss::gpu_metal::MetalDistanceDataType::F32;
+    coreArgs.queryType = toCoreDistanceType(args.queryType);
     coreArgs.queriesRowMajor = args.queriesRowMajor;
     coreArgs.numQueries = args.numQueries;
     coreArgs.outDistances = args.outDistances;
@@ -103,12 +120,12 @@ void bfKnn_tiling(
     coreArgs.k = args.k;
     coreArgs.dims = args.dims;
     coreArgs.vectors = args.vectors;
-    coreArgs.vectorType = ::faiss::gpu_metal::MetalDistanceDataType::F32;
+    coreArgs.vectorType = toCoreDistanceType(args.vectorType);
     coreArgs.vectorsRowMajor = args.vectorsRowMajor;
     coreArgs.numVectors = args.numVectors;
     coreArgs.vectorNorms = args.vectorNorms;
     coreArgs.queries = args.queries;
-    coreArgs.queryType = ::faiss::gpu_metal::MetalDistanceDataType::F32;
+    coreArgs.queryType = toCoreDistanceType(args.queryType);
     coreArgs.queriesRowMajor = args.queriesRowMajor;
     coreArgs.numQueries = args.numQueries;
     coreArgs.outDistances = args.outDistances;
