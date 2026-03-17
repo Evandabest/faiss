@@ -41,6 +41,29 @@ struct AppendStats {
     int numBatches = 0;
 };
 
+struct ScopedEnvVar {
+    std::string key;
+    std::string oldVal;
+    bool hadOld = false;
+
+    ScopedEnvVar(const char* k, const char* v) : key(k ? k : "") {
+        const char* old = std::getenv(key.c_str());
+        if (old) {
+            hadOld = true;
+            oldVal = old;
+        }
+        setenv(key.c_str(), v, 1);
+    }
+
+    ~ScopedEnvVar() {
+        if (hadOld) {
+            setenv(key.c_str(), oldVal.c_str(), 1);
+        } else {
+            unsetenv(key.c_str());
+        }
+    }
+};
+
 std::vector<int> parseIntList(const char* s) {
     std::vector<int> out;
     if (!s || s[0] == '\0') {
@@ -145,6 +168,7 @@ void printStats(
 } // namespace
 
 int main(int argc, char** argv) {
+    ScopedEnvVar strictFallback("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK", "0");
     int d = 128;
     int nlist = 1024;
     int totalVecs = 65536;
@@ -182,6 +206,7 @@ int main(int argc, char** argv) {
 
     printf("=== Faiss Metal vs CPU IVFFlat Append Benchmark ===\n\n");
     printf("Config: d=%d nlist=%d train=%d total_add=%d\n", d, nlist, trainVecs, totalVecs);
+    printf("Fallback policy: strict GPU mode (FAISS_METAL_IVF_ALLOW_CPU_FALLBACK=0)\n");
     printf("Batch sizes:");
     for (int bs : batchSizes) {
         printf(" %d", bs);

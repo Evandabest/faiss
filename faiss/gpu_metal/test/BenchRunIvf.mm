@@ -1,6 +1,6 @@
 // @lint-ignore-every LICENSELINT
 /**
- * Wrapper that implements run2.sh logic: run the IVFFlat benchmark (sweep k 20..2048).
+ * Wrapper that implements run2.sh logic: run the IVFFlat benchmark (sweep k 20..1024).
  * Finds and executes BenchMetalIvfVsCpu from the same directory as this executable.
  */
 

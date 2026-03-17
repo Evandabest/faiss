@@ -16,7 +16,9 @@
 
 #include <cstring>
 #include <cstdlib>
+#include <cstdio>
 #include <limits>
+#include <string>
 #include <vector>
 
 namespace {
@@ -101,6 +103,18 @@ size_t chooseIvfPreassignedTileRows(
 
 bool allowCpuFallbackForIvf() {
     const char* env = std::getenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK");
+    if (!env || env[0] == '\0') {
+        return true;
+    }
+    if (env[0] == '0' || env[0] == 'n' || env[0] == 'N' || env[0] == 'f' ||
+        env[0] == 'F') {
+        return false;
+    }
+    return true;
+}
+
+bool logCpuFallbackForIvf() {
+    const char* env = std::getenv("FAISS_METAL_IVF_LOG_CPU_FALLBACK");
     if (!env || env[0] == '\0') {
         return true;
     }
@@ -455,6 +469,9 @@ void MetalIndexIVFFlat::search(
         }
     };
     const bool allowCpuFallback = allowCpuFallbackForIvf();
+    const bool logCpuFallback = logCpuFallbackForIvf();
+    idx_t fallbackCount = 0;
+    std::string firstFallbackReason;
     auto fallbackOrThrow = [&](idx_t qBase, idx_t qCount, const char* reason) {
         if (!allowCpuFallback) {
             FAISS_THROW_FMT(
@@ -463,6 +480,10 @@ void MetalIndexIVFFlat::search(
                     reason,
                     (long long)qBase,
                     (long long)qCount);
+        }
+        ++fallbackCount;
+        if (firstFallbackReason.empty()) {
+            firstFallbackReason = reason ? reason : "unknown";
         }
         cpuFallbackSearch(qBase, qCount);
     };
@@ -626,6 +647,14 @@ void MetalIndexIVFFlat::search(
             }
         }
     }
+
+    if (allowCpuFallback && logCpuFallback && fallbackCount > 0) {
+        std::fprintf(
+                stderr,
+                "IVF_CPU_FALLBACK,api=search,count=%lld,first_reason=%s\n",
+                (long long)fallbackCount,
+                firstFallbackReason.c_str());
+    }
 }
 
 void MetalIndexIVFFlat::search_preassigned(
@@ -707,6 +736,9 @@ void MetalIndexIVFFlat::search_preassigned(
                 stats);
     };
     const bool allowCpuFallback = allowCpuFallbackForIvf();
+    const bool logCpuFallback = logCpuFallbackForIvf();
+    idx_t fallbackCount = 0;
+    std::string firstFallbackReason;
     auto fallbackOrThrow = [&](idx_t qBase, idx_t qCount, const char* reason) {
         if (!allowCpuFallback) {
             FAISS_THROW_FMT(
@@ -715,6 +747,10 @@ void MetalIndexIVFFlat::search_preassigned(
                     reason,
                     (long long)qBase,
                     (long long)qCount);
+        }
+        ++fallbackCount;
+        if (firstFallbackReason.empty()) {
+            firstFallbackReason = reason ? reason : "unknown";
         }
         cpuFallbackSearch(qBase, qCount);
     };
@@ -812,6 +848,14 @@ void MetalIndexIVFFlat::search_preassigned(
                 distances[globalPos] = outDistPtr[localPos];
             }
         }
+    }
+
+    if (allowCpuFallback && logCpuFallback && fallbackCount > 0) {
+        std::fprintf(
+                stderr,
+                "IVF_CPU_FALLBACK,api=search_preassigned,count=%lld,first_reason=%s\n",
+                (long long)fallbackCount,
+                firstFallbackReason.c_str());
     }
 }
 

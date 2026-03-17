@@ -2,13 +2,15 @@
 /**
  * Copyright (c) Meta Platforms, Inc. and its affiliates.
  *
- * CPU vs Metal GPU IVFFlat search benchmark. Sweeps over k values
- * (20, 50, 100, 128, 256, 512, 1024, 2048) and reports CPU vs Metal time and speedup per k.
- * IVF supports k up to 2048 (getMetalDistanceMaxK()).
+ * CPU vs Metal GPU IVFFlat search benchmark. Sweeps over supported k values
+ * (20, 50, 100, 128, 256, 512, 1024) and reports CPU vs Metal time and speedup per k.
+ * Metal IVFFlat currently supports k <= 1024.
  */
 
 #import <chrono>
 #import <cstdio>
+#import <cstdlib>
+#import <string>
 #import <vector>
 
 #include <faiss/IndexFlat.h>
@@ -22,9 +24,33 @@ static double nowSecondsIvf() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+struct ScopedEnvVar {
+    std::string key;
+    std::string oldVal;
+    bool hadOld = false;
+
+    ScopedEnvVar(const char* k, const char* v) : key(k ? k : "") {
+        const char* old = std::getenv(key.c_str());
+        if (old) {
+            hadOld = true;
+            oldVal = old;
+        }
+        setenv(key.c_str(), v, 1);
+    }
+
+    ~ScopedEnvVar() {
+        if (hadOld) {
+            setenv(key.c_str(), oldVal.c_str(), 1);
+        } else {
+            unsetenv(key.c_str());
+        }
+    }
+};
+
 int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
+    ScopedEnvVar strictFallback("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK", "0");
 
     printf("=== Faiss Metal vs CPU IVFFlat Benchmark ===\n\n");
 
@@ -42,10 +68,12 @@ int main(int argc, char** argv) {
     const int nWarmup = 2;
     const int nRuns = 5;
 
-    const int ks[] = {20, 50, 100, 128, 256, 512, 1024, 2048};
+    const int ks[] = {20, 50, 100, 128, 256, 512, 1024};
     const int numK = (int)(sizeof(ks) / sizeof(ks[0]));
 
     printf("Config: d=%d nb=%d nq=%d nlist=%d nprobe=%d\n", d, nb, nq, nlist, nprobe);
+    printf("Supported k range (Metal IVFFlat): k <= 1024\n");
+    printf("Fallback policy: strict GPU mode (FAISS_METAL_IVF_ALLOW_CPU_FALLBACK=0)\n");
     printf("Warmup: %d runs, Timed: %d runs\n\n", nWarmup, nRuns);
 
     std::vector<float> db(nb * d);
@@ -100,4 +128,3 @@ int main(int argc, char** argv) {
     printf("==================\n");
     return 0;
 }
-

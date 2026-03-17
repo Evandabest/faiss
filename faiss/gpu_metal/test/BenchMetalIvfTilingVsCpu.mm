@@ -10,6 +10,7 @@
 #import <cstdio>
 #import <cstdlib>
 #import <cstring>
+#import <string>
 #import <vector>
 
 #include <faiss/IndexFlat.h>
@@ -25,6 +26,29 @@ double nowSeconds() {
                    std::chrono::steady_clock::now().time_since_epoch())
             .count();
 }
+
+struct ScopedEnvVar {
+    std::string key;
+    std::string oldVal;
+    bool hadOld = false;
+
+    ScopedEnvVar(const char* k, const char* v) : key(k ? k : "") {
+        const char* old = std::getenv(key.c_str());
+        if (old) {
+            hadOld = true;
+            oldVal = old;
+        }
+        setenv(key.c_str(), v, 1);
+    }
+
+    ~ScopedEnvVar() {
+        if (hadOld) {
+            setenv(key.c_str(), oldVal.c_str(), 1);
+        } else {
+            unsetenv(key.c_str());
+        }
+    }
+};
 
 size_t choosePredictedTileRows(
         size_t nq,
@@ -51,6 +75,7 @@ size_t choosePredictedTileRows(
 } // namespace
 
 int main(int argc, char** argv) {
+    ScopedEnvVar strictFallback("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK", "0");
     int d = 128;
     int nb = 100000;
     int nq = 4096;
@@ -96,6 +121,7 @@ int main(int argc, char** argv) {
             k,
             nWarmup,
             nRuns);
+    printf("Fallback policy: strict GPU mode (FAISS_METAL_IVF_ALLOW_CPU_FALLBACK=0)\n\n");
 
     auto metalRes = std::make_shared<faiss::gpu_metal::StandardMetalResources>();
     if (!metalRes->getResources() || !metalRes->getResources()->isAvailable()) {
@@ -190,4 +216,3 @@ int main(int argc, char** argv) {
     printf("==================\n");
     return 0;
 }
-
