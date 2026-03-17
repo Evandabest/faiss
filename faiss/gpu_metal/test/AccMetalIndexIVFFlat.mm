@@ -361,6 +361,51 @@ TEST_F(AccMetalIndexIVFFlat, EmptyIndex) {
     }
 }
 
+TEST_F(AccMetalIndexIVFFlat, RejectsKAbove1024InSearch) {
+    const int dim = 32, nlist = 16, nq = 2;
+    const faiss::idx_t k = 1025;
+
+    faiss::gpu_metal::MetalIndexIVFFlat metalIdx(
+            resources_, dim, (faiss::idx_t)nlist, faiss::METRIC_L2);
+
+    std::vector<float> queries((size_t)nq * dim, 0.0f);
+    std::vector<float> distances((size_t)nq * (size_t)k, 0.0f);
+    std::vector<faiss::idx_t> labels((size_t)nq * (size_t)k, -1);
+
+    EXPECT_ANY_THROW(
+            metalIdx.search(nq, queries.data(), k, distances.data(), labels.data()));
+}
+
+TEST_F(AccMetalIndexIVFFlat, RejectsKAbove1024InSearchPreassigned) {
+    const int dim = 32, nlist = 16, nq = 2;
+    const faiss::idx_t k = 1025;
+    const int nprobe = 4;
+
+    faiss::gpu_metal::MetalIndexIVFFlat metalIdx(
+            resources_, dim, (faiss::idx_t)nlist, faiss::METRIC_L2);
+
+    std::vector<float> queries((size_t)nq * dim, 0.0f);
+    std::vector<float> distances((size_t)nq * (size_t)k, 0.0f);
+    std::vector<faiss::idx_t> labels((size_t)nq * (size_t)k, -1);
+    std::vector<faiss::idx_t> assign((size_t)nq * (size_t)nprobe, 0);
+    std::vector<float> centroidDistances((size_t)nq * (size_t)nprobe, 0.0f);
+
+    faiss::IVFSearchParameters params;
+    params.nprobe = nprobe;
+
+    EXPECT_ANY_THROW(metalIdx.search_preassigned(
+            nq,
+            queries.data(),
+            k,
+            assign.data(),
+            centroidDistances.data(),
+            distances.data(),
+            labels.data(),
+            false,
+            &params,
+            nullptr));
+}
+
 TEST_F(AccMetalIndexIVFFlat, ResetThenSearch) {
     const int dim = 32, nb = 1000, nq = 5, nlist = 8, k = 3;
 
@@ -824,6 +869,144 @@ TEST_F(AccMetalIndexIVFFlat, ClonerOptionsInterleavedLayoutTrue) {
     cpuIdx->search(nq, queries.data(), k, refD.data(), refL.data());
     metalRaw->search(nq, queries.data(), k, testD.data(), testL.data());
     expectRecall(nq, k, 0.85f, refL.data(), testL.data());
+
+    delete metalRaw;
+}
+
+TEST_F(AccMetalIndexIVFFlat, InterleavedNonMultipleOf4DimensionMatchesCpu) {
+    const int dim = 66, nlist = 16, nb = 3000, nq = 20, k = 10;
+    std::vector<float> vecs(nb * dim), queries(nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 411);
+    faiss::float_rand(queries.data(), queries.size(), 412);
+
+    auto cpuIdx = makeCpuIVFFlat(dim, nlist, faiss::METRIC_L2, nb, vecs.data());
+    cpuIdx->add(nb, vecs.data());
+    cpuIdx->nprobe = 8;
+
+    faiss::gpu_metal::StandardMetalResources stdRes;
+    faiss::gpu_metal::MetalClonerOptions opts;
+    opts.interleavedLayout = true;
+
+    faiss::Index* metalRaw = faiss::gpu_metal::index_cpu_to_metal_gpu(
+            &stdRes, 0, cpuIdx.get(), &opts);
+    ASSERT_NE(metalRaw, nullptr);
+    auto* metalIVF = dynamic_cast<faiss::gpu_metal::MetalIndexIVFFlat*>(metalRaw);
+    ASSERT_NE(metalIVF, nullptr);
+    EXPECT_TRUE(metalIVF->interleavedLayout());
+
+    std::vector<float> refD((size_t)nq * k), testD((size_t)nq * k);
+    std::vector<faiss::idx_t> refL((size_t)nq * k), testL((size_t)nq * k);
+    cpuIdx->search(nq, queries.data(), k, refD.data(), refL.data());
+    metalRaw->search(nq, queries.data(), k, testD.data(), testL.data());
+    expectRecall(nq, k, 0.99f, refL.data(), testL.data());
+
+    delete metalRaw;
+}
+
+TEST_F(AccMetalIndexIVFFlat, DimensionAbove512MatchesCpu) {
+    const int dim = 640, nlist = 16, nb = 2000, nq = 12, k = 8;
+    std::vector<float> vecs(nb * dim), queries(nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 421);
+    faiss::float_rand(queries.data(), queries.size(), 422);
+
+    auto cpuIdx = makeCpuIVFFlat(dim, nlist, faiss::METRIC_L2, nb, vecs.data());
+    cpuIdx->add(nb, vecs.data());
+    cpuIdx->nprobe = 6;
+
+    faiss::gpu_metal::StandardMetalResources stdRes;
+    faiss::gpu_metal::MetalClonerOptions opts;
+    faiss::Index* metalRaw = faiss::gpu_metal::index_cpu_to_metal_gpu(
+            &stdRes, 0, cpuIdx.get(), &opts);
+    ASSERT_NE(metalRaw, nullptr);
+
+    std::vector<float> refD((size_t)nq * k), testD((size_t)nq * k);
+    std::vector<faiss::idx_t> refL((size_t)nq * k), testL((size_t)nq * k);
+    cpuIdx->search(nq, queries.data(), k, refD.data(), refL.data());
+    metalRaw->search(nq, queries.data(), k, testD.data(), testL.data());
+    expectRecall(nq, k, 0.99f, refL.data(), testL.data());
+
+    delete metalRaw;
+}
+
+TEST_F(AccMetalIndexIVFFlat, KAtUpperBound1024MatchesCpu) {
+    const int dim = 16, nlist = 1, nb = 512, nq = 4, k = 1024;
+
+    std::vector<float> vecs((size_t)nb * dim), queries((size_t)nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 431);
+    faiss::float_rand(queries.data(), queries.size(), 432);
+
+    auto cpuIdx = makeCpuIVFFlat(dim, nlist, faiss::METRIC_L2, nb, vecs.data());
+    cpuIdx->add(nb, vecs.data());
+    cpuIdx->nprobe = 1;
+
+    faiss::gpu_metal::StandardMetalResources stdRes;
+    faiss::gpu_metal::MetalClonerOptions opts;
+    faiss::Index* metalRaw = faiss::gpu_metal::index_cpu_to_metal_gpu(
+            &stdRes, 0, cpuIdx.get(), &opts);
+    ASSERT_NE(metalRaw, nullptr);
+
+    std::vector<float> refD((size_t)nq * k), testD((size_t)nq * k);
+    std::vector<faiss::idx_t> refL((size_t)nq * k), testL((size_t)nq * k);
+    cpuIdx->search(nq, queries.data(), k, refD.data(), refL.data());
+    metalRaw->search(nq, queries.data(), k, testD.data(), testL.data());
+
+    expectRecall(nq, k, 1.0f, refL.data(), testL.data());
+
+    delete metalRaw;
+}
+
+TEST_F(AccMetalIndexIVFFlat, HighNprobeTimesKMatchesCpu) {
+    const int dim = 32, nlist = 64, nb = 8000, nq = 24, k = 32;
+    const size_t nprobe = 64; // nprobe * k = 2048 > 1024 exactness envelope
+
+    std::vector<float> vecs((size_t)nb * dim), queries((size_t)nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 441);
+    faiss::float_rand(queries.data(), queries.size(), 442);
+
+    auto cpuIdx = makeCpuIVFFlat(dim, nlist, faiss::METRIC_L2, nb, vecs.data());
+    cpuIdx->add(nb, vecs.data());
+    cpuIdx->nprobe = nprobe;
+
+    faiss::gpu_metal::StandardMetalResources stdRes;
+    faiss::gpu_metal::MetalClonerOptions opts;
+    faiss::Index* metalRaw = faiss::gpu_metal::index_cpu_to_metal_gpu(
+            &stdRes, 0, cpuIdx.get(), &opts);
+    ASSERT_NE(metalRaw, nullptr);
+
+    std::vector<float> refD((size_t)nq * k), testD((size_t)nq * k);
+    std::vector<faiss::idx_t> refL((size_t)nq * k), testL((size_t)nq * k);
+    cpuIdx->search(nq, queries.data(), k, refD.data(), refL.data());
+    metalRaw->search(nq, queries.data(), k, testD.data(), testL.data());
+
+    expectRecall(nq, k, 1.0f, refL.data(), testL.data());
+
+    delete metalRaw;
+}
+
+TEST_F(AccMetalIndexIVFFlat, SkewedSingleListMatchesCpu) {
+    const int dim = 24, nlist = 1, nb = 3000, nq = 20, k = 20;
+    const size_t nprobe = 1; // single large list; list len > 1024
+
+    std::vector<float> vecs((size_t)nb * dim), queries((size_t)nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 451);
+    faiss::float_rand(queries.data(), queries.size(), 452);
+
+    auto cpuIdx = makeCpuIVFFlat(dim, nlist, faiss::METRIC_L2, nb, vecs.data());
+    cpuIdx->add(nb, vecs.data());
+    cpuIdx->nprobe = nprobe;
+
+    faiss::gpu_metal::StandardMetalResources stdRes;
+    faiss::gpu_metal::MetalClonerOptions opts;
+    faiss::Index* metalRaw = faiss::gpu_metal::index_cpu_to_metal_gpu(
+            &stdRes, 0, cpuIdx.get(), &opts);
+    ASSERT_NE(metalRaw, nullptr);
+
+    std::vector<float> refD((size_t)nq * k), testD((size_t)nq * k);
+    std::vector<faiss::idx_t> refL((size_t)nq * k), testL((size_t)nq * k);
+    cpuIdx->search(nq, queries.data(), k, refD.data(), refL.data());
+    metalRaw->search(nq, queries.data(), k, testD.data(), testL.data());
+
+    expectRecall(nq, k, 1.0f, refL.data(), testL.data());
 
     delete metalRaw;
 }

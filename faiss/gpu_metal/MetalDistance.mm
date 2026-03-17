@@ -42,6 +42,14 @@ constexpr size_t kMinTilingBudgetBytes = 64ULL * 1024 * 1024;
 /// Cap so we don't assume we own all free memory (other processes need headroom).
 constexpr size_t kMaxTilingBudgetBytes = 2ULL * 1024 * 1024 * 1024 * 4;
 
+// Current IVF scan/merge kernels keep LOCAL_K=4 items per thread at TG_SIZE=256.
+// Exactness is guaranteed only when candidate counts per reduction stay <= 1024.
+constexpr uint32_t kIvfReduceThreadgroupSize = 256;
+constexpr uint32_t kIvfReduceLocalK = 4;
+constexpr uint32_t kIvfReduceExactCandidates =
+        kIvfReduceThreadgroupSize * kIvfReduceLocalK; // 1024
+constexpr uint32_t kIvfSmallExactCandidates = 32;
+
 /// Returns a byte budget for distance tiling based on system available memory.
 /// Uses Mach host_statistics64 (free + inactive pages), with fallback to a fraction of
 /// physical memory. Result is clamped to [kMinTilingBudgetBytes, kMaxTilingBudgetBytes].
@@ -97,6 +105,69 @@ size_t getAvailableMemoryForTiling() {
     
     //printf("Available bytes: %zu \n", availableBytes);
     return availableBytes;
+}
+
+inline bool ivfMergeExactnessHolds(int nprobe, int k) {
+    if (nprobe <= 0 || k <= 0) {
+        return false;
+    }
+    const uint64_t totalCandidates = (uint64_t)nprobe * (uint64_t)k;
+    return totalCandidates <= (uint64_t)kIvfReduceExactCandidates;
+}
+
+inline bool ivfScanExactnessHoldsForAllLists(
+        id<MTLBuffer> listLength,
+        int nlist,
+        uint32_t maxCandidatesPerList) {
+    if (!listLength || nlist <= 0) {
+        return false;
+    }
+    const uint32_t* listLens =
+            reinterpret_cast<const uint32_t*>([listLength contents]);
+    if (!listLens) {
+        return false;
+    }
+    for (int i = 0; i < nlist; ++i) {
+        if (listLens[i] > maxCandidatesPerList) {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline bool ivfScanExactnessHoldsForAssignments(
+        id<MTLBuffer> listLength,
+        id<MTLBuffer> coarseAssign,
+        int nq,
+        int nprobe) {
+    if (!listLength || !coarseAssign || nq <= 0 || nprobe <= 0) {
+        return false;
+    }
+    const uint32_t* listLens =
+            reinterpret_cast<const uint32_t*>([listLength contents]);
+    const int32_t* assign =
+            reinterpret_cast<const int32_t*>([coarseAssign contents]);
+    if (!listLens || !assign) {
+        return false;
+    }
+    const size_t nlist = [listLength length] / sizeof(uint32_t);
+    if (nlist == 0) {
+        return false;
+    }
+    const size_t total = (size_t)nq * (size_t)nprobe;
+    for (size_t i = 0; i < total; ++i) {
+        const int32_t listNo = assign[i];
+        if (listNo < 0) {
+            continue;
+        }
+        if ((size_t)listNo >= nlist) {
+            return false;
+        }
+        if (listLens[listNo] > kIvfReduceExactCandidates) {
+            return false;
+        }
+    }
+    return true;
 }
 
 class TempBufferArena {
@@ -2297,6 +2368,15 @@ bool runMetalIVFFlatScan(
         !perListDistBuf || !perListIdxBuf)
         return false;
     if (k <= 0 || nq <= 0 || nprobe <= 0) return false;
+    // IVF scan kernels cache queries in fixed-size threadgroup memory.
+    // Guard unsupported dimensions to avoid out-of-bounds accesses.
+    if (d <= 0 || d > 512) return false;
+    // Interleaved scan reads dimensions in packs of 4.
+    if (useIL && (d % 4 != 0)) return false;
+    if (!ivfMergeExactnessHolds(nprobe, k)) return false;
+    if (!ivfScanExactnessHoldsForAssignments(listLength, coarseAssign, nq, nprobe)) {
+        return false;
+    }
 
     MetalKernels& K = getMetalKernels(device);
     if (!K.isValid()) return false;
@@ -2695,11 +2775,27 @@ bool runMetalIVFFlatFullSearch(
         !coarseDistBuf || !coarseIdxBuf || !distMatrixBuf)
         return false;
     if (k <= 0 || nq <= 0 || nprobe <= 0 || nlist <= 0) return false;
+    // IVF scan kernels cache queries in fixed-size threadgroup memory.
+    // Guard unsupported dimensions to avoid out-of-bounds accesses.
+    if (d <= 0 || d > 512) return false;
+    // Interleaved scan reads dimensions in packs of 4.
+    if (useIL && (d % 4 != 0)) return false;
+    (void)avgListLen;
+    if (!ivfMergeExactnessHolds(nprobe, k)) return false;
+    if (!ivfScanExactnessHoldsForAllLists(
+                listLength, nlist, kIvfReduceExactCandidates)) {
+        return false;
+    }
 
     MetalKernels& K = getMetalKernels(device);
     if (!K.isValid()) return false;
 
-    bool useSmall = (!useIL && avgListLen <= 64);
+    // Small scan kernel is exact only when per-list candidates are provably bounded.
+    // Guard it strictly to avoid skew-related correctness loss.
+    const bool useSmall =
+            !useIL && k <= (int)kIvfSmallExactCandidates &&
+            ivfScanExactnessHoldsForAllLists(
+                    listLength, nlist, kIvfSmallExactCandidates);
     IVFScanVariant scanV = useIL   ? IVFScanVariant::Interleaved
                          : useSmall ? IVFScanVariant::Small
                                     : IVFScanVariant::Standard;
