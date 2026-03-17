@@ -19,6 +19,8 @@
 #include <vector>
 
 namespace {
+constexpr faiss::idx_t kIVFFlatSupportedMaxK = 1024;
+
 void floatToHalf(const float* src, uint16_t* dst, size_t n) {
     for (size_t i = 0; i < n; ++i) {
         __fp16 h = (__fp16)src[i];
@@ -268,6 +270,9 @@ void MetalIndexIVFFlat::search(
         const SearchParameters* params) const {
     FAISS_THROW_IF_NOT(cpuIndex_);
     FAISS_THROW_IF_NOT(k > 0);
+    FAISS_THROW_IF_NOT_MSG(
+            k <= kIVFFlatSupportedMaxK,
+            "MetalIndexIVFFlat supports k <= 1024; larger k is not yet supported");
 
     const float inf    = std::numeric_limits<float>::infinity();
     const float negInf = -std::numeric_limits<float>::infinity();
@@ -336,12 +341,6 @@ void MetalIndexIVFFlat::search(
     // Fall back to CPU if Metal is not available or GPU IVF storage not ready.
     if (!device || !queue || !gpuIvf_ || !hasScanCodes || !gpuIvf_->idsBuffer() ||
         !gpuIvf_->listOffsetGpuBuffer() || !gpuIvf_->listLengthGpuBuffer()) {
-        cpuFallbackSearch();
-        return;
-    }
-
-    const int maxK = getMetalDistanceMaxK();
-    if (k > maxK) {
         cpuFallbackSearch();
         return;
     }
@@ -486,6 +485,9 @@ void MetalIndexIVFFlat::search_preassigned(
     FAISS_THROW_IF_NOT(cpuIndex_);
     FAISS_THROW_IF_NOT(k > 0);
     FAISS_THROW_IF_NOT(assign);
+    FAISS_THROW_IF_NOT_MSG(
+            k <= kIVFFlatSupportedMaxK,
+            "MetalIndexIVFFlat supports k <= 1024; larger k is not yet supported");
 
     const float inf    = std::numeric_limits<float>::infinity();
     const float negInf = -std::numeric_limits<float>::infinity();
@@ -508,7 +510,6 @@ void MetalIndexIVFFlat::search_preassigned(
     id<MTLDevice>       device = resources_->getDevice();
     id<MTLCommandQueue> queue  = resources_->getCommandQueue();
 
-    const int maxK = getMetalDistanceMaxK();
     const bool hasFlatCodes = gpuIvf_ && gpuIvf_->codesBuffer();
     const bool hasInterleavedCodes =
             gpuIvf_ && gpuIvf_->interleavedCodesBuffer() &&
@@ -516,8 +517,7 @@ void MetalIndexIVFFlat::search_preassigned(
     const bool hasScanCodes = hasFlatCodes || hasInterleavedCodes;
 
     if (!device || !queue || !gpuIvf_ || !hasScanCodes || !gpuIvf_->idsBuffer() ||
-        !gpuIvf_->listOffsetGpuBuffer() || !gpuIvf_->listLengthGpuBuffer() ||
-        k > maxK) {
+        !gpuIvf_->listOffsetGpuBuffer() || !gpuIvf_->listLengthGpuBuffer()) {
         cpuIndex_->search_preassigned(
                 n, x, k, assign, centroid_dis,
                 distances,
