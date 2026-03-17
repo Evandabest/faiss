@@ -1035,6 +1035,24 @@ kernel void l2_with_norms(
 // Shared params layout (device const uint*):
 //   [0] nq   [1] d   [2] k   [3] nprobe   [4] want_min
 
+inline bool ivf_better_int(float aDist, int aIdx, float bDist, int bIdx, uint want_min) {
+    constexpr float tie_eps = 1e-6f;
+    float delta = aDist - bDist;
+    bool strictly = want_min ? (delta < -tie_eps) : (delta > tie_eps);
+    if (strictly) return true;
+    if (fabs(delta) <= tie_eps) return aIdx < bIdx;
+    return false;
+}
+
+inline bool ivf_better_long(float aDist, long aIdx, float bDist, long bIdx, uint want_min) {
+    constexpr float tie_eps = 1e-6f;
+    float delta = aDist - bDist;
+    bool strictly = want_min ? (delta < -tie_eps) : (delta > tie_eps);
+    if (strictly) return true;
+    if (fabs(delta) <= tie_eps) return aIdx < bIdx;
+    return false;
+}
+
 kernel void ivf_scan_list(
     device const float*      queries       [[buffer(0)]],
     device const float*      codes         [[buffer(1)]],
@@ -1140,9 +1158,10 @@ kernel void ivf_scan_list(
             localDist[pos] = dist;
             localIdx [pos] = vi;
             while (pos > 0) {
-                bool sw = want_min
-                    ? (localDist[pos] < localDist[pos-1] || (localDist[pos] == localDist[pos-1] && localIdx[pos] < localIdx[pos-1]))
-                    : (localDist[pos] > localDist[pos-1] || (localDist[pos] == localDist[pos-1] && localIdx[pos] < localIdx[pos-1]));
+                bool sw = ivf_better_int(
+                        localDist[pos], localIdx[pos],
+                        localDist[pos - 1], localIdx[pos - 1],
+                        want_min);
                 if (!sw) break;
                 float td = localDist[pos]; localDist[pos] = localDist[pos-1]; localDist[pos-1] = td;
                 int   ti = localIdx [pos]; localIdx [pos] = localIdx [pos-1]; localIdx [pos-1] = ti;
@@ -1168,12 +1187,14 @@ kernel void ivf_scan_list(
                 uint partner = idx ^ j;
                 if (partner < CAND && partner > idx) {
                     bool ascending = ((idx & k2) == 0);
-                    bool pB = want_min
-                        ? (tgDist[partner] < tgDist[idx] || (tgDist[partner] == tgDist[idx] && tgIdx[partner] < tgIdx[idx]))
-                        : (tgDist[partner] > tgDist[idx] || (tgDist[partner] == tgDist[idx] && tgIdx[partner] < tgIdx[idx]));
-                    bool iB = want_min
-                        ? (tgDist[idx] < tgDist[partner] || (tgDist[idx] == tgDist[partner] && tgIdx[idx] < tgIdx[partner]))
-                        : (tgDist[idx] > tgDist[partner] || (tgDist[idx] == tgDist[partner] && tgIdx[idx] < tgIdx[partner]));
+                    bool pB = ivf_better_int(
+                            tgDist[partner], tgIdx[partner],
+                            tgDist[idx], tgIdx[idx],
+                            want_min);
+                    bool iB = ivf_better_int(
+                            tgDist[idx], tgIdx[idx],
+                            tgDist[partner], tgIdx[partner],
+                            want_min);
                     if (ascending ? pB : iB) {
                         float td = tgDist[idx]; tgDist[idx] = tgDist[partner]; tgDist[partner] = td;
                         int   ti = tgIdx [idx]; tgIdx [idx] = tgIdx [partner]; tgIdx [partner] = ti;
@@ -1289,9 +1310,7 @@ kernel void ivf_scan_list_small(
 
         int vi = (int)vecIdx;
 
-        bool better = want_min
-            ? (dist < bestDist || (dist == bestDist && vi < bestIdx))
-            : (dist > bestDist || (dist == bestDist && vi < bestIdx));
+        bool better = ivf_better_int(dist, vi, bestDist, bestIdx, want_min);
         if (better) {
             bestDist = dist;
             bestIdx  = vi;
@@ -1310,12 +1329,14 @@ kernel void ivf_scan_list_small(
             uint partner = tid ^ j;
             if (partner < CAND && partner > tid) {
                 bool ascending = ((tid & k2) == 0);
-                bool pB = want_min
-                    ? (tgDist[partner] < tgDist[tid] || (tgDist[partner] == tgDist[tid] && tgIdx[partner] < tgIdx[tid]))
-                    : (tgDist[partner] > tgDist[tid] || (tgDist[partner] == tgDist[tid] && tgIdx[partner] < tgIdx[tid]));
-                bool iB = want_min
-                    ? (tgDist[tid] < tgDist[partner] || (tgDist[tid] == tgDist[partner] && tgIdx[tid] < tgIdx[partner]))
-                    : (tgDist[tid] > tgDist[partner] || (tgDist[tid] == tgDist[partner] && tgIdx[tid] < tgIdx[partner]));
+                bool pB = ivf_better_int(
+                        tgDist[partner], tgIdx[partner],
+                        tgDist[tid], tgIdx[tid],
+                        want_min);
+                bool iB = ivf_better_int(
+                        tgDist[tid], tgIdx[tid],
+                        tgDist[partner], tgIdx[partner],
+                        want_min);
                 if (ascending ? pB : iB) {
                     float td = tgDist[tid]; tgDist[tid] = tgDist[partner]; tgDist[partner] = td;
                     int   ti = tgIdx [tid]; tgIdx [tid] = tgIdx [partner]; tgIdx [partner] = ti;
@@ -1455,9 +1476,10 @@ kernel void ivf_scan_list_interleaved(
             localDist[pos] = dist;
             localIdx [pos] = vi;
             while (pos > 0) {
-                bool sw = want_min
-                    ? (localDist[pos] < localDist[pos-1] || (localDist[pos] == localDist[pos-1] && localIdx[pos] < localIdx[pos-1]))
-                    : (localDist[pos] > localDist[pos-1] || (localDist[pos] == localDist[pos-1] && localIdx[pos] < localIdx[pos-1]));
+                bool sw = ivf_better_int(
+                        localDist[pos], localIdx[pos],
+                        localDist[pos - 1], localIdx[pos - 1],
+                        want_min);
                 if (!sw) break;
                 float td = localDist[pos]; localDist[pos] = localDist[pos-1]; localDist[pos-1] = td;
                 int   ti = localIdx [pos]; localIdx [pos] = localIdx [pos-1]; localIdx [pos-1] = ti;
@@ -1483,12 +1505,14 @@ kernel void ivf_scan_list_interleaved(
                 uint partner = idx ^ j;
                 if (partner < CAND && partner > idx) {
                     bool ascending = ((idx & k2) == 0);
-                    bool pB = want_min
-                        ? (tgDist[partner] < tgDist[idx] || (tgDist[partner] == tgDist[idx] && tgIdx[partner] < tgIdx[idx]))
-                        : (tgDist[partner] > tgDist[idx] || (tgDist[partner] == tgDist[idx] && tgIdx[partner] < tgIdx[idx]));
-                    bool iB = want_min
-                        ? (tgDist[idx] < tgDist[partner] || (tgDist[idx] == tgDist[partner] && tgIdx[idx] < tgIdx[partner]))
-                        : (tgDist[idx] > tgDist[partner] || (tgDist[idx] == tgDist[partner] && tgIdx[idx] < tgIdx[partner]));
+                    bool pB = ivf_better_int(
+                            tgDist[partner], tgIdx[partner],
+                            tgDist[idx], tgIdx[idx],
+                            want_min);
+                    bool iB = ivf_better_int(
+                            tgDist[idx], tgIdx[idx],
+                            tgDist[partner], tgIdx[partner],
+                            want_min);
                     if (ascending ? pB : iB) {
                         float td = tgDist[idx]; tgDist[idx] = tgDist[partner]; tgDist[partner] = td;
                         int   ti = tgIdx [idx]; tgIdx [idx] = tgIdx [partner]; tgIdx [partner] = ti;
@@ -1559,9 +1583,10 @@ kernel void ivf_merge_lists(
             localDist[pos] = d;
             localIdx [pos] = v;
             while (pos > 0) {
-                bool sw = want_min
-                    ? (localDist[pos] < localDist[pos-1] || (localDist[pos] == localDist[pos-1] && localIdx[pos] < localIdx[pos-1]))
-                    : (localDist[pos] > localDist[pos-1] || (localDist[pos] == localDist[pos-1] && localIdx[pos] < localIdx[pos-1]));
+                bool sw = ivf_better_long(
+                        localDist[pos], localIdx[pos],
+                        localDist[pos - 1], localIdx[pos - 1],
+                        want_min);
                 if (!sw) break;
                 float td = localDist[pos]; localDist[pos] = localDist[pos-1]; localDist[pos-1] = td;
                 long  ti = localIdx [pos]; localIdx [pos] = localIdx [pos-1]; localIdx [pos-1] = ti;
@@ -1586,12 +1611,14 @@ kernel void ivf_merge_lists(
                 uint partner = idx ^ j;
                 if (partner < CAND && partner > idx) {
                     bool ascending = ((idx & k2) == 0);
-                    bool pB = want_min
-                        ? (tgDist[partner] < tgDist[idx] || (tgDist[partner] == tgDist[idx] && tgIdx[partner] < tgIdx[idx]))
-                        : (tgDist[partner] > tgDist[idx] || (tgDist[partner] == tgDist[idx] && tgIdx[partner] < tgIdx[idx]));
-                    bool iB = want_min
-                        ? (tgDist[idx] < tgDist[partner] || (tgDist[idx] == tgDist[partner] && tgIdx[idx] < tgIdx[partner]))
-                        : (tgDist[idx] > tgDist[partner] || (tgDist[idx] == tgDist[partner] && tgIdx[idx] < tgIdx[partner]));
+                    bool pB = ivf_better_long(
+                            tgDist[partner], tgIdx[partner],
+                            tgDist[idx], tgIdx[idx],
+                            want_min);
+                    bool iB = ivf_better_long(
+                            tgDist[idx], tgIdx[idx],
+                            tgDist[partner], tgIdx[partner],
+                            want_min);
                     if (ascending ? pB : iB) {
                         float td = tgDist[idx]; tgDist[idx] = tgDist[partner]; tgDist[partner] = td;
                         long  ti = tgIdx [idx]; tgIdx [idx] = tgIdx [partner]; tgIdx [partner] = ti;

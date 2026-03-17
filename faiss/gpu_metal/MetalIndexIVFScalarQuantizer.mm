@@ -25,6 +25,20 @@ void floatToHalf(const float* src, uint16_t* dst, size_t n) {
         std::memcpy(&dst[i], &h, sizeof(uint16_t));
     }
 }
+
+inline int checkedIdxToInt(faiss::idx_t v, const char* what) {
+    if (!(v >= 0 && v <= (faiss::idx_t)std::numeric_limits<int>::max())) {
+        FAISS_THROW_FMT("%s", what);
+    }
+    return (int)v;
+}
+
+inline int checkedSizeToInt(size_t v, const char* what) {
+    if (!(v <= (size_t)std::numeric_limits<int>::max())) {
+        FAISS_THROW_FMT("%s", what);
+    }
+    return (int)v;
+}
 } // namespace
 
 namespace faiss {
@@ -177,8 +191,11 @@ void MetalIndexIVFScalarQuantizer::uploadCentroids_() const {
                                                options:MTLResourceStorageModeShared];
         if (centroidNormsBuf_) {
             id<MTLCommandQueue> queue = resources_->getCommandQueue();
+            const int nCentroidsI = checkedSizeToInt(
+                    nCentroids,
+                    "MetalIndexIVFScalarQuantizer: centroid count exceeds int range");
             if (!runMetalComputeNorms(device, queue, centroidBuf_,
-                                      (int)nCentroids, d, centroidNormsBuf_, false)) {
+                                      nCentroidsI, d, centroidNormsBuf_, false)) {
                 centroidNormsBuf_ = nil;
             }
         }
@@ -364,8 +381,19 @@ void MetalIndexIVFScalarQuantizer::search(
     std::memcpy([searchQueriesBuf_ contents], x, queriesBytes);
     auto* coarseDst = reinterpret_cast<int32_t*>([searchCoarseBuf_ contents]);
     for (size_t i = 0; i < (size_t)n * nprobe; ++i) {
+        FAISS_THROW_IF_NOT_MSG(
+                coarseAssignVec[i] >= (idx_t)std::numeric_limits<int32_t>::min() &&
+                        coarseAssignVec[i] <=
+                                (idx_t)std::numeric_limits<int32_t>::max(),
+                "MetalIndexIVFScalarQuantizer: coarse assignment exceeds int32 range");
         coarseDst[i] = (int32_t)coarseAssignVec[i];
     }
+    const int nI = checkedIdxToInt(
+            n, "MetalIndexIVFScalarQuantizer: n exceeds int range");
+    const int kI = checkedIdxToInt(
+            k, "MetalIndexIVFScalarQuantizer: k exceeds int range");
+    const int nprobeI = checkedSizeToInt(
+            nprobe, "MetalIndexIVFScalarQuantizer: nprobe exceeds int range");
 
     if (cpuIndex_->by_residual && !centroidBuf_) {
         uploadCentroids_();
@@ -380,7 +408,7 @@ void MetalIndexIVFScalarQuantizer::search(
             gpuIvf_->listOffsetGpuBuffer(),
             gpuIvf_->listLengthGpuBuffer(),
             searchCoarseBuf_,
-            (int)n, d, (int)k, (int)nprobe, isL2,
+            nI, d, kI, nprobeI, isL2,
             mst,
             gpuIvf_->sqTablesBuffer(),
             centroidBuf_,

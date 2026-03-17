@@ -273,7 +273,8 @@ bool runMetalBuildIVFPQLookupTables(
         int nprobe,
         bool isL2,
         bool lookupFp16,
-        id<MTLBuffer> outLookup);
+        id<MTLBuffer> outLookup,
+        bool waitForCompletion = true);
 
 /// Fused IVFPQ path: build LUT on GPU + scan lists + merge in one command
 /// buffer to reduce synchronization overhead.
@@ -300,7 +301,8 @@ bool runMetalIVFPQFullSearch(
         id<MTLBuffer> outDistances,
         id<MTLBuffer> outIndices,
         id<MTLBuffer> perListDistBuf,
-        id<MTLBuffer> perListIdxBuf);
+        id<MTLBuffer> perListIdxBuf,
+        bool waitForCompletion = true);
 
 bool runMetalConvertF32ToF16(
         id<MTLDevice> device,

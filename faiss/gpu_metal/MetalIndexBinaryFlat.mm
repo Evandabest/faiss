@@ -18,6 +18,22 @@
 namespace faiss {
 namespace gpu_metal {
 
+namespace {
+inline int checkedIdxToInt(idx_t v, const char* what) {
+    if (!(v >= 0 && v <= (idx_t)std::numeric_limits<int>::max())) {
+        FAISS_THROW_FMT("%s", what);
+    }
+    return (int)v;
+}
+
+inline int checkedSizeToInt(size_t v, const char* what) {
+    if (!(v <= (size_t)std::numeric_limits<int>::max())) {
+        FAISS_THROW_FMT("%s", what);
+    }
+    return (int)v;
+}
+} // namespace
+
 MetalIndexBinaryFlat::MetalIndexBinaryFlat(
         std::shared_ptr<MetalResources> resources,
         int d)
@@ -120,11 +136,17 @@ void MetalIndexBinaryFlat::search(
     }
 
     std::memcpy([queryBuf_ contents], x, queryBytes);
+    const int nI = checkedIdxToInt(n, "MetalIndexBinaryFlat: n exceeds int range");
+    const int ntotalI = checkedIdxToInt(
+            ntotal, "MetalIndexBinaryFlat: ntotal exceeds int range");
+    const int csI = checkedSizeToInt(
+            cs, "MetalIndexBinaryFlat: code_size exceeds int range");
+    const int kI = checkedIdxToInt(k, "MetalIndexBinaryFlat: k exceeds int range");
 
     bool ok = runMetalHammingDistance(
             device, queue,
             queryBuf_, vectorsBuf_,
-            (int)n, (int)ntotal, (int)cs, (int)k,
+            nI, ntotalI, csI, kI,
             outDistBuf_, outIdxBuf_);
 
     if (!ok) {

@@ -50,6 +50,18 @@ constexpr uint32_t kIvfReduceExactCandidates =
         kIvfReduceThreadgroupSize * kIvfReduceLocalK; // 1024
 constexpr uint32_t kIvfSmallExactCandidates = 32;
 
+inline bool fitsU32(int v) {
+    return v >= 0 && static_cast<uint64_t>(v) <=
+            static_cast<uint64_t>(std::numeric_limits<uint32_t>::max());
+}
+
+inline int checkedIdxToInt(idx_t v, const char* what) {
+    if (!(v >= 0 && v <= (idx_t)std::numeric_limits<int>::max())) {
+        FAISS_THROW_FMT("%s", what);
+    }
+    return (int)v;
+}
+
 /// Returns a byte budget for distance tiling based on system available memory.
 /// Uses Mach host_statistics64 (free + inactive pages), with fallback to a fraction of
 /// physical memory. Result is clamped to [kMinTilingBudgetBytes, kMaxTilingBudgetBytes].
@@ -351,6 +363,10 @@ void bfKnnWithVectorNormsF32_(
     std::memcpy([vecBuf contents], vectors, vecBytes);
     std::memcpy([qBuf contents], queries, qBytes);
     std::memcpy([normsBuf contents], vectorNorms, normsBytes);
+    const int nqI = checkedIdxToInt(
+            numQueries, "bfKnn(vectorNorms): numQueries exceeds int range");
+    const int nbI = checkedIdxToInt(
+            numVectors, "bfKnn(vectorNorms): numVectors exceeds int range");
 
     bool ok = runMetalL2DistanceWithNorms_(
             device,
@@ -358,8 +374,8 @@ void bfKnnWithVectorNormsF32_(
             qBuf,
             vecBuf,
             normsBuf,
-            (int)numQueries,
-            (int)numVectors,
+            nqI,
+            nbI,
             dims,
             k,
             distBuf,
@@ -444,14 +460,18 @@ void bfKnnFP16Vectors_(
 
     std::memcpy([vecBuf contents], vectors, vecBytes);
     std::memcpy([qBuf contents], queries, qBytes);
+    const int nqI = checkedIdxToInt(
+            numQueries, "bfKnn(fp16 vectors): numQueries exceeds int range");
+    const int nbI = checkedIdxToInt(
+            numVectors, "bfKnn(fp16 vectors): numVectors exceeds int range");
 
     bool ok = runMetalDistanceFP16(
             device,
             queue,
             qBuf,
             vecBuf,
-            (int)numQueries,
-            (int)numVectors,
+            nqI,
+            nbI,
             dims,
             k,
             (metric == METRIC_L2),
@@ -535,6 +555,8 @@ void bfKnnSingleQueryShard_(
     std::vector<idx_t> bestIdx((size_t)numQueries * k, -1);
     std::vector<float> shardDist((size_t)numQueries * k);
     std::vector<idx_t> shardIdx((size_t)numQueries * k);
+    const int nqI = checkedIdxToInt(
+            numQueries, "bfKnn(sharded): numQueries exceeds int range");
 
     for (idx_t base = 0; base < numVectors; base += (idx_t)shardVectors) {
         const idx_t nThis = std::min((idx_t)shardVectors, numVectors - base);
@@ -553,7 +575,7 @@ void bfKnnSingleQueryShard_(
                 shardIdx.data());
 
         mergeShardTopK_(
-                (int)numQueries,
+                nqI,
                 k,
                 isL2,
                 shardDist.data(),
@@ -625,6 +647,8 @@ void bfKnnSingleQueryShardWithNorms_(
     std::vector<idx_t> bestIdx((size_t)numQueries * k, -1);
     std::vector<float> shardDist((size_t)numQueries * k);
     std::vector<idx_t> shardIdx((size_t)numQueries * k);
+    const int nqI = checkedIdxToInt(
+            numQueries, "bfKnn(vectorNorms sharded): numQueries exceeds int range");
 
     for (idx_t base = 0; base < numVectors; base += (idx_t)shardVectors) {
         const idx_t nThis = std::min((idx_t)shardVectors, numVectors - base);
@@ -644,7 +668,7 @@ void bfKnnSingleQueryShardWithNorms_(
                 shardIdx.data());
 
         mergeShardTopK_(
-                (int)numQueries,
+                nqI,
                 k,
                 true,
                 shardDist.data(),
@@ -720,6 +744,8 @@ void bfKnnSingleQueryShardFP16_(
     std::vector<idx_t> bestIdx((size_t)numQueries * k, -1);
     std::vector<float> shardDist((size_t)numQueries * k);
     std::vector<idx_t> shardIdx((size_t)numQueries * k);
+    const int nqI = checkedIdxToInt(
+            numQueries, "bfKnn(fp16 sharded): numQueries exceeds int range");
 
     for (idx_t base = 0; base < numVectors; base += (idx_t)shardVectors) {
         const idx_t nThis = std::min((idx_t)shardVectors, numVectors - base);
@@ -738,7 +764,7 @@ void bfKnnSingleQueryShardFP16_(
                 shardIdx.data());
 
         mergeShardTopK_(
-                (int)numQueries,
+                nqI,
                 k,
                 isL2,
                 shardDist.data(),
@@ -1198,10 +1224,12 @@ void bfKnn(
 
     std::memcpy([vecBuf contents], vectors, vecBytes);
     std::memcpy([qBuf contents], queries, qBytes);
+    const int nqI = checkedIdxToInt(numQueries, "bfKnn: numQueries exceeds int range");
+    const int nbI = checkedIdxToInt(numVectors, "bfKnn: numVectors exceeds int range");
 
     bool ok = runMetalDistance(
             device, queue, qBuf, vecBuf,
-            (int)numQueries, (int)numVectors, dims, k,
+            nqI, nbI, dims, k,
             (metric == METRIC_L2),
             distBuf, idxBuf, resources);
 
@@ -1477,17 +1505,21 @@ void allPairsBlockF32_(
     if (vectorNorms) {
         std::memcpy([normsBuf contents], vectorNorms, normsBytes);
     }
+    const int nqI = checkedIdxToInt(
+            numQueries, "allPairs(F32): numQueries exceeds int range");
+    const int nbI = checkedIdxToInt(
+            numVectors, "allPairs(F32): numVectors exceeds int range");
 
     id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
     if (metric == METRIC_L2) {
         if (vectorNorms) {
-            K.encodeL2WithNorms(enc, qBuf, vecBuf, distBuf, normsBuf, (int)numQueries, (int)numVectors, dims);
+            K.encodeL2WithNorms(enc, qBuf, vecBuf, distBuf, normsBuf, nqI, nbI, dims);
         } else {
-            K.encodeL2SquaredMatrix(enc, qBuf, vecBuf, distBuf, (int)numQueries, (int)numVectors, dims);
+            K.encodeL2SquaredMatrix(enc, qBuf, vecBuf, distBuf, nqI, nbI, dims);
         }
     } else {
-        K.encodeIPMatrix(enc, qBuf, vecBuf, distBuf, (int)numQueries, (int)numVectors, dims);
+        K.encodeIPMatrix(enc, qBuf, vecBuf, distBuf, nqI, nbI, dims);
     }
     [enc endEncoding];
     [cmdBuf commit];
@@ -1544,13 +1576,17 @@ void allPairsBlockFP16Vectors_(
 
     std::memcpy([vecBuf contents], vectors, vecBytes);
     std::memcpy([qBuf contents], queries, qBytes);
+    const int nqI = checkedIdxToInt(
+            numQueries, "allPairs(F16 vectors): numQueries exceeds int range");
+    const int nbI = checkedIdxToInt(
+            numVectors, "allPairs(F16 vectors): numVectors exceeds int range");
 
     id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
     if (metric == METRIC_L2) {
-        K.encodeL2SquaredMatrixFP16(enc, qBuf, vecBuf, distBuf, (int)numQueries, (int)numVectors, dims);
+        K.encodeL2SquaredMatrixFP16(enc, qBuf, vecBuf, distBuf, nqI, nbI, dims);
     } else {
-        K.encodeIPMatrixFP16(enc, qBuf, vecBuf, distBuf, (int)numQueries, (int)numVectors, dims);
+        K.encodeIPMatrixFP16(enc, qBuf, vecBuf, distBuf, nqI, nbI, dims);
     }
     [enc endEncoding];
     [cmdBuf commit];
@@ -2378,6 +2414,9 @@ bool runMetalIVFFlatScan(
     if (!ivfScanExactnessHoldsForAssignments(listLength, coarseAssign, nq, nprobe)) {
         return false;
     }
+    if (!fitsU32(nq) || !fitsU32(d) || !fitsU32(k) || !fitsU32(nprobe)) {
+        return false;
+    }
 
     MetalKernels& K = getMetalKernels(device);
     if (!K.isValid()) return false;
@@ -2441,6 +2480,9 @@ bool runMetalIVFSQScan(
         return false;
     }
     if (byResidual && !centroids) {
+        return false;
+    }
+    if (!fitsU32(nq) || !fitsU32(d) || !fitsU32(k) || !fitsU32(nprobe)) {
         return false;
     }
 
@@ -2541,6 +2583,9 @@ bool runMetalIVFPQScan(
         !perListDistBuf || !perListIdxBuf)
         return false;
     if (k <= 0 || nq <= 0 || nprobe <= 0 || M <= 0) return false;
+    if (!fitsU32(nq) || !fitsU32(M) || !fitsU32(k) || !fitsU32(nprobe)) {
+        return false;
+    }
 
     MetalKernels& K = getMetalKernels(device);
     if (!K.isValid()) return false;
@@ -2588,7 +2633,8 @@ bool runMetalBuildIVFPQLookupTables(
         int nprobe,
         bool isL2,
         bool lookupFp16,
-        id<MTLBuffer> outLookup) {
+        id<MTLBuffer> outLookup,
+        bool waitForCompletion) {
     if (!device || !queue || !queries || !coarseAssign || !pqCentroids ||
         !outLookup) {
         return false;
@@ -2616,6 +2662,9 @@ bool runMetalBuildIVFPQLookupTables(
             nprobe);
     [enc endEncoding];
     [cmdBuf commit];
+    if (!waitForCompletion) {
+        return true;
+    }
     [cmdBuf waitUntilCompleted];
     return cmdBuf.status == MTLCommandBufferStatusCompleted;
 }
@@ -2643,7 +2692,8 @@ bool runMetalIVFPQFullSearch(
         id<MTLBuffer> outDistances,
         id<MTLBuffer> outIndices,
         id<MTLBuffer> perListDistBuf,
-        id<MTLBuffer> perListIdxBuf) {
+        id<MTLBuffer> perListIdxBuf,
+        bool waitForCompletion) {
     if (!device || !queue || !queries || !coarseAssign || !pqCentroids ||
         !lookupTable || !codes || !ids || !listOffset || !listLength ||
         !outDistances || !outIndices || !perListDistBuf || !perListIdxBuf) {
@@ -2651,6 +2701,9 @@ bool runMetalIVFPQFullSearch(
     }
     if (nq <= 0 || d <= 0 || M <= 0 || k <= 0 || nprobe <= 0) return false;
     if (isL2 && !coarseCentroids) return false;
+    if (!fitsU32(nq) || !fitsU32(M) || !fitsU32(k) || !fitsU32(nprobe)) {
+        return false;
+    }
 
     MetalKernels& K = getMetalKernels(device);
     if (!K.isValid()) return false;
@@ -2706,6 +2759,9 @@ bool runMetalIVFPQFullSearch(
 
     [enc endEncoding];
     [cmdBuf commit];
+    if (!waitForCompletion) {
+        return true;
+    }
     [cmdBuf waitUntilCompleted];
     return cmdBuf.status == MTLCommandBufferStatusCompleted;
 }
@@ -2747,6 +2803,9 @@ bool runMetalHammingDistance(
         !outDist || !outIdx)
         return false;
     if (nq <= 0 || nb <= 0 || code_size <= 0 || k <= 0) return false;
+    if (!fitsU32(nq) || !fitsU32(nb) || !fitsU32(code_size) || !fitsU32(k)) {
+        return false;
+    }
 
     MetalKernels& K = getMetalKernels(device);
     if (!K.isValid()) return false;
@@ -2809,6 +2868,9 @@ bool runMetalIVFFlatFullSearch(
     if (!ivfMergeExactnessHolds(nprobe, k)) return false;
     if (!ivfScanExactnessHoldsForAllLists(
                 listLength, nlist, kIvfReduceExactCandidates)) {
+        return false;
+    }
+    if (!fitsU32(nq) || !fitsU32(d) || !fitsU32(k) || !fitsU32(nprobe)) {
         return false;
     }
 

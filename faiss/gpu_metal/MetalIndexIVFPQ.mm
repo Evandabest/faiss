@@ -22,6 +22,22 @@
 namespace faiss {
 namespace gpu_metal {
 
+namespace {
+inline int checkedIdxToInt(faiss::idx_t v, const char* what) {
+    if (!(v >= 0 && v <= (faiss::idx_t)std::numeric_limits<int>::max())) {
+        FAISS_THROW_FMT("%s", what);
+    }
+    return (int)v;
+}
+
+inline int checkedSizeToInt(size_t v, const char* what) {
+    if (!(v <= (size_t)std::numeric_limits<int>::max())) {
+        FAISS_THROW_FMT("%s", what);
+    }
+    return (int)v;
+}
+} // namespace
+
 // ============================================================
 //  Constructors
 // ============================================================
@@ -374,8 +390,18 @@ void MetalIndexIVFPQ::search(
 
     // Upload coarse assignments.
     auto* coarseDst = reinterpret_cast<int32_t*>([searchCoarseBuf_ contents]);
-    for (size_t i = 0; i < (size_t)n * nprobe; ++i)
+    for (size_t i = 0; i < (size_t)n * nprobe; ++i) {
+        FAISS_THROW_IF_NOT_MSG(
+                coarseAssignVec[i] >= (idx_t)std::numeric_limits<int32_t>::min() &&
+                        coarseAssignVec[i] <=
+                                (idx_t)std::numeric_limits<int32_t>::max(),
+                "MetalIndexIVFPQ: coarse assignment exceeds int32 range");
         coarseDst[i] = (int32_t)coarseAssignVec[i];
+    }
+    const int nI = checkedIdxToInt(n, "MetalIndexIVFPQ: n exceeds int range");
+    const int kI = checkedIdxToInt(k, "MetalIndexIVFPQ: k exceeds int range");
+    const int nprobeI = checkedSizeToInt(
+            nprobe, "MetalIndexIVFPQ: nprobe exceeds int range");
     int avgListLen = cpuIndex_->nlist > 0
             ? (int)(cpuIndex_->ntotal / cpuIndex_->nlist)
             : 0;
@@ -394,11 +420,11 @@ void MetalIndexIVFPQ::search(
                 gpuIvf_->idsBuffer(),
                 gpuIvf_->listOffsetGpuBuffer(),
                 gpuIvf_->listLengthGpuBuffer(),
-                (int)n,
+                nI,
                 d,
                 M,
-                (int)k,
-                (int)nprobe,
+                kI,
+                nprobeI,
                 avgListLen,
                 useFp16Lut,
                 isL2,
@@ -411,9 +437,9 @@ void MetalIndexIVFPQ::search(
     if (!lutBuiltOnGpu) {
         auto* lookupDst = reinterpret_cast<float*>([lookupTableBuf_ contents]);
         computeLookupTables_(
-                (int)n,
+                nI,
                 x,
-                (int)nprobe,
+                nprobeI,
                 coarseAssignVec.data(),
                 coarseDistVec.data(),
                 lookupDst);
@@ -438,7 +464,7 @@ void MetalIndexIVFPQ::search(
                 gpuIvf_->listOffsetGpuBuffer(),
                 gpuIvf_->listLengthGpuBuffer(),
                 searchCoarseBuf_,
-                (int)n, M, (int)k, (int)nprobe, avgListLen, useFp16Lut, isL2,
+                nI, M, kI, nprobeI, avgListLen, useFp16Lut, isL2,
                 searchOutDistBuf_, searchOutIdxBuf_,
                 searchPerListDistBuf_, searchPerListIdxBuf_);
     }

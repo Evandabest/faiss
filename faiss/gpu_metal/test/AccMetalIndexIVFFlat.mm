@@ -20,6 +20,7 @@
 #include <faiss/gpu_metal/StandardMetalResources.h>
 #include <faiss/utils/random.h>
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <cstdlib>
 #import <cmath>
 #import <limits>
@@ -86,10 +87,8 @@ void expectExactResults(
     }
 }
 
-/// Strict exactness with a narrow allowance for adjacent tie-order swaps.
-/// This keeps exact labels/distances except when two neighboring results are
-/// pairwise-identical up to tolerance and only their order differs.
-void expectExactResultsAllowAdjacentTieSwap(
+/// Assert exact distances while allowing permutations only inside tie groups.
+void expectExactResultsAllowingTiePermutations(
         int nq,
         int k,
         const float* refDist,
@@ -97,50 +96,61 @@ void expectExactResultsAllowAdjacentTieSwap(
         const float* testDist,
         const faiss::idx_t* testLab,
         float atol = 1e-5f,
-        float tieTol = 1e-4f) {
+        float tieTol = 1e-5f) {
     for (int q = 0; q < nq; ++q) {
         int i = 0;
         while (i < k) {
-            const int pos = q * k + i;
-            if (refLab[pos] == testLab[pos]) {
-                if (refLab[pos] >= 0) {
-                    EXPECT_NEAR(refDist[pos], testDist[pos], atol)
+            int base = q * k;
+            int ii = base + i;
+
+            if (refLab[ii] == testLab[ii]) {
+                if (refLab[ii] >= 0) {
+                    EXPECT_NEAR(refDist[ii], testDist[ii], atol)
                             << "distance mismatch at q=" << q << " i=" << i;
                 }
                 ++i;
                 continue;
             }
 
-            const bool canSwap = (i + 1 < k);
-            if (!canSwap) {
-                EXPECT_EQ(refLab[pos], testLab[pos]) << "label mismatch at q=" << q
-                                                     << " i=" << i;
-                ++i;
-                continue;
+            const float refAnchor = refDist[ii];
+            const float testAnchor = testDist[ii];
+            int refEnd = i + 1;
+            int testEnd = i + 1;
+            while (refEnd < k &&
+                   std::fabs(refDist[base + refEnd] - refAnchor) <= tieTol) {
+                ++refEnd;
+            }
+            while (testEnd < k &&
+                   std::fabs(testDist[base + testEnd] - testAnchor) <= tieTol) {
+                ++testEnd;
             }
 
-            const int posN = q * k + (i + 1);
-            const bool swapped =
-                    (refLab[pos] == testLab[posN]) &&
-                    (refLab[posN] == testLab[pos]) &&
-                    (refLab[pos] >= 0) &&
-                    (refLab[posN] >= 0) &&
-                    (std::fabs(refDist[pos] - refDist[posN]) <= tieTol) &&
-                    (std::fabs(testDist[pos] - testDist[posN]) <= tieTol) &&
-                    (std::fabs(refDist[pos] - testDist[posN]) <= atol) &&
-                    (std::fabs(refDist[posN] - testDist[pos]) <= atol);
+            ASSERT_EQ(refEnd - i, testEnd - i)
+                    << "tie-group size mismatch at q=" << q << " i=" << i;
 
-            if (!swapped) {
-                EXPECT_EQ(refLab[pos], testLab[pos]) << "label mismatch at q=" << q
-                                                     << " i=" << i;
+            std::vector<faiss::idx_t> refGroup;
+            std::vector<faiss::idx_t> testGroup;
+            refGroup.reserve((size_t)(refEnd - i));
+            testGroup.reserve((size_t)(testEnd - i));
+
+            for (int j = i; j < refEnd; ++j) {
+                const int pos = base + j;
                 if (refLab[pos] >= 0) {
-                    EXPECT_NEAR(refDist[pos], testDist[pos], atol)
-                            << "distance mismatch at q=" << q << " i=" << i;
+                    EXPECT_NEAR(refDist[pos], testDist[pos], tieTol)
+                            << "tie-group distance mismatch at q=" << q
+                            << " i=" << j;
                 }
-                ++i;
-            } else {
-                i += 2;
+                refGroup.push_back(refLab[pos]);
+                testGroup.push_back(testLab[pos]);
             }
+
+            std::sort(refGroup.begin(), refGroup.end());
+            std::sort(testGroup.begin(), testGroup.end());
+            EXPECT_EQ(refGroup, testGroup)
+                    << "tie-group label-set mismatch at q=" << q
+                    << " start_i=" << i;
+
+            i = refEnd;
         }
     }
 }
@@ -1667,7 +1677,7 @@ TEST_F(AccMetalIndexIVFFlat, ExactL2MultiListBoundaryMatchesCpu) {
     cpuIdx->search(nq, queries.data(), k, refD.data(), refL.data());
     metalIdx.search(nq, queries.data(), k, testD.data(), testL.data(), &ivfParams);
 
-    expectExactResultsAllowAdjacentTieSwap(
+    expectExactResultsAllowingTiePermutations(
             nq, k, refD.data(), refL.data(), testD.data(), testL.data());
 }
 

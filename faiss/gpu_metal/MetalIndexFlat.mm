@@ -11,6 +11,7 @@
 #include <faiss/IndexFlat.h>
 #include <faiss/impl/FaissAssert.h>
 #include <cstring>
+#include <limits>
 
 namespace faiss {
 namespace gpu_metal {
@@ -95,6 +96,13 @@ static void copyF16TransposedToRowMajor(
             dstRowMajor[(size_t)i * (size_t)d + (size_t)j] = (float)h;
         }
     }
+}
+
+static int checkedIdxToInt(idx_t v, const char* what) {
+    if (!(v >= 0 && v <= (idx_t)std::numeric_limits<int>::max())) {
+        FAISS_THROW_FMT("%s", what);
+    }
+    return (int)v;
 }
 
 MetalIndexFlat::MetalIndexFlat(
@@ -272,6 +280,10 @@ void MetalIndexFlat::search(
     FAISS_THROW_IF_NOT_MSG(queryBuf && outDistBuf && outIdxBuf, "MetalIndexFlat: failed to allocate temp buffers");
 
     std::memcpy([queryBuf contents], x, queryBytes);
+    const int nI = checkedIdxToInt(n, "MetalIndexFlat: n exceeds int range");
+    const int ntotalI = checkedIdxToInt(
+            ntotal, "MetalIndexFlat: ntotal exceeds int range");
+    const int kI = checkedIdxToInt(k, "MetalIndexFlat: k exceeds int range");
 
     const bool isL2 = (metric_type == METRIC_L2);
     id<MTLBuffer> searchVectorsBuf = vectorsBuffer_;
@@ -311,12 +323,12 @@ void MetalIndexFlat::search(
     if (useFloat16_) {
         ok = runFlatSearchGPUFP16(
                 device, queue, queryBuf, searchVectorsBuf,
-                (int)n, (int)ntotal, d, (int)k, isL2,
+                nI, ntotalI, d, kI, isL2,
                 outDistBuf, outIdxBuf, resources_);
     } else {
         ok = runFlatSearchGPU(
                 device, queue, queryBuf, searchVectorsBuf,
-                (int)n, (int)ntotal, d, (int)k, isL2,
+                nI, ntotalI, d, kI, isL2,
                 outDistBuf, outIdxBuf, resources_);
     }
 

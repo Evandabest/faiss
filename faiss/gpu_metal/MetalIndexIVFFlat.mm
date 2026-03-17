@@ -134,6 +134,20 @@ inline faiss::idx_t decodeCpuLabelFromPair(
     const faiss::idx_t* ids = cpuIndex->invlists->get_ids((size_t)listNo);
     return ids ? ids[offset] : -1;
 }
+
+inline int checkedIdxToInt(faiss::idx_t v, const char* what) {
+    if (!(v >= 0 && v <= (faiss::idx_t)std::numeric_limits<int>::max())) {
+        FAISS_THROW_FMT("%s", what);
+    }
+    return (int)v;
+}
+
+inline int checkedSizeToInt(size_t v, const char* what) {
+    if (!(v <= (size_t)std::numeric_limits<int>::max())) {
+        FAISS_THROW_FMT("%s", what);
+    }
+    return (int)v;
+}
 } // namespace
 
 namespace faiss {
@@ -266,8 +280,11 @@ void MetalIndexIVFFlat::uploadCentroids_() const {
                                                options:MTLResourceStorageModeShared];
         if (centroidNormsBuf_) {
             id<MTLCommandQueue> queue = resources_->getCommandQueue();
+            const int nCentroidsI = checkedSizeToInt(
+                    nCentroids,
+                    "MetalIndexIVFFlat: centroid count exceeds int range");
             if (!runMetalComputeNorms(device, queue, centroidBuf_,
-                                      (int)nCentroids, d, centroidNormsBuf_, false)) {
+                                      nCentroidsI, d, centroidNormsBuf_, false)) {
                 centroidNormsBuf_ = nil;
             }
         }
@@ -509,13 +526,18 @@ void MetalIndexIVFFlat::search(
         }
 
         std::memcpy([searchQueriesBuf_ contents], xTile, queriesBytes);
+        const int qCountI = checkedIdxToInt(
+                qCount, "MetalIndexIVFFlat: qCount exceeds int range");
+        const int kI = checkedIdxToInt(k, "MetalIndexIVFFlat: k exceeds int range");
+        const int nprobeI = checkedSizeToInt(
+                nprobe, "MetalIndexIVFFlat: nprobe exceeds int range");
 
         bool ok = false;
         if (centroidBuf_ && nprobe <= (size_t)getMetalDistanceMaxK()) {
             ok = runMetalIVFFlatFullSearch(
                     device, queue,
                     searchQueriesBuf_,
-                    (int)qCount, d, (int)k, (int)nprobe, isL2,
+                    qCountI, d, kI, nprobeI, isL2,
                     centroidBuf_, nlist,
                     gpuIvf_->codesBuffer(),
                     gpuIvf_->idsBuffer(),
@@ -568,7 +590,7 @@ void MetalIndexIVFFlat::search(
                     gpuIvf_->listOffsetGpuBuffer(),
                     gpuIvf_->listLengthGpuBuffer(),
                     searchCoarseBuf_,
-                    (int)qCount, d, (int)k, (int)nprobe, isL2,
+                    qCountI, d, kI, nprobeI, isL2,
                     searchOutDistBuf_, searchOutIdxBuf_,
                     searchPerListDistBuf_, searchPerListIdxBuf_,
                     gpuIvf_->interleavedCodesBuffer(),
@@ -730,6 +752,14 @@ void MetalIndexIVFFlat::search_preassigned(
         }
 
         std::memcpy([searchQueriesBuf_ contents], xTile, queriesBytes);
+        const int qCountI = checkedIdxToInt(
+                qCount,
+                "MetalIndexIVFFlat::search_preassigned: qCount exceeds int range");
+        const int kI = checkedIdxToInt(
+                k, "MetalIndexIVFFlat::search_preassigned: k exceeds int range");
+        const int nprobeI = checkedSizeToInt(
+                nprobe,
+                "MetalIndexIVFFlat::search_preassigned: nprobe exceeds int range");
 
         auto* coarseDst = reinterpret_cast<int32_t*>([searchCoarseBuf_ contents]);
         for (size_t i = 0; i < (size_t)qCount * nprobe; ++i) {
@@ -749,7 +779,7 @@ void MetalIndexIVFFlat::search_preassigned(
                 gpuIvf_->listOffsetGpuBuffer(),
                 gpuIvf_->listLengthGpuBuffer(),
                 searchCoarseBuf_,
-                (int)qCount, d, (int)k, (int)nprobe, isL2,
+                qCountI, d, kI, nprobeI, isL2,
                 searchOutDistBuf_, searchOutIdxBuf_,
                 searchPerListDistBuf_, searchPerListIdxBuf_,
                 gpuIvf_->interleavedCodesBuffer(),
