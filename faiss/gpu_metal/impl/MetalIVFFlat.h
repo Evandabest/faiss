@@ -111,7 +111,11 @@ public:
     }
 
 private:
-    void uploadToGpu();
+    bool ensureCapacityForAppend_(const std::vector<size_t>& addPerList);
+    void uploadToGpu_(
+            const std::vector<size_t>& oldLength,
+            const std::vector<size_t>& addPerList,
+            bool forceFullUpload);
 
     std::shared_ptr<MetalResources> resources_;
 
@@ -125,11 +129,13 @@ private:
     // Per-list metadata
     std::vector<size_t> listLength_;
     std::vector<size_t> listOffset_;
+    std::vector<size_t> listCapacity_;
 
     // Host copies of IVF data (flat layout)
     std::vector<float> hostCodes_; // size = totalVecs_ * dim_
     std::vector<idx_t> hostIds_;   // size = totalVecs_
     size_t totalVecs_;
+    size_t totalCapacityVecs_;
 
     // GPU storage
     id<MTLBuffer> codesBuffer_;

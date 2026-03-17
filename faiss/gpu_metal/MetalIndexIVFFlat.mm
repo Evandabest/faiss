@@ -15,11 +15,72 @@
 #include <faiss/invlists/DirectMap.h>
 
 #include <cstring>
+#include <cstdlib>
 #include <limits>
 #include <vector>
 
 namespace {
+constexpr size_t kDefaultIvfQueryTileBudgetBytes = 256ULL * 1024 * 1024;
+constexpr size_t kMinIvfQueryTileBudgetBytes = 16ULL * 1024 * 1024;
+constexpr size_t kMaxIvfQueryTileBudgetBytes = 4ULL * 1024 * 1024 * 1024;
 constexpr faiss::idx_t kIVFFlatSupportedMaxK = 1024;
+
+size_t getIvfQueryTileBudgetBytes() {
+    const char* envBytes = std::getenv("FAISS_METAL_IVF_QUERY_TILE_BYTES");
+    if (envBytes && envBytes[0] != '\0') {
+        char* end = nullptr;
+        unsigned long long val = std::strtoull(envBytes, &end, 10);
+        if (end != envBytes && val != 0) {
+            size_t out = static_cast<size_t>(val);
+            out = std::max(out, kMinIvfQueryTileBudgetBytes);
+            out = std::min(out, kMaxIvfQueryTileBudgetBytes);
+            return out;
+        }
+    }
+    return kDefaultIvfQueryTileBudgetBytes;
+}
+
+size_t chooseIvfSearchTileRows(
+        size_t nq,
+        int d,
+        faiss::idx_t k,
+        size_t nprobe,
+        int nlist) {
+    size_t perQuery = 0;
+    perQuery += (size_t)d * sizeof(float);
+    perQuery += (size_t)k * (sizeof(float) + sizeof(int64_t));
+    perQuery += nprobe * (size_t)k * (sizeof(float) + sizeof(int64_t));
+    perQuery += nprobe * (sizeof(float) + sizeof(int32_t));
+    perQuery += (size_t)nlist * sizeof(float);
+    if (perQuery == 0) {
+        return nq;
+    }
+
+    size_t tile = getIvfQueryTileBudgetBytes() / perQuery;
+    tile = std::max<size_t>(tile, 1);
+    tile = std::min(tile, nq);
+    return tile;
+}
+
+size_t chooseIvfPreassignedTileRows(
+        size_t nq,
+        int d,
+        faiss::idx_t k,
+        size_t nprobe) {
+    size_t perQuery = 0;
+    perQuery += (size_t)d * sizeof(float);
+    perQuery += (size_t)k * (sizeof(float) + sizeof(int64_t));
+    perQuery += nprobe * (size_t)k * (sizeof(float) + sizeof(int64_t));
+    perQuery += nprobe * sizeof(int32_t);
+    if (perQuery == 0) {
+        return nq;
+    }
+
+    size_t tile = getIvfQueryTileBudgetBytes() / perQuery;
+    tile = std::max<size_t>(tile, 1);
+    tile = std::min(tile, nq);
+    return tile;
+}
 
 void floatToHalf(const float* src, uint16_t* dst, size_t n) {
     for (size_t i = 0; i < n; ++i) {
@@ -307,25 +368,32 @@ void MetalIndexIVFFlat::search(
         return;
     }
 
-    auto cpuFallbackSearch = [&]() {
+    auto cpuFallbackSearch = [&](idx_t qBase, idx_t qCount) {
+        const float* xTile = x + (size_t)qBase * (size_t)d;
+        float* distancesTile = distances + (size_t)qBase * (size_t)k;
+        idx_t* labelsTile = labels + (size_t)qBase * (size_t)k;
         if (indicesOptions_ == faiss::gpu::INDICES_IVF) {
-            std::vector<float> coarseDist((size_t)n * nprobe);
-            std::vector<idx_t> coarseAssign((size_t)n * nprobe);
+            std::vector<float> coarseDist((size_t)qCount * nprobe);
+            std::vector<idx_t> coarseAssign((size_t)qCount * nprobe);
             cpuIndex_->quantizer->search(
-                    n, x, (idx_t)nprobe, coarseDist.data(), coarseAssign.data());
+                    qCount,
+                    xTile,
+                    (idx_t)nprobe,
+                    coarseDist.data(),
+                    coarseAssign.data());
             cpuIndex_->search_preassigned(
-                    n,
-                    x,
+                    qCount,
+                    xTile,
                     k,
                     coarseAssign.data(),
                     coarseDist.data(),
-                    distances,
-                    labels,
+                    distancesTile,
+                    labelsTile,
                     true,
                     dynamic_cast<const IVFSearchParameters*>(params),
                     nullptr);
         } else {
-            cpuIndex_->search(n, x, k, distances, labels);
+            cpuIndex_->search(qCount, xTile, k, distancesTile, labelsTile);
         }
     };
 
@@ -341,7 +409,7 @@ void MetalIndexIVFFlat::search(
     // Fall back to CPU if Metal is not available or GPU IVF storage not ready.
     if (!device || !queue || !gpuIvf_ || !hasScanCodes || !gpuIvf_->idsBuffer() ||
         !gpuIvf_->listOffsetGpuBuffer() || !gpuIvf_->listLengthGpuBuffer()) {
-        cpuFallbackSearch();
+        cpuFallbackSearch(0, n);
         return;
     }
 
@@ -352,117 +420,132 @@ void MetalIndexIVFFlat::search(
 
     int nlist = (int)cpuIndex_->nlist;
 
-    // ---- Grow persistent search buffers ------------------------------------
-    size_t queriesBytes    = (size_t)n * (size_t)d * sizeof(float);
-    size_t outDistBytes    = (size_t)n * (size_t)k * sizeof(float);
-    size_t outIdxBytes     = (size_t)n * (size_t)k * sizeof(int64_t);
-    size_t perListBytes    = (size_t)n * nprobe * (size_t)k * sizeof(float);
-    size_t perListIdxB     = (size_t)n * nprobe * (size_t)k * sizeof(int64_t);
-    size_t coarseDistBytes = (size_t)n * nprobe * sizeof(float);
-    size_t coarseIdxBytes  = (size_t)n * nprobe * sizeof(int32_t);
-    size_t distMatBytes    = (size_t)n * (size_t)nlist * sizeof(float);
+    const size_t tileRows = chooseIvfSearchTileRows((size_t)n, d, k, nprobe, nlist);
+    const int avgListLen = (ntotal > 0 && nlist > 0) ? (int)(ntotal / nlist) : 256;
 
-    ensureSearchBuf_(searchQueriesBuf_,      searchQueriesCap_,      queriesBytes);
-    ensureSearchBuf_(searchOutDistBuf_,      searchOutDistCap_,      outDistBytes);
-    ensureSearchBuf_(searchOutIdxBuf_,       searchOutIdxCap_,       outIdxBytes);
-    ensureSearchBuf_(searchPerListDistBuf_,  searchPerListDistCap_,  perListBytes);
-    ensureSearchBuf_(searchPerListIdxBuf_,   searchPerListIdxCap_,   perListIdxB);
-    ensureSearchBuf_(coarseOutDistBuf_,      coarseOutDistCap_,      coarseDistBytes);
-    ensureSearchBuf_(coarseOutIdxBuf_,       coarseOutIdxCap_,       coarseIdxBytes);
-    ensureSearchBuf_(distMatrixBuf_,         distMatrixCap_,         distMatBytes);
+    for (idx_t qBase = 0; qBase < n; qBase += (idx_t)tileRows) {
+        idx_t qCount = std::min<idx_t>((idx_t)tileRows, n - qBase);
+        const float* xTile = x + (size_t)qBase * (size_t)d;
 
-    if (!searchQueriesBuf_ || !searchOutDistBuf_ || !searchOutIdxBuf_ ||
-        !searchPerListDistBuf_ || !searchPerListIdxBuf_ ||
-        !coarseOutDistBuf_ || !coarseOutIdxBuf_ || !distMatrixBuf_) {
-        cpuFallbackSearch();
-        return;
-    }
+        size_t queriesBytes = (size_t)qCount * (size_t)d * sizeof(float);
+        size_t outDistBytes = (size_t)qCount * (size_t)k * sizeof(float);
+        size_t outIdxBytes = (size_t)qCount * (size_t)k * sizeof(int64_t);
+        size_t perListBytes = (size_t)qCount * nprobe * (size_t)k * sizeof(float);
+        size_t perListIdxB = (size_t)qCount * nprobe * (size_t)k * sizeof(int64_t);
+        size_t coarseDistBytes = (size_t)qCount * nprobe * sizeof(float);
+        size_t coarseIdxBytes = (size_t)qCount * nprobe * sizeof(int32_t);
+        size_t distMatBytes = (size_t)qCount * (size_t)nlist * sizeof(float);
 
-    std::memcpy([searchQueriesBuf_ contents], x, queriesBytes);
+        ensureSearchBuf_(searchQueriesBuf_, searchQueriesCap_, queriesBytes);
+        ensureSearchBuf_(searchOutDistBuf_, searchOutDistCap_, outDistBytes);
+        ensureSearchBuf_(searchOutIdxBuf_, searchOutIdxCap_, outIdxBytes);
+        ensureSearchBuf_(searchPerListDistBuf_, searchPerListDistCap_, perListBytes);
+        ensureSearchBuf_(searchPerListIdxBuf_, searchPerListIdxCap_, perListIdxB);
+        ensureSearchBuf_(coarseOutDistBuf_, coarseOutDistCap_, coarseDistBytes);
+        ensureSearchBuf_(coarseOutIdxBuf_, coarseOutIdxCap_, coarseIdxBytes);
+        ensureSearchBuf_(distMatrixBuf_, distMatrixCap_, distMatBytes);
 
-    // ---- Single command buffer: coarse quant + IVF scan + merge ----------
-    bool ok = false;
-    if (centroidBuf_ && nprobe <= (size_t)getMetalDistanceMaxK()) {
-        int avgListLen = (ntotal > 0 && nlist > 0)
-                       ? (int)(ntotal / nlist) : 256;
-        ok = runMetalIVFFlatFullSearch(
-                device, queue,
-                searchQueriesBuf_,
-                (int)n, d, (int)k, (int)nprobe, isL2,
-                centroidBuf_, nlist,
-                gpuIvf_->codesBuffer(),
-                gpuIvf_->idsBuffer(),
-                gpuIvf_->listOffsetGpuBuffer(),
-                gpuIvf_->listLengthGpuBuffer(),
-                searchOutDistBuf_,
-                searchOutIdxBuf_,
-                searchPerListDistBuf_,
-                searchPerListIdxBuf_,
-                coarseOutDistBuf_,
-                coarseOutIdxBuf_,
-                distMatrixBuf_,
-                centroidNormsBuf_,
-                avgListLen,
-                gpuIvf_->interleavedCodesBuffer(),
-                gpuIvf_->interleavedCodesOffsetBuffer(),
-                config_.useFloat16CoarseQuantizer);
-    }
-
-    if (!ok) {
-        // Fallback: CPU coarse + GPU IVF scan (two command buffers).
-        std::vector<float>  coarseDistVec((size_t)n * nprobe);
-        std::vector<idx_t>  coarseAssignVec((size_t)n * nprobe);
-        cpuIndex_->quantizer->search(
-                n, x, (idx_t)nprobe, coarseDistVec.data(),
-                coarseAssignVec.data());
-        size_t coarseBytes = (size_t)n * nprobe * sizeof(int32_t);
-        ensureSearchBuf_(searchCoarseBuf_, searchCoarseCap_, coarseBytes);
-        if (!searchCoarseBuf_) {
-            cpuFallbackSearch();
-            return;
+        if (!searchQueriesBuf_ || !searchOutDistBuf_ || !searchOutIdxBuf_ ||
+            !searchPerListDistBuf_ || !searchPerListIdxBuf_ ||
+            !coarseOutDistBuf_ || !coarseOutIdxBuf_ || !distMatrixBuf_) {
+            cpuFallbackSearch(qBase, qCount);
+            continue;
         }
-        auto* dst = reinterpret_cast<int32_t*>([searchCoarseBuf_ contents]);
-        for (size_t i = 0; i < (size_t)n * nprobe; ++i) {
-            dst[i] = (int32_t)coarseAssignVec[i];
+
+        std::memcpy([searchQueriesBuf_ contents], xTile, queriesBytes);
+
+        bool ok = false;
+        if (centroidBuf_ && nprobe <= (size_t)getMetalDistanceMaxK()) {
+            ok = runMetalIVFFlatFullSearch(
+                    device, queue,
+                    searchQueriesBuf_,
+                    (int)qCount, d, (int)k, (int)nprobe, isL2,
+                    centroidBuf_, nlist,
+                    gpuIvf_->codesBuffer(),
+                    gpuIvf_->idsBuffer(),
+                    gpuIvf_->listOffsetGpuBuffer(),
+                    gpuIvf_->listLengthGpuBuffer(),
+                    searchOutDistBuf_,
+                    searchOutIdxBuf_,
+                    searchPerListDistBuf_,
+                    searchPerListIdxBuf_,
+                    coarseOutDistBuf_,
+                    coarseOutIdxBuf_,
+                    distMatrixBuf_,
+                    centroidNormsBuf_,
+                    avgListLen,
+                    gpuIvf_->interleavedCodesBuffer(),
+                    gpuIvf_->interleavedCodesOffsetBuffer(),
+                    config_.useFloat16CoarseQuantizer);
         }
-        ok = runMetalIVFFlatScan(
-                device, queue,
-                searchQueriesBuf_,
-                gpuIvf_->codesBuffer(),
-                gpuIvf_->idsBuffer(),
-                gpuIvf_->listOffsetGpuBuffer(),
-                gpuIvf_->listLengthGpuBuffer(),
-                searchCoarseBuf_,
-                (int)n, d, (int)k, (int)nprobe, isL2,
-                searchOutDistBuf_, searchOutIdxBuf_,
-                searchPerListDistBuf_, searchPerListIdxBuf_,
-                gpuIvf_->interleavedCodesBuffer(),
-                gpuIvf_->interleavedCodesOffsetBuffer());
-    }
 
-    if (!ok) {
-        cpuFallbackSearch();
-        return;
-    }
-
-    // ---- Copy results back -----------------------------------------------
-    const float*   outDistPtr = reinterpret_cast<const float*  >([searchOutDistBuf_ contents]);
-    const int64_t* outIdxPtr  = reinterpret_cast<const int64_t*>([searchOutIdxBuf_  contents]);
-
-    for (idx_t qi = 0; qi < n; ++qi) {
-        for (idx_t j = 0; j < k; ++j) {
-            size_t pos        = (size_t)qi * (size_t)k + (size_t)j;
-            int64_t globalId  = outIdxPtr[pos];
-            if (globalId < 0) {
-                labels[pos] = -1;
-            } else if (indicesOptions_ == faiss::gpu::INDICES_CPU) {
-                labels[pos] = decodeCpuLabelFromPair(cpuIndex_.get(), globalId);
-            } else if (indicesOptions_ == faiss::gpu::INDICES_32_BIT) {
-                labels[pos] = (idx_t)(int32_t)globalId;
-            } else {
-                labels[pos] = (idx_t)globalId;
+        if (!ok) {
+            std::vector<float> coarseDistVec((size_t)qCount * nprobe);
+            std::vector<idx_t> coarseAssignVec((size_t)qCount * nprobe);
+            cpuIndex_->quantizer->search(
+                    qCount,
+                    xTile,
+                    (idx_t)nprobe,
+                    coarseDistVec.data(),
+                    coarseAssignVec.data());
+            size_t coarseBytes = (size_t)qCount * nprobe * sizeof(int32_t);
+            ensureSearchBuf_(searchCoarseBuf_, searchCoarseCap_, coarseBytes);
+            if (!searchCoarseBuf_) {
+                cpuFallbackSearch(qBase, qCount);
+                continue;
             }
-            distances[pos]    = outDistPtr[pos];
+            auto* dst = reinterpret_cast<int32_t*>([searchCoarseBuf_ contents]);
+            for (size_t i = 0; i < (size_t)qCount * nprobe; ++i) {
+                FAISS_THROW_IF_NOT_MSG(
+                        coarseAssignVec[i] >=
+                                        (idx_t)std::numeric_limits<int32_t>::min() &&
+                                coarseAssignVec[i] <=
+                                        (idx_t)std::numeric_limits<int32_t>::max(),
+                        "MetalIndexIVFFlat: coarse assignment exceeds int32 range");
+                dst[i] = (int32_t)coarseAssignVec[i];
+            }
+            ok = runMetalIVFFlatScan(
+                    device, queue,
+                    searchQueriesBuf_,
+                    gpuIvf_->codesBuffer(),
+                    gpuIvf_->idsBuffer(),
+                    gpuIvf_->listOffsetGpuBuffer(),
+                    gpuIvf_->listLengthGpuBuffer(),
+                    searchCoarseBuf_,
+                    (int)qCount, d, (int)k, (int)nprobe, isL2,
+                    searchOutDistBuf_, searchOutIdxBuf_,
+                    searchPerListDistBuf_, searchPerListIdxBuf_,
+                    gpuIvf_->interleavedCodesBuffer(),
+                    gpuIvf_->interleavedCodesOffsetBuffer());
+        }
+
+        if (!ok) {
+            cpuFallbackSearch(qBase, qCount);
+            continue;
+        }
+
+        const float* outDistPtr = reinterpret_cast<const float*>(
+                [searchOutDistBuf_ contents]);
+        const int64_t* outIdxPtr = reinterpret_cast<const int64_t*>(
+                [searchOutIdxBuf_ contents]);
+
+        for (idx_t qi = 0; qi < qCount; ++qi) {
+            for (idx_t j = 0; j < k; ++j) {
+                size_t localPos = (size_t)qi * (size_t)k + (size_t)j;
+                size_t globalPos = (size_t)(qBase + qi) * (size_t)k + (size_t)j;
+                int64_t globalId = outIdxPtr[localPos];
+                if (globalId < 0) {
+                    labels[globalPos] = -1;
+                } else if (indicesOptions_ == faiss::gpu::INDICES_CPU) {
+                    labels[globalPos] =
+                            decodeCpuLabelFromPair(cpuIndex_.get(), globalId);
+                } else if (indicesOptions_ == faiss::gpu::INDICES_32_BIT) {
+                    labels[globalPos] = (idx_t)(int32_t)globalId;
+                } else {
+                    labels[globalPos] = (idx_t)globalId;
+                }
+                distances[globalPos] = outDistPtr[localPos];
+            }
         }
     }
 }
@@ -478,10 +561,6 @@ void MetalIndexIVFFlat::search_preassigned(
         bool store_pairs,
         const IVFSearchParameters* params,
         IndexIVFStats* stats) const {
-    (void)centroid_dis;
-    (void)store_pairs;
-    (void)stats;
-
     FAISS_THROW_IF_NOT(cpuIndex_);
     FAISS_THROW_IF_NOT(k > 0);
     FAISS_THROW_IF_NOT(assign);
@@ -516,92 +595,110 @@ void MetalIndexIVFFlat::search_preassigned(
             gpuIvf_->interleavedCodesOffsetBuffer();
     const bool hasScanCodes = hasFlatCodes || hasInterleavedCodes;
 
+    auto cpuFallbackSearch = [&](idx_t qBase, idx_t qCount) {
+        const float* xTile = x + (size_t)qBase * (size_t)d;
+        const idx_t* assignTile = assign + (size_t)qBase * nprobe;
+        const float* centroidTile =
+                centroid_dis ? (centroid_dis + (size_t)qBase * nprobe) : nullptr;
+        float* distTile = distances + (size_t)qBase * (size_t)k;
+        idx_t* labelsTile = labels + (size_t)qBase * (size_t)k;
+        cpuIndex_->search_preassigned(
+                qCount,
+                xTile,
+                k,
+                assignTile,
+                centroidTile,
+                distTile,
+                labelsTile,
+                indicesOptions_ == faiss::gpu::INDICES_IVF ? true : store_pairs,
+                params,
+                stats);
+    };
+
     if (!device || !queue || !gpuIvf_ || !hasScanCodes || !gpuIvf_->idsBuffer() ||
         !gpuIvf_->listOffsetGpuBuffer() || !gpuIvf_->listLengthGpuBuffer()) {
-        cpuIndex_->search_preassigned(
-                n, x, k, assign, centroid_dis,
-                distances,
-                labels,
-                indicesOptions_ == faiss::gpu::INDICES_IVF ? true : store_pairs,
-                params,
-                stats);
+        cpuFallbackSearch(0, n);
         return;
     }
 
-    size_t queriesBytes    = (size_t)n * (size_t)d * sizeof(float);
-    size_t outDistBytes    = (size_t)n * (size_t)k * sizeof(float);
-    size_t outIdxBytes     = (size_t)n * (size_t)k * sizeof(int64_t);
-    size_t perListBytes    = (size_t)n * nprobe * (size_t)k * sizeof(float);
-    size_t perListIdxB     = (size_t)n * nprobe * (size_t)k * sizeof(int64_t);
-    size_t coarseBytes     = (size_t)n * nprobe * sizeof(int32_t);
+    const size_t tileRows = chooseIvfPreassignedTileRows((size_t)n, d, k, nprobe);
+    for (idx_t qBase = 0; qBase < n; qBase += (idx_t)tileRows) {
+        idx_t qCount = std::min<idx_t>((idx_t)tileRows, n - qBase);
+        const float* xTile = x + (size_t)qBase * (size_t)d;
+        const idx_t* assignTile = assign + (size_t)qBase * nprobe;
 
-    ensureSearchBuf_(searchQueriesBuf_,     searchQueriesCap_,     queriesBytes);
-    ensureSearchBuf_(searchOutDistBuf_,     searchOutDistCap_,     outDistBytes);
-    ensureSearchBuf_(searchOutIdxBuf_,      searchOutIdxCap_,      outIdxBytes);
-    ensureSearchBuf_(searchPerListDistBuf_, searchPerListDistCap_, perListBytes);
-    ensureSearchBuf_(searchPerListIdxBuf_,  searchPerListIdxCap_,  perListIdxB);
-    ensureSearchBuf_(searchCoarseBuf_,      searchCoarseCap_,      coarseBytes);
+        size_t queriesBytes = (size_t)qCount * (size_t)d * sizeof(float);
+        size_t outDistBytes = (size_t)qCount * (size_t)k * sizeof(float);
+        size_t outIdxBytes = (size_t)qCount * (size_t)k * sizeof(int64_t);
+        size_t perListBytes = (size_t)qCount * nprobe * (size_t)k * sizeof(float);
+        size_t perListIdxB = (size_t)qCount * nprobe * (size_t)k * sizeof(int64_t);
+        size_t coarseBytes = (size_t)qCount * nprobe * sizeof(int32_t);
 
-    if (!searchQueriesBuf_ || !searchOutDistBuf_ || !searchOutIdxBuf_ ||
-        !searchPerListDistBuf_ || !searchPerListIdxBuf_ || !searchCoarseBuf_) {
-        cpuIndex_->search_preassigned(
-                n, x, k, assign, centroid_dis,
-                distances,
-                labels,
-                indicesOptions_ == faiss::gpu::INDICES_IVF ? true : store_pairs,
-                params,
-                stats);
-        return;
-    }
+        ensureSearchBuf_(searchQueriesBuf_, searchQueriesCap_, queriesBytes);
+        ensureSearchBuf_(searchOutDistBuf_, searchOutDistCap_, outDistBytes);
+        ensureSearchBuf_(searchOutIdxBuf_, searchOutIdxCap_, outIdxBytes);
+        ensureSearchBuf_(searchPerListDistBuf_, searchPerListDistCap_, perListBytes);
+        ensureSearchBuf_(searchPerListIdxBuf_, searchPerListIdxCap_, perListIdxB);
+        ensureSearchBuf_(searchCoarseBuf_, searchCoarseCap_, coarseBytes);
 
-    std::memcpy([searchQueriesBuf_ contents], x, queriesBytes);
+        if (!searchQueriesBuf_ || !searchOutDistBuf_ || !searchOutIdxBuf_ ||
+            !searchPerListDistBuf_ || !searchPerListIdxBuf_ || !searchCoarseBuf_) {
+            cpuFallbackSearch(qBase, qCount);
+            continue;
+        }
 
-    auto* coarseDst = reinterpret_cast<int32_t*>([searchCoarseBuf_ contents]);
-    for (size_t i = 0; i < (size_t)n * nprobe; ++i) {
-        coarseDst[i] = (int32_t)assign[i];
-    }
+        std::memcpy([searchQueriesBuf_ contents], xTile, queriesBytes);
 
-    bool ok = runMetalIVFFlatScan(
-            device, queue,
-            searchQueriesBuf_,
-            gpuIvf_->codesBuffer(),
-            gpuIvf_->idsBuffer(),
-            gpuIvf_->listOffsetGpuBuffer(),
-            gpuIvf_->listLengthGpuBuffer(),
-            searchCoarseBuf_,
-            (int)n, d, (int)k, (int)nprobe, isL2,
-            searchOutDistBuf_, searchOutIdxBuf_,
-            searchPerListDistBuf_, searchPerListIdxBuf_,
-            gpuIvf_->interleavedCodesBuffer(),
-            gpuIvf_->interleavedCodesOffsetBuffer());
+        auto* coarseDst = reinterpret_cast<int32_t*>([searchCoarseBuf_ contents]);
+        for (size_t i = 0; i < (size_t)qCount * nprobe; ++i) {
+            FAISS_THROW_IF_NOT_MSG(
+                    assignTile[i] >= (idx_t)std::numeric_limits<int32_t>::min() &&
+                            assignTile[i] <=
+                                    (idx_t)std::numeric_limits<int32_t>::max(),
+                    "MetalIndexIVFFlat: preassigned list id exceeds int32 range");
+            coarseDst[i] = (int32_t)assignTile[i];
+        }
 
-    if (!ok) {
-        cpuIndex_->search_preassigned(
-                n, x, k, assign, centroid_dis,
-                distances,
-                labels,
-                indicesOptions_ == faiss::gpu::INDICES_IVF ? true : store_pairs,
-                params,
-                stats);
-        return;
-    }
+        bool ok = runMetalIVFFlatScan(
+                device, queue,
+                searchQueriesBuf_,
+                gpuIvf_->codesBuffer(),
+                gpuIvf_->idsBuffer(),
+                gpuIvf_->listOffsetGpuBuffer(),
+                gpuIvf_->listLengthGpuBuffer(),
+                searchCoarseBuf_,
+                (int)qCount, d, (int)k, (int)nprobe, isL2,
+                searchOutDistBuf_, searchOutIdxBuf_,
+                searchPerListDistBuf_, searchPerListIdxBuf_,
+                gpuIvf_->interleavedCodesBuffer(),
+                gpuIvf_->interleavedCodesOffsetBuffer());
 
-    const float*   outDistPtr = reinterpret_cast<const float*  >([searchOutDistBuf_ contents]);
-    const int64_t* outIdxPtr  = reinterpret_cast<const int64_t*>([searchOutIdxBuf_  contents]);
-    for (idx_t qi = 0; qi < n; ++qi) {
-        for (idx_t j = 0; j < k; ++j) {
-            size_t pos       = (size_t)qi * (size_t)k + (size_t)j;
-            int64_t globalId = outIdxPtr[pos];
-            if (globalId < 0) {
-                labels[pos] = -1;
-            } else if (indicesOptions_ == faiss::gpu::INDICES_CPU) {
-                labels[pos] = decodeCpuLabelFromPair(cpuIndex_.get(), globalId);
-            } else if (indicesOptions_ == faiss::gpu::INDICES_32_BIT) {
-                labels[pos] = (idx_t)(int32_t)globalId;
-            } else {
-                labels[pos] = (idx_t)globalId;
+        if (!ok) {
+            cpuFallbackSearch(qBase, qCount);
+            continue;
+        }
+
+        const float* outDistPtr = reinterpret_cast<const float*>(
+                [searchOutDistBuf_ contents]);
+        const int64_t* outIdxPtr = reinterpret_cast<const int64_t*>(
+                [searchOutIdxBuf_ contents]);
+        for (idx_t qi = 0; qi < qCount; ++qi) {
+            for (idx_t j = 0; j < k; ++j) {
+                size_t localPos = (size_t)qi * (size_t)k + (size_t)j;
+                size_t globalPos = (size_t)(qBase + qi) * (size_t)k + (size_t)j;
+                int64_t globalId = outIdxPtr[localPos];
+                if (globalId < 0) {
+                    labels[globalPos] = -1;
+                } else if (indicesOptions_ == faiss::gpu::INDICES_CPU) {
+                    labels[globalPos] =
+                            decodeCpuLabelFromPair(cpuIndex_.get(), globalId);
+                } else if (indicesOptions_ == faiss::gpu::INDICES_32_BIT) {
+                    labels[globalPos] = (idx_t)(int32_t)globalId;
+                } else {
+                    labels[globalPos] = (idx_t)globalId;
+                }
+                distances[globalPos] = outDistPtr[localPos];
             }
-            distances[pos]   = outDistPtr[pos];
         }
     }
 }
