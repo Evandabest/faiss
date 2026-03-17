@@ -13,6 +13,7 @@
 #include <faiss/gpu_metal/MetalDistance.h>
 #include <faiss/gpu_metal/impl/MetalIVFFlat.h>
 #include <faiss/invlists/DirectMap.h>
+#include <faiss/invlists/InvertedLists.h>
 
 #include <cstring>
 #include <cstdlib>
@@ -127,6 +128,18 @@ bool logCpuFallbackForIvf() {
     return true;
 }
 
+bool logSyncProfileForIvf() {
+    const char* env = std::getenv("FAISS_METAL_IVF_LOG_SYNC_PROFILE");
+    if (!env || env[0] == '\0') {
+        return false;
+    }
+    if (env[0] == '0' || env[0] == 'n' || env[0] == 'N' || env[0] == 'f' ||
+        env[0] == 'F') {
+        return false;
+    }
+    return true;
+}
+
 size_t getIvfFullCoarseMaxBytes() {
     const char* env = std::getenv("FAISS_METAL_IVF_FULL_COARSE_MAX_BYTES");
     if (!env || env[0] == '\0') {
@@ -152,6 +165,44 @@ bool useFullCoarseGpuForIvf() {
     return true;
 }
 
+struct ScopedIds {
+    const faiss::InvertedLists* inv = nullptr;
+    size_t listNo = 0;
+    const faiss::idx_t* ptr = nullptr;
+
+    ScopedIds() = default;
+    ScopedIds(const faiss::InvertedLists* inv_, size_t listNo_)
+            : inv(inv_), listNo(listNo_) {
+        if (inv) {
+            ptr = inv->get_ids(listNo);
+        }
+    }
+    ~ScopedIds() {
+        if (inv && ptr) {
+            inv->release_ids(listNo, ptr);
+        }
+    }
+};
+
+struct ScopedCodes {
+    const faiss::InvertedLists* inv = nullptr;
+    size_t listNo = 0;
+    const uint8_t* ptr = nullptr;
+
+    ScopedCodes() = default;
+    ScopedCodes(const faiss::InvertedLists* inv_, size_t listNo_)
+            : inv(inv_), listNo(listNo_) {
+        if (inv) {
+            ptr = inv->get_codes(listNo);
+        }
+    }
+    ~ScopedCodes() {
+        if (inv && ptr) {
+            inv->release_codes(listNo, ptr);
+        }
+    }
+};
+
 void floatToHalf(const float* src, uint16_t* dst, size_t n) {
     for (size_t i = 0; i < n; ++i) {
         __fp16 h = (__fp16)src[i];
@@ -172,8 +223,8 @@ inline faiss::idx_t decodeCpuLabelFromPair(
     if (offset >= sz) {
         return -1;
     }
-    const faiss::idx_t* ids = cpuIndex->invlists->get_ids((size_t)listNo);
-    return ids ? ids[offset] : -1;
+    ScopedIds ids(cpuIndex->invlists, (size_t)listNo);
+    return ids.ptr ? ids.ptr[offset] : -1;
 }
 
 inline int checkedIdxToInt(faiss::idx_t v, const char* what) {
@@ -625,8 +676,14 @@ void MetalIndexIVFFlat::search(
     };
     const bool allowCpuFallback = allowCpuFallbackForIvf();
     const bool logCpuFallback = logCpuFallbackForIvf();
+    const bool logSyncProfile = logSyncProfileForIvf();
     idx_t fallbackCount = 0;
     std::string firstFallbackReason;
+    idx_t fullSearchCalls = 0;
+    idx_t scanCalls = 0;
+    idx_t syncScanCalls = 0;
+    idx_t asyncScanCalls = 0;
+    idx_t asyncBatchSyncs = 0;
     auto fallbackOrThrow = [&](idx_t qBase, idx_t qCount, const char* reason) {
         if (!allowCpuFallback) {
             FAISS_THROW_FMT(
@@ -722,6 +779,7 @@ void MetalIndexIVFFlat::search(
 
         bool ok = false;
         if (tryFullCoarse) {
+            ++fullSearchCalls;
             ok = runMetalIVFFlatFullSearch(
                     device, queue,
                     searchQueriesBuf_,
@@ -880,10 +938,13 @@ void MetalIndexIVFFlat::search(
                     const int chunkProbeI = checkedSizeToInt(
                             chunkProbe,
                             "MetalIndexIVFFlat: chunk nprobe exceeds int range");
-                    for (size_t lp = 0; ok && lp < numListPass; ++lp) {
-                        id<MTLBuffer> passListOffsetBuf = gpuIvf_->listOffsetGpuBuffer();
-                        id<MTLBuffer> passListLengthBuf = gpuIvf_->listLengthGpuBuffer();
-                        if (needListChunk) {
+                    if (needListChunk && numListPass > 1) {
+                        std::vector<id<MTLBuffer>> passOutDistBufs(numListPass, nil);
+                        std::vector<id<MTLBuffer>> passOutIdxBufs(numListPass, nil);
+                        std::vector<id<MTLBuffer>> passListOffsetBufs(numListPass, nil);
+                        std::vector<id<MTLBuffer>> passListLengthBufs(numListPass, nil);
+
+                        for (size_t lp = 0; ok && lp < numListPass; ++lp) {
                             const uint64_t shift = (uint64_t)lp * (uint64_t)listChunk;
                             for (int li = 0; li < nlist; ++li) {
                                 uint32_t off = baseListOffset[li];
@@ -904,53 +965,155 @@ void MetalIndexIVFFlat::search(
                                 passLength[(size_t)li] =
                                         std::min<uint32_t>((uint32_t)listChunk, rem);
                             }
-                            std::memcpy([listOffsetPassBuf contents],
+
+                            passListOffsetBufs[lp] =
+                                    [device newBufferWithLength:(size_t)nlist * sizeof(uint32_t)
+                                                        options:MTLResourceStorageModeShared];
+                            passListLengthBufs[lp] =
+                                    [device newBufferWithLength:(size_t)nlist * sizeof(uint32_t)
+                                                        options:MTLResourceStorageModeShared];
+                            passOutDistBufs[lp] =
+                                    [device newBufferWithLength:outDistBytes
+                                                        options:MTLResourceStorageModeShared];
+                            passOutIdxBufs[lp] =
+                                    [device newBufferWithLength:outIdxBytes
+                                                        options:MTLResourceStorageModeShared];
+                            if (!passListOffsetBufs[lp] || !passListLengthBufs[lp] ||
+                                !passOutDistBufs[lp] || !passOutIdxBufs[lp]) {
+                                ok = false;
+                                break;
+                            }
+                            std::memcpy([passListOffsetBufs[lp] contents],
                                         passOffset.data(),
                                         passOffset.size() * sizeof(uint32_t));
-                            std::memcpy([listLengthPassBuf contents],
+                            std::memcpy([passListLengthBufs[lp] contents],
                                         passLength.data(),
                                         passLength.size() * sizeof(uint32_t));
-                            passListOffsetBuf = listOffsetPassBuf;
-                            passListLengthBuf = listLengthPassBuf;
+
+                            bool chunkOk = runMetalIVFFlatScan(
+                                    device, queue,
+                                    searchQueriesBuf_,
+                                    gpuIvf_->codesBuffer(),
+                                    gpuIvf_->idsBuffer(),
+                                    passListOffsetBufs[lp],
+                                    passListLengthBufs[lp],
+                                    searchCoarseBuf_,
+                                    qCountI, d, kI, chunkProbeI, isL2,
+                                    passOutDistBufs[lp], passOutIdxBufs[lp],
+                                    searchPerListDistBuf_, searchPerListIdxBuf_,
+                                    chunkInterleavedCodes,
+                                    chunkInterleavedOffsets,
+                                    false /* waitForCompletion */);
+                            ++scanCalls;
+                            ++asyncScanCalls;
+                            if (!chunkOk) {
+                                ok = false;
+                                break;
+                            }
                         }
 
-                        bool chunkOk = runMetalIVFFlatScan(
-                                device, queue,
-                                searchQueriesBuf_,
-                                gpuIvf_->codesBuffer(),
-                                gpuIvf_->idsBuffer(),
-                                passListOffsetBuf,
-                                passListLengthBuf,
-                                searchCoarseBuf_,
-                                qCountI, d, kI, chunkProbeI, isL2,
-                                searchOutDistBuf_, searchOutIdxBuf_,
-                                searchPerListDistBuf_, searchPerListIdxBuf_,
-                                chunkInterleavedCodes,
-                                chunkInterleavedOffsets);
-                        if (!chunkOk) {
-                            ok = false;
-                            break;
+                        if (ok) {
+                            resources_->synchronize();
+                            ++asyncBatchSyncs;
+                            for (size_t lp = 0; lp < numListPass; ++lp) {
+                                const float* chunkDist = reinterpret_cast<const float*>(
+                                        [passOutDistBufs[lp] contents]);
+                                const int64_t* chunkIdx = reinterpret_cast<const int64_t*>(
+                                        [passOutIdxBufs[lp] contents]);
+                                for (idx_t qi = 0; qi < qCount; ++qi) {
+                                    float* bestDist =
+                                            chunkMergedDist.data() + (size_t)qi * (size_t)k;
+                                    int64_t* bestIdx =
+                                            chunkMergedIdx.data() + (size_t)qi * (size_t)k;
+                                    for (idx_t j = 0; j < k; ++j) {
+                                        const size_t pos =
+                                                (size_t)qi * (size_t)k + (size_t)j;
+                                        insertTopKCandidate(
+                                                chunkDist[pos],
+                                                chunkIdx[pos],
+                                                isL2,
+                                                bestDist,
+                                                bestIdx,
+                                                kI);
+                                    }
+                                }
+                            }
                         }
+                    } else {
+                        for (size_t lp = 0; ok && lp < numListPass; ++lp) {
+                            id<MTLBuffer> passListOffsetBuf = gpuIvf_->listOffsetGpuBuffer();
+                            id<MTLBuffer> passListLengthBuf = gpuIvf_->listLengthGpuBuffer();
+                            if (needListChunk) {
+                                const uint64_t shift = (uint64_t)lp * (uint64_t)listChunk;
+                                for (int li = 0; li < nlist; ++li) {
+                                    uint32_t off = baseListOffset[li];
+                                    uint32_t len = baseListLength[li];
+                                    if (!usedLists[(size_t)li]) {
+                                        passOffset[(size_t)li] = off;
+                                        passLength[(size_t)li] = 0;
+                                        continue;
+                                    }
+                                    if (shift >= len) {
+                                        passOffset[(size_t)li] = off + len;
+                                        passLength[(size_t)li] = 0;
+                                        continue;
+                                    }
+                                    const uint32_t delta = (uint32_t)shift;
+                                    const uint32_t rem = len - delta;
+                                    passOffset[(size_t)li] = off + delta;
+                                    passLength[(size_t)li] =
+                                            std::min<uint32_t>((uint32_t)listChunk, rem);
+                                }
+                                std::memcpy([listOffsetPassBuf contents],
+                                            passOffset.data(),
+                                            passOffset.size() * sizeof(uint32_t));
+                                std::memcpy([listLengthPassBuf contents],
+                                            passLength.data(),
+                                            passLength.size() * sizeof(uint32_t));
+                                passListOffsetBuf = listOffsetPassBuf;
+                                passListLengthBuf = listLengthPassBuf;
+                            }
 
-                        const float* chunkDist = reinterpret_cast<const float*>(
-                                [searchOutDistBuf_ contents]);
-                        const int64_t* chunkIdx = reinterpret_cast<const int64_t*>(
-                                [searchOutIdxBuf_ contents]);
-                        for (idx_t qi = 0; qi < qCount; ++qi) {
-                            float* bestDist =
-                                    chunkMergedDist.data() + (size_t)qi * (size_t)k;
-                            int64_t* bestIdx =
-                                    chunkMergedIdx.data() + (size_t)qi * (size_t)k;
-                            for (idx_t j = 0; j < k; ++j) {
-                                const size_t pos =
-                                        (size_t)qi * (size_t)k + (size_t)j;
-                                insertTopKCandidate(
-                                        chunkDist[pos],
-                                        chunkIdx[pos],
-                                        isL2,
-                                        bestDist,
-                                        bestIdx,
-                                        kI);
+                            bool chunkOk = runMetalIVFFlatScan(
+                                    device, queue,
+                                    searchQueriesBuf_,
+                                    gpuIvf_->codesBuffer(),
+                                    gpuIvf_->idsBuffer(),
+                                    passListOffsetBuf,
+                                    passListLengthBuf,
+                                    searchCoarseBuf_,
+                                    qCountI, d, kI, chunkProbeI, isL2,
+                                    searchOutDistBuf_, searchOutIdxBuf_,
+                                    searchPerListDistBuf_, searchPerListIdxBuf_,
+                                    chunkInterleavedCodes,
+                                    chunkInterleavedOffsets);
+                            ++scanCalls;
+                            ++syncScanCalls;
+                            if (!chunkOk) {
+                                ok = false;
+                                break;
+                            }
+
+                            const float* chunkDist = reinterpret_cast<const float*>(
+                                    [searchOutDistBuf_ contents]);
+                            const int64_t* chunkIdx = reinterpret_cast<const int64_t*>(
+                                    [searchOutIdxBuf_ contents]);
+                            for (idx_t qi = 0; qi < qCount; ++qi) {
+                                float* bestDist =
+                                        chunkMergedDist.data() + (size_t)qi * (size_t)k;
+                                int64_t* bestIdx =
+                                        chunkMergedIdx.data() + (size_t)qi * (size_t)k;
+                                for (idx_t j = 0; j < k; ++j) {
+                                    const size_t pos =
+                                            (size_t)qi * (size_t)k + (size_t)j;
+                                    insertTopKCandidate(
+                                            chunkDist[pos],
+                                            chunkIdx[pos],
+                                            isL2,
+                                            bestDist,
+                                            bestIdx,
+                                            kI);
+                                }
                             }
                         }
                     }
@@ -969,6 +1132,8 @@ void MetalIndexIVFFlat::search(
                         searchPerListDistBuf_, searchPerListIdxBuf_,
                         gpuIvf_->interleavedCodesBuffer(),
                         gpuIvf_->interleavedCodesOffsetBuffer());
+                ++scanCalls;
+                ++syncScanCalls;
             }
             if (!ok && !envelopeReason.empty() && !usedChunkedScan) {
                 fallbackOrThrow(qBase, qCount, envelopeReason.c_str());
@@ -1032,6 +1197,18 @@ void MetalIndexIVFFlat::search(
                 "IVF_CPU_FALLBACK,api=search,count=%lld,first_reason=%s\n",
                 (long long)fallbackCount,
                 firstFallbackReason.c_str());
+    }
+    if (logSyncProfile) {
+        const idx_t estimatedWaits = fullSearchCalls + syncScanCalls + asyncBatchSyncs;
+        std::fprintf(
+                stderr,
+                "IVF_SYNC_PROFILE,api=search,full_calls=%lld,scan_calls=%lld,sync_scan_calls=%lld,async_scan_calls=%lld,async_batch_syncs=%lld,estimated_waits=%lld\n",
+                (long long)fullSearchCalls,
+                (long long)scanCalls,
+                (long long)syncScanCalls,
+                (long long)asyncScanCalls,
+                (long long)asyncBatchSyncs,
+                (long long)estimatedWaits);
     }
 }
 
@@ -1115,8 +1292,13 @@ void MetalIndexIVFFlat::search_preassigned(
     };
     const bool allowCpuFallback = allowCpuFallbackForIvf();
     const bool logCpuFallback = logCpuFallbackForIvf();
+    const bool logSyncProfile = logSyncProfileForIvf();
     idx_t fallbackCount = 0;
     std::string firstFallbackReason;
+    idx_t scanCalls = 0;
+    idx_t syncScanCalls = 0;
+    idx_t asyncScanCalls = 0;
+    idx_t asyncBatchSyncs = 0;
     auto fallbackOrThrow = [&](idx_t qBase, idx_t qCount, const char* reason) {
         if (!allowCpuFallback) {
             FAISS_THROW_FMT(
@@ -1297,10 +1479,13 @@ void MetalIndexIVFFlat::search_preassigned(
                 const int chunkProbeI = checkedSizeToInt(
                         chunkProbe,
                         "MetalIndexIVFFlat::search_preassigned: chunk nprobe exceeds int range");
-                for (size_t lp = 0; ok && lp < numListPass; ++lp) {
-                    id<MTLBuffer> passListOffsetBuf = gpuIvf_->listOffsetGpuBuffer();
-                    id<MTLBuffer> passListLengthBuf = gpuIvf_->listLengthGpuBuffer();
-                    if (needListChunk) {
+                if (needListChunk && numListPass > 1) {
+                    std::vector<id<MTLBuffer>> passOutDistBufs(numListPass, nil);
+                    std::vector<id<MTLBuffer>> passOutIdxBufs(numListPass, nil);
+                    std::vector<id<MTLBuffer>> passListOffsetBufs(numListPass, nil);
+                    std::vector<id<MTLBuffer>> passListLengthBufs(numListPass, nil);
+
+                    for (size_t lp = 0; ok && lp < numListPass; ++lp) {
                         const uint64_t shift = (uint64_t)lp * (uint64_t)listChunk;
                         for (int li = 0; li < nlist; ++li) {
                             uint32_t off = baseListOffset[li];
@@ -1321,50 +1506,151 @@ void MetalIndexIVFFlat::search_preassigned(
                             passLength[(size_t)li] =
                                     std::min<uint32_t>((uint32_t)listChunk, rem);
                         }
-                        std::memcpy([listOffsetPassBuf contents],
+
+                        passListOffsetBufs[lp] =
+                                [device newBufferWithLength:(size_t)nlist * sizeof(uint32_t)
+                                                    options:MTLResourceStorageModeShared];
+                        passListLengthBufs[lp] =
+                                [device newBufferWithLength:(size_t)nlist * sizeof(uint32_t)
+                                                    options:MTLResourceStorageModeShared];
+                        passOutDistBufs[lp] =
+                                [device newBufferWithLength:outDistBytes
+                                                    options:MTLResourceStorageModeShared];
+                        passOutIdxBufs[lp] =
+                                [device newBufferWithLength:outIdxBytes
+                                                    options:MTLResourceStorageModeShared];
+                        if (!passListOffsetBufs[lp] || !passListLengthBufs[lp] ||
+                            !passOutDistBufs[lp] || !passOutIdxBufs[lp]) {
+                            ok = false;
+                            break;
+                        }
+                        std::memcpy([passListOffsetBufs[lp] contents],
                                     passOffset.data(),
                                     passOffset.size() * sizeof(uint32_t));
-                        std::memcpy([listLengthPassBuf contents],
+                        std::memcpy([passListLengthBufs[lp] contents],
                                     passLength.data(),
                                     passLength.size() * sizeof(uint32_t));
-                        passListOffsetBuf = listOffsetPassBuf;
-                        passListLengthBuf = listLengthPassBuf;
+
+                        bool chunkOk = runMetalIVFFlatScan(
+                                device, queue,
+                                searchQueriesBuf_,
+                                gpuIvf_->codesBuffer(),
+                                gpuIvf_->idsBuffer(),
+                                passListOffsetBufs[lp],
+                                passListLengthBufs[lp],
+                                searchCoarseBuf_,
+                                qCountI, d, kI, chunkProbeI, isL2,
+                                passOutDistBufs[lp], passOutIdxBufs[lp],
+                                searchPerListDistBuf_, searchPerListIdxBuf_,
+                                chunkInterleavedCodes,
+                                chunkInterleavedOffsets,
+                                false /* waitForCompletion */);
+                        ++scanCalls;
+                        ++asyncScanCalls;
+                        if (!chunkOk) {
+                            ok = false;
+                            break;
+                        }
                     }
 
-                    bool chunkOk = runMetalIVFFlatScan(
-                            device, queue,
-                            searchQueriesBuf_,
-                            gpuIvf_->codesBuffer(),
-                            gpuIvf_->idsBuffer(),
-                            passListOffsetBuf,
-                            passListLengthBuf,
-                            searchCoarseBuf_,
-                            qCountI, d, kI, chunkProbeI, isL2,
-                            searchOutDistBuf_, searchOutIdxBuf_,
-                            searchPerListDistBuf_, searchPerListIdxBuf_,
-                            chunkInterleavedCodes,
-                            chunkInterleavedOffsets);
-                    if (!chunkOk) {
-                        ok = false;
-                        break;
+                    if (ok) {
+                        resources_->synchronize();
+                        ++asyncBatchSyncs;
+                        for (size_t lp = 0; lp < numListPass; ++lp) {
+                            const float* chunkDist = reinterpret_cast<const float*>(
+                                    [passOutDistBufs[lp] contents]);
+                            const int64_t* chunkIdx = reinterpret_cast<const int64_t*>(
+                                    [passOutIdxBufs[lp] contents]);
+                            for (idx_t qi = 0; qi < qCount; ++qi) {
+                                float* bestDist =
+                                        chunkMergedDist.data() + (size_t)qi * (size_t)k;
+                                int64_t* bestIdx =
+                                        chunkMergedIdx.data() + (size_t)qi * (size_t)k;
+                                for (idx_t j = 0; j < k; ++j) {
+                                    const size_t pos = (size_t)qi * (size_t)k + (size_t)j;
+                                    insertTopKCandidate(
+                                            chunkDist[pos],
+                                            chunkIdx[pos],
+                                            isL2,
+                                            bestDist,
+                                            bestIdx,
+                                            kI);
+                                }
+                            }
+                        }
                     }
+                } else {
+                    for (size_t lp = 0; ok && lp < numListPass; ++lp) {
+                        id<MTLBuffer> passListOffsetBuf = gpuIvf_->listOffsetGpuBuffer();
+                        id<MTLBuffer> passListLengthBuf = gpuIvf_->listLengthGpuBuffer();
+                        if (needListChunk) {
+                            const uint64_t shift = (uint64_t)lp * (uint64_t)listChunk;
+                            for (int li = 0; li < nlist; ++li) {
+                                uint32_t off = baseListOffset[li];
+                                uint32_t len = baseListLength[li];
+                                if (!usedLists[(size_t)li]) {
+                                    passOffset[(size_t)li] = off;
+                                    passLength[(size_t)li] = 0;
+                                    continue;
+                                }
+                                if (shift >= len) {
+                                    passOffset[(size_t)li] = off + len;
+                                    passLength[(size_t)li] = 0;
+                                    continue;
+                                }
+                                const uint32_t delta = (uint32_t)shift;
+                                const uint32_t rem = len - delta;
+                                passOffset[(size_t)li] = off + delta;
+                                passLength[(size_t)li] =
+                                        std::min<uint32_t>((uint32_t)listChunk, rem);
+                            }
+                            std::memcpy([listOffsetPassBuf contents],
+                                        passOffset.data(),
+                                        passOffset.size() * sizeof(uint32_t));
+                            std::memcpy([listLengthPassBuf contents],
+                                        passLength.data(),
+                                        passLength.size() * sizeof(uint32_t));
+                            passListOffsetBuf = listOffsetPassBuf;
+                            passListLengthBuf = listLengthPassBuf;
+                        }
 
-                    const float* chunkDist = reinterpret_cast<const float*>(
-                            [searchOutDistBuf_ contents]);
-                    const int64_t* chunkIdx = reinterpret_cast<const int64_t*>(
-                            [searchOutIdxBuf_ contents]);
-                    for (idx_t qi = 0; qi < qCount; ++qi) {
-                        float* bestDist = chunkMergedDist.data() + (size_t)qi * (size_t)k;
-                        int64_t* bestIdx = chunkMergedIdx.data() + (size_t)qi * (size_t)k;
-                        for (idx_t j = 0; j < k; ++j) {
-                            const size_t pos = (size_t)qi * (size_t)k + (size_t)j;
-                            insertTopKCandidate(
-                                    chunkDist[pos],
-                                    chunkIdx[pos],
-                                    isL2,
-                                    bestDist,
-                                    bestIdx,
-                                    kI);
+                        bool chunkOk = runMetalIVFFlatScan(
+                                device, queue,
+                                searchQueriesBuf_,
+                                gpuIvf_->codesBuffer(),
+                                gpuIvf_->idsBuffer(),
+                                passListOffsetBuf,
+                                passListLengthBuf,
+                                searchCoarseBuf_,
+                                qCountI, d, kI, chunkProbeI, isL2,
+                                searchOutDistBuf_, searchOutIdxBuf_,
+                                searchPerListDistBuf_, searchPerListIdxBuf_,
+                                chunkInterleavedCodes,
+                                chunkInterleavedOffsets);
+                        ++scanCalls;
+                        ++syncScanCalls;
+                        if (!chunkOk) {
+                            ok = false;
+                            break;
+                        }
+
+                        const float* chunkDist = reinterpret_cast<const float*>(
+                                [searchOutDistBuf_ contents]);
+                        const int64_t* chunkIdx = reinterpret_cast<const int64_t*>(
+                                [searchOutIdxBuf_ contents]);
+                        for (idx_t qi = 0; qi < qCount; ++qi) {
+                            float* bestDist = chunkMergedDist.data() + (size_t)qi * (size_t)k;
+                            int64_t* bestIdx = chunkMergedIdx.data() + (size_t)qi * (size_t)k;
+                            for (idx_t j = 0; j < k; ++j) {
+                                const size_t pos = (size_t)qi * (size_t)k + (size_t)j;
+                                insertTopKCandidate(
+                                        chunkDist[pos],
+                                        chunkIdx[pos],
+                                        isL2,
+                                        bestDist,
+                                        bestIdx,
+                                        kI);
+                            }
                         }
                     }
                 }
@@ -1383,6 +1669,8 @@ void MetalIndexIVFFlat::search_preassigned(
                     searchPerListDistBuf_, searchPerListIdxBuf_,
                     gpuIvf_->interleavedCodesBuffer(),
                     gpuIvf_->interleavedCodesOffsetBuffer());
+            ++scanCalls;
+            ++syncScanCalls;
         }
         if (!ok && !envelopeReason.empty() && !usedChunkedScan) {
             fallbackOrThrow(qBase, qCount, envelopeReason.c_str());
@@ -1446,6 +1734,17 @@ void MetalIndexIVFFlat::search_preassigned(
                 (long long)fallbackCount,
                 firstFallbackReason.c_str());
     }
+    if (logSyncProfile) {
+        const idx_t estimatedWaits = syncScanCalls + asyncBatchSyncs;
+        std::fprintf(
+                stderr,
+                "IVF_SYNC_PROFILE,api=search_preassigned,scan_calls=%lld,sync_scan_calls=%lld,async_scan_calls=%lld,async_batch_syncs=%lld,estimated_waits=%lld\n",
+                (long long)scanCalls,
+                (long long)syncScanCalls,
+                (long long)asyncScanCalls,
+                (long long)asyncBatchSyncs,
+                (long long)estimatedWaits);
+    }
 }
 
 void MetalIndexIVFFlat::reconstruct(idx_t key, float* recons) const {
@@ -1467,8 +1766,8 @@ std::vector<idx_t> MetalIndexIVFFlat::getListIndices(idx_t listId) const {
     FAISS_THROW_IF_NOT(listId >= 0 && listId < cpuIndex_->nlist);
     size_t ls = cpuIndex_->invlists->list_size(listId);
     if (ls == 0) return {};
-    const idx_t* ids = cpuIndex_->invlists->get_ids(listId);
-    return std::vector<idx_t>(ids, ids + ls);
+    ScopedIds ids(cpuIndex_->invlists, (size_t)listId);
+    return ids.ptr ? std::vector<idx_t>(ids.ptr, ids.ptr + ls) : std::vector<idx_t>{};
 }
 
 std::vector<float> MetalIndexIVFFlat::getListVectorData(idx_t listId) const {
@@ -1476,9 +1775,12 @@ std::vector<float> MetalIndexIVFFlat::getListVectorData(idx_t listId) const {
     FAISS_THROW_IF_NOT(listId >= 0 && listId < cpuIndex_->nlist);
     size_t ls = cpuIndex_->invlists->list_size(listId);
     if (ls == 0) return {};
-    const uint8_t* codes = cpuIndex_->invlists->get_codes(listId);
+    ScopedCodes codes(cpuIndex_->invlists, (size_t)listId);
+    if (!codes.ptr) {
+        return {};
+    }
     size_t floatCount = ls * (size_t)d;
-    const float* fptr = reinterpret_cast<const float*>(codes);
+    const float* fptr = reinterpret_cast<const float*>(codes.ptr);
     return std::vector<float>(fptr, fptr + floatCount);
 }
 
@@ -1583,16 +1885,16 @@ void MetalIndexIVFFlat::copyFrom(const faiss::IndexIVFFlat* src) {
             if (ls == 0) {
                 continue;
             }
-            const uint8_t* codes = src->invlists->get_codes(l);
-            const idx_t* ids = src->invlists->get_ids(l);
+            ScopedCodes codes(src->invlists, l);
+            ScopedIds ids(src->invlists, l);
 
-            cpuIndex_->invlists->add_entries(l, ls, ids, codes);
+            cpuIndex_->invlists->add_entries(l, ls, ids.ptr, codes.ptr);
 
             std::memcpy(
                     allCodes.data() + pos * (size_t)d,
-                    codes,
+                    codes.ptr,
                     ls * (size_t)d * sizeof(float));
-            std::memcpy(allIds.data() + pos, ids, ls * sizeof(idx_t));
+            std::memcpy(allIds.data() + pos, ids.ptr, ls * sizeof(idx_t));
             for (size_t i = 0; i < ls; ++i) {
                 allListNos[pos + i] = (idx_t)l;
             }
@@ -1645,9 +1947,9 @@ void MetalIndexIVFFlat::copyTo(faiss::IndexIVFFlat* dst) const {
         if (ls == 0) {
             continue;
         }
-        const uint8_t* codes = cpuIndex_->invlists->get_codes(l);
-        const idx_t* ids = cpuIndex_->invlists->get_ids(l);
-        dst->invlists->add_entries(l, ls, ids, codes);
+        ScopedCodes codes(cpuIndex_->invlists, l);
+        ScopedIds ids(cpuIndex_->invlists, l);
+        dst->invlists->add_entries(l, ls, ids.ptr, codes.ptr);
     }
     dst->ntotal = cpuIndex_->ntotal;
 }

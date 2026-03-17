@@ -905,8 +905,9 @@ TEST_F(AccMetalIndexIVFFlat, ExactSearchPreassignedInterleavedIPMatchesCpu) {
 }
 
 TEST_F(AccMetalIndexIVFFlat, StrictFallbackModeRejectsSearchFallback) {
-    const int dim = 32, nb = 8000, nq = 8, nlist = 64, k = 32;
-    const size_t nprobe = 64; // nprobe * k > 1024 => GPU path rejects
+    // Trigger a known GPU envelope rejection regardless of scan chunking policy.
+    const int dim = 513, nb = 8000, nq = 8, nlist = 64, k = 32;
+    const size_t nprobe = 8;
 
     std::vector<float> vecs((size_t)nb * dim);
     faiss::float_rand(vecs.data(), vecs.size(), 8151);
@@ -931,8 +932,9 @@ TEST_F(AccMetalIndexIVFFlat, StrictFallbackModeRejectsSearchFallback) {
 }
 
 TEST_F(AccMetalIndexIVFFlat, StrictFallbackModeRejectsPreassignedFallback) {
-    const int dim = 32, nb = 8000, nq = 4, nlist = 64, k = 32;
-    const int nprobe = 64; // nprobe * k > 1024 => GPU path rejects
+    // Trigger a known GPU envelope rejection regardless of scan chunking policy.
+    const int dim = 513, nb = 8000, nq = 4, nlist = 64, k = 32;
+    const int nprobe = 8;
 
     std::vector<float> vecs((size_t)nb * dim);
     faiss::float_rand(vecs.data(), vecs.size(), 8161);

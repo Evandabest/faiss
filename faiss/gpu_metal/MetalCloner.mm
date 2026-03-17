@@ -19,11 +19,50 @@
 #include <faiss/IndexIVFPQ.h>
 #include <faiss/IndexScalarQuantizer.h>
 #include <faiss/impl/FaissAssert.h>
+#include <faiss/invlists/InvertedLists.h>
 #include <cstring>
 #include <memory>
 #include <vector>
 
 namespace {
+
+struct ScopedIds {
+    const faiss::InvertedLists* inv = nullptr;
+    size_t listNo = 0;
+    const faiss::idx_t* ptr = nullptr;
+
+    ScopedIds() = default;
+    ScopedIds(const faiss::InvertedLists* inv_, size_t listNo_)
+            : inv(inv_), listNo(listNo_) {
+        if (inv) {
+            ptr = inv->get_ids(listNo);
+        }
+    }
+    ~ScopedIds() {
+        if (inv && ptr) {
+            inv->release_ids(listNo, ptr);
+        }
+    }
+};
+
+struct ScopedCodes {
+    const faiss::InvertedLists* inv = nullptr;
+    size_t listNo = 0;
+    const uint8_t* ptr = nullptr;
+
+    ScopedCodes() = default;
+    ScopedCodes(const faiss::InvertedLists* inv_, size_t listNo_)
+            : inv(inv_), listNo(listNo_) {
+        if (inv) {
+            ptr = inv->get_codes(listNo);
+        }
+    }
+    ~ScopedCodes() {
+        if (inv && ptr) {
+            inv->release_codes(listNo, ptr);
+        }
+    }
+};
 
 std::unique_ptr<faiss::IndexIVFScalarQuantizer> convertIVFFlatToIVFSQ(
         const faiss::IndexIVFFlat* src,
@@ -73,13 +112,13 @@ std::unique_ptr<faiss::IndexIVFScalarQuantizer> convertIVFFlatToIVFSQ(
             if (ls == 0) {
                 continue;
             }
-            const uint8_t* codes = src->invlists->get_codes(l);
-            const faiss::idx_t* ids = src->invlists->get_ids(l);
+            ScopedCodes codes(src->invlists, l);
+            ScopedIds ids(src->invlists, l);
             std::memcpy(
                     allVecs.data() + pos * (size_t)src->d,
-                    codes,
+                    codes.ptr,
                     ls * (size_t)src->d * sizeof(float));
-            std::memcpy(allIds.data() + pos, ids, ls * sizeof(faiss::idx_t));
+            std::memcpy(allIds.data() + pos, ids.ptr, ls * sizeof(faiss::idx_t));
             pos += ls;
         }
     }

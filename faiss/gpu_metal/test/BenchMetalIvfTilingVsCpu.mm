@@ -97,6 +97,18 @@ bool useFullCoarseGpuForIvfBench() {
     return true;
 }
 
+bool logSyncProfileForIvfBench() {
+    const char* env = std::getenv("FAISS_METAL_IVF_LOG_SYNC_PROFILE");
+    if (!env || env[0] == '\0') {
+        return false;
+    }
+    if (env[0] == '0' || env[0] == 'n' || env[0] == 'N' || env[0] == 'f' ||
+        env[0] == 'F') {
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -153,6 +165,9 @@ int main(int argc, char** argv) {
             "Coarse policy: full_matrix=%s max_bytes=%zu\n\n",
             fullCoarseEnabled ? "on" : "off",
             fullCoarseMaxBytes);
+    printf(
+            "Sync profile logging: %s (FAISS_METAL_IVF_LOG_SYNC_PROFILE)\n\n",
+            logSyncProfileForIvfBench() ? "on" : "off");
 
     auto metalRes = std::make_shared<faiss::gpu_metal::StandardMetalResources>();
     if (!metalRes->getResources() || !metalRes->getResources()->isAvailable()) {
