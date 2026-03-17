@@ -27,6 +27,7 @@ constexpr size_t kMinIvfQueryTileBudgetBytes = 16ULL * 1024 * 1024;
 constexpr size_t kMaxIvfQueryTileBudgetBytes = 4ULL * 1024 * 1024 * 1024;
 constexpr faiss::idx_t kIVFFlatSupportedMaxK = 1024;
 constexpr faiss::idx_t kAutoReserveMinBatch = 0;
+constexpr size_t kIvfExactCandidates = 1024;
 
 size_t getIvfQueryTileBudgetBytes() {
     const char* envBytes = std::getenv("FAISS_METAL_IVF_QUERY_TILE_BYTES");
@@ -161,6 +162,134 @@ inline int checkedSizeToInt(size_t v, const char* what) {
         FAISS_THROW_FMT("%s", what);
     }
     return (int)v;
+}
+
+bool assignedListsWithinLimit(
+        const faiss::IndexIVFFlat* cpuIndex,
+        const faiss::idx_t* assign,
+        size_t count,
+        size_t maxListSize,
+        faiss::idx_t& badListId,
+        size_t& badListSize) {
+    if (!cpuIndex || !cpuIndex->invlists || !assign) {
+        return false;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        const faiss::idx_t listId = assign[i];
+        if (listId < 0 || listId >= cpuIndex->nlist) {
+            badListId = listId;
+            badListSize = 0;
+            return false;
+        }
+        const size_t sz = cpuIndex->invlists->list_size((size_t)listId);
+        if (sz > maxListSize) {
+            badListId = listId;
+            badListSize = sz;
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string explainIvfScanFailureEnvelope(
+        int d,
+        faiss::idx_t k,
+        size_t nprobe,
+        bool useInterleaved,
+        const faiss::IndexIVFFlat* cpuIndex,
+        const faiss::idx_t* assign,
+        size_t assignCount) {
+    if (!(d > 0 && d <= 512)) {
+        return "scan envelope: d must be in [1,512]";
+    }
+    if (useInterleaved && (d % 4 != 0)) {
+        return "scan envelope: interleaved layout requires d % 4 == 0";
+    }
+    if (nprobe > 0 && (size_t)k > (kIvfExactCandidates / nprobe)) {
+        return "scan envelope: nprobe*k exceeds 1024 exact-candidate bound";
+    }
+    faiss::idx_t badListId = -1;
+    size_t badListSize = 0;
+    if (!assignedListsWithinLimit(
+                cpuIndex,
+                assign,
+                assignCount,
+                kIvfExactCandidates,
+                badListId,
+                badListSize)) {
+        if (badListSize > 0) {
+            return std::string("scan envelope: selected list size exceeds 1024 (list=") +
+                    std::to_string((long long)badListId) +
+                    ", size=" + std::to_string(badListSize) + ")";
+        }
+        return "scan envelope: invalid coarse assignment list id";
+    }
+    return {};
+}
+
+bool selectedListStats(
+        const faiss::IndexIVFFlat* cpuIndex,
+        const faiss::idx_t* assign,
+        size_t count,
+        std::vector<uint8_t>& usedLists,
+        size_t& maxSelectedListSize,
+        faiss::idx_t& badListId) {
+    if (!cpuIndex || !cpuIndex->invlists || !assign || cpuIndex->nlist < 0) {
+        return false;
+    }
+    usedLists.assign((size_t)cpuIndex->nlist, 0);
+    maxSelectedListSize = 0;
+    badListId = -1;
+    for (size_t i = 0; i < count; ++i) {
+        faiss::idx_t li = assign[i];
+        if (li < 0 || li >= cpuIndex->nlist) {
+            badListId = li;
+            return false;
+        }
+        if (!usedLists[(size_t)li]) {
+            usedLists[(size_t)li] = 1;
+            const size_t sz = cpuIndex->invlists->list_size((size_t)li);
+            maxSelectedListSize = std::max(maxSelectedListSize, sz);
+        }
+    }
+    return true;
+}
+
+inline void insertTopKCandidate(
+        float candDist,
+        int64_t candIdx,
+        bool isL2,
+        float* bestDist,
+        int64_t* bestIdx,
+        int k) {
+    if (candIdx < 0 || k <= 0) {
+        return;
+    }
+    int pos = -1;
+    if (isL2) {
+        for (int j = 0; j < k; ++j) {
+            if (candDist < bestDist[j]) {
+                pos = j;
+                break;
+            }
+        }
+    } else {
+        for (int j = 0; j < k; ++j) {
+            if (candDist > bestDist[j]) {
+                pos = j;
+                break;
+            }
+        }
+    }
+    if (pos < 0) {
+        return;
+    }
+    for (int j = k - 1; j > pos; --j) {
+        bestDist[j] = bestDist[j - 1];
+        bestIdx[j] = bestIdx[j - 1];
+    }
+    bestDist[pos] = candDist;
+    bestIdx[pos] = candIdx;
 }
 } // namespace
 
@@ -603,23 +732,234 @@ void MetalIndexIVFFlat::search(
                         "MetalIndexIVFFlat: coarse assignment exceeds int32 range");
                 dst[i] = (int32_t)coarseAssignVec[i];
             }
-            ok = runMetalIVFFlatScan(
-                    device, queue,
-                    searchQueriesBuf_,
-                    gpuIvf_->codesBuffer(),
-                    gpuIvf_->idsBuffer(),
-                    gpuIvf_->listOffsetGpuBuffer(),
-                    gpuIvf_->listLengthGpuBuffer(),
-                    searchCoarseBuf_,
-                    qCountI, d, kI, nprobeI, isL2,
-                    searchOutDistBuf_, searchOutIdxBuf_,
-                    searchPerListDistBuf_, searchPerListIdxBuf_,
-                    gpuIvf_->interleavedCodesBuffer(),
-                    gpuIvf_->interleavedCodesOffsetBuffer());
+            const bool useInterleaved =
+                    gpuIvf_->interleavedCodesBuffer() != nil &&
+                    gpuIvf_->interleavedCodesOffsetBuffer() != nil;
+            const std::string envelopeReason = explainIvfScanFailureEnvelope(
+                    d,
+                    k,
+                    nprobe,
+                    useInterleaved,
+                    cpuIndex_.get(),
+                    coarseAssignVec.data(),
+                    (size_t)qCount * nprobe);
+            bool usedChunkedScan = false;
+            std::vector<float> chunkMergedDist;
+            std::vector<int64_t> chunkMergedIdx;
+
+            std::vector<uint8_t> usedLists;
+            size_t maxSelectedListSize = 0;
+            idx_t badListId = -1;
+            bool haveListStats = selectedListStats(
+                    cpuIndex_.get(),
+                    coarseAssignVec.data(),
+                    (size_t)qCount * nprobe,
+                    usedLists,
+                    maxSelectedListSize,
+                    badListId);
+            const bool needProbeChunk =
+                    nprobe > 0 && (size_t)k > (kIvfExactCandidates / nprobe);
+            const bool needListChunk =
+                    haveListStats && maxSelectedListSize > kIvfExactCandidates;
+
+            if (needProbeChunk || needListChunk) {
+                usedChunkedScan = true;
+                chunkMergedDist.resize((size_t)qCount * (size_t)k, isL2 ? inf : negInf);
+                chunkMergedIdx.resize((size_t)qCount * (size_t)k, -1);
+                ok = true;
+
+                const size_t maxProbePerChunk = needProbeChunk
+                        ? std::max<size_t>(1, kIvfExactCandidates / (size_t)k)
+                        : nprobe;
+                const size_t listChunk = kIvfExactCandidates;
+                const size_t numListPass = needListChunk
+                        ? ((maxSelectedListSize + listChunk - 1) / listChunk)
+                        : 1;
+                // List-chunk remapping only updates list offset/length metadata.
+                // Interleaved offset metadata is list-base-relative, so force flat
+                // code path for list-chunked passes to keep ids/codes aligned.
+                id<MTLBuffer> chunkInterleavedCodes = needListChunk
+                        ? nil
+                        : gpuIvf_->interleavedCodesBuffer();
+                id<MTLBuffer> chunkInterleavedOffsets = needListChunk
+                        ? nil
+                        : gpuIvf_->interleavedCodesOffsetBuffer();
+
+                const uint32_t* baseListOffset = reinterpret_cast<const uint32_t*>(
+                        [gpuIvf_->listOffsetGpuBuffer() contents]);
+                const uint32_t* baseListLength = reinterpret_cast<const uint32_t*>(
+                        [gpuIvf_->listLengthGpuBuffer() contents]);
+                id<MTLBuffer> listOffsetPassBuf = nil;
+                id<MTLBuffer> listLengthPassBuf = nil;
+                std::vector<uint32_t> passOffset;
+                std::vector<uint32_t> passLength;
+                if (needListChunk) {
+                    size_t metaBytes = (size_t)nlist * sizeof(uint32_t);
+                    listOffsetPassBuf = [device newBufferWithLength:metaBytes
+                                                             options:MTLResourceStorageModeShared];
+                    listLengthPassBuf = [device newBufferWithLength:metaBytes
+                                                             options:MTLResourceStorageModeShared];
+                    if (!listOffsetPassBuf || !listLengthPassBuf) {
+                        ok = false;
+                    } else {
+                        passOffset.resize((size_t)nlist);
+                        passLength.resize((size_t)nlist);
+                    }
+                }
+
+                std::vector<int32_t> coarseChunk;
+                for (size_t p0 = 0; ok && p0 < nprobe; p0 += maxProbePerChunk) {
+                    size_t chunkProbe = std::min(maxProbePerChunk, nprobe - p0);
+                    coarseChunk.resize((size_t)qCount * chunkProbe);
+                    for (idx_t qi = 0; qi < qCount; ++qi) {
+                        const size_t srcBase = (size_t)qi * nprobe + p0;
+                        const size_t dstBase = (size_t)qi * chunkProbe;
+                        std::memcpy(
+                                coarseChunk.data() + dstBase,
+                                dst + srcBase,
+                                chunkProbe * sizeof(int32_t));
+                    }
+
+                    size_t coarseChunkBytes = coarseChunk.size() * sizeof(int32_t);
+                    ensureSearchBuf_(searchCoarseBuf_, searchCoarseCap_, coarseChunkBytes);
+                    if (!searchCoarseBuf_) {
+                        ok = false;
+                        break;
+                    }
+                    std::memcpy([searchCoarseBuf_ contents], coarseChunk.data(), coarseChunkBytes);
+
+                    size_t perListBytesChunk =
+                            (size_t)qCount * chunkProbe * (size_t)k * sizeof(float);
+                    size_t perListIdxBytesChunk =
+                            (size_t)qCount * chunkProbe * (size_t)k * sizeof(int64_t);
+                    ensureSearchBuf_(searchPerListDistBuf_, searchPerListDistCap_, perListBytesChunk);
+                    ensureSearchBuf_(searchPerListIdxBuf_, searchPerListIdxCap_, perListIdxBytesChunk);
+                    if (!searchPerListDistBuf_ || !searchPerListIdxBuf_) {
+                        ok = false;
+                        break;
+                    }
+
+                    const int chunkProbeI = checkedSizeToInt(
+                            chunkProbe,
+                            "MetalIndexIVFFlat: chunk nprobe exceeds int range");
+                    for (size_t lp = 0; ok && lp < numListPass; ++lp) {
+                        id<MTLBuffer> passListOffsetBuf = gpuIvf_->listOffsetGpuBuffer();
+                        id<MTLBuffer> passListLengthBuf = gpuIvf_->listLengthGpuBuffer();
+                        if (needListChunk) {
+                            const uint64_t shift = (uint64_t)lp * (uint64_t)listChunk;
+                            for (int li = 0; li < nlist; ++li) {
+                                uint32_t off = baseListOffset[li];
+                                uint32_t len = baseListLength[li];
+                                if (!usedLists[(size_t)li]) {
+                                    passOffset[(size_t)li] = off;
+                                    passLength[(size_t)li] = 0;
+                                    continue;
+                                }
+                                if (shift >= len) {
+                                    passOffset[(size_t)li] = off + len;
+                                    passLength[(size_t)li] = 0;
+                                    continue;
+                                }
+                                const uint32_t delta = (uint32_t)shift;
+                                const uint32_t rem = len - delta;
+                                passOffset[(size_t)li] = off + delta;
+                                passLength[(size_t)li] =
+                                        std::min<uint32_t>((uint32_t)listChunk, rem);
+                            }
+                            std::memcpy([listOffsetPassBuf contents],
+                                        passOffset.data(),
+                                        passOffset.size() * sizeof(uint32_t));
+                            std::memcpy([listLengthPassBuf contents],
+                                        passLength.data(),
+                                        passLength.size() * sizeof(uint32_t));
+                            passListOffsetBuf = listOffsetPassBuf;
+                            passListLengthBuf = listLengthPassBuf;
+                        }
+
+                        bool chunkOk = runMetalIVFFlatScan(
+                                device, queue,
+                                searchQueriesBuf_,
+                                gpuIvf_->codesBuffer(),
+                                gpuIvf_->idsBuffer(),
+                                passListOffsetBuf,
+                                passListLengthBuf,
+                                searchCoarseBuf_,
+                                qCountI, d, kI, chunkProbeI, isL2,
+                                searchOutDistBuf_, searchOutIdxBuf_,
+                                searchPerListDistBuf_, searchPerListIdxBuf_,
+                                chunkInterleavedCodes,
+                                chunkInterleavedOffsets);
+                        if (!chunkOk) {
+                            ok = false;
+                            break;
+                        }
+
+                        const float* chunkDist = reinterpret_cast<const float*>(
+                                [searchOutDistBuf_ contents]);
+                        const int64_t* chunkIdx = reinterpret_cast<const int64_t*>(
+                                [searchOutIdxBuf_ contents]);
+                        for (idx_t qi = 0; qi < qCount; ++qi) {
+                            float* bestDist =
+                                    chunkMergedDist.data() + (size_t)qi * (size_t)k;
+                            int64_t* bestIdx =
+                                    chunkMergedIdx.data() + (size_t)qi * (size_t)k;
+                            for (idx_t j = 0; j < k; ++j) {
+                                const size_t pos =
+                                        (size_t)qi * (size_t)k + (size_t)j;
+                                insertTopKCandidate(
+                                        chunkDist[pos],
+                                        chunkIdx[pos],
+                                        isL2,
+                                        bestDist,
+                                        bestIdx,
+                                        kI);
+                            }
+                        }
+                    }
+                }
+            } else {
+                ok = runMetalIVFFlatScan(
+                        device, queue,
+                        searchQueriesBuf_,
+                        gpuIvf_->codesBuffer(),
+                        gpuIvf_->idsBuffer(),
+                        gpuIvf_->listOffsetGpuBuffer(),
+                        gpuIvf_->listLengthGpuBuffer(),
+                        searchCoarseBuf_,
+                        qCountI, d, kI, nprobeI, isL2,
+                        searchOutDistBuf_, searchOutIdxBuf_,
+                        searchPerListDistBuf_, searchPerListIdxBuf_,
+                        gpuIvf_->interleavedCodesBuffer(),
+                        gpuIvf_->interleavedCodesOffsetBuffer());
+            }
+            if (!ok && !envelopeReason.empty() && !usedChunkedScan) {
+                fallbackOrThrow(qBase, qCount, envelopeReason.c_str());
+                continue;
+            }
+            if (ok && usedChunkedScan) {
+                for (idx_t qi = 0; qi < qCount; ++qi) {
+                    for (idx_t j = 0; j < k; ++j) {
+                        const size_t pos = (size_t)qi * (size_t)k + (size_t)j;
+                        const size_t globalPos = (size_t)(qBase + qi) * (size_t)k + (size_t)j;
+                        const int64_t globalId = chunkMergedIdx[pos];
+                        if (globalId < 0) {
+                            labels[globalPos] = -1;
+                        } else if (indicesOptions_ == faiss::gpu::INDICES_CPU) {
+                            labels[globalPos] = decodeCpuLabelFromPair(cpuIndex_.get(), globalId);
+                        } else if (indicesOptions_ == faiss::gpu::INDICES_32_BIT) {
+                            labels[globalPos] = (idx_t)(int32_t)globalId;
+                        } else {
+                            labels[globalPos] = (idx_t)globalId;
+                        }
+                        distances[globalPos] = chunkMergedDist[pos];
+                    }
+                }
+                continue;
+            }
         }
 
         if (!ok) {
-            fallbackOrThrow(qBase, qCount, "GPU IVF scan failed");
+            fallbackOrThrow(qBase, qCount, "GPU IVF scan failed (runtime/kernel)");
             continue;
         }
 
@@ -761,6 +1101,7 @@ void MetalIndexIVFFlat::search_preassigned(
         return;
     }
 
+    const int nlist = (int)cpuIndex_->nlist;
     const size_t tileRows = chooseIvfPreassignedTileRows((size_t)n, d, k, nprobe);
     for (idx_t qBase = 0; qBase < n; qBase += (idx_t)tileRows) {
         idx_t qCount = std::min<idx_t>((idx_t)tileRows, n - qBase);
@@ -807,22 +1148,232 @@ void MetalIndexIVFFlat::search_preassigned(
             coarseDst[i] = (int32_t)assignTile[i];
         }
 
-        bool ok = runMetalIVFFlatScan(
-                device, queue,
-                searchQueriesBuf_,
-                gpuIvf_->codesBuffer(),
-                gpuIvf_->idsBuffer(),
-                gpuIvf_->listOffsetGpuBuffer(),
-                gpuIvf_->listLengthGpuBuffer(),
-                searchCoarseBuf_,
-                qCountI, d, kI, nprobeI, isL2,
-                searchOutDistBuf_, searchOutIdxBuf_,
-                searchPerListDistBuf_, searchPerListIdxBuf_,
-                gpuIvf_->interleavedCodesBuffer(),
-                gpuIvf_->interleavedCodesOffsetBuffer());
+        const bool useInterleaved =
+                gpuIvf_->interleavedCodesBuffer() != nil &&
+                gpuIvf_->interleavedCodesOffsetBuffer() != nil;
+        const std::string envelopeReason = explainIvfScanFailureEnvelope(
+                d,
+                k,
+                nprobe,
+                useInterleaved,
+                cpuIndex_.get(),
+                assignTile,
+                (size_t)qCount * nprobe);
+        bool ok = false;
+        bool usedChunkedScan = false;
+        std::vector<float> chunkMergedDist;
+        std::vector<int64_t> chunkMergedIdx;
+        std::vector<uint8_t> usedLists;
+        size_t maxSelectedListSize = 0;
+        idx_t badListId = -1;
+        bool haveListStats = selectedListStats(
+                cpuIndex_.get(),
+                assignTile,
+                (size_t)qCount * nprobe,
+                usedLists,
+                maxSelectedListSize,
+                badListId);
+        const bool needProbeChunk =
+                nprobe > 0 && (size_t)k > (kIvfExactCandidates / nprobe);
+        const bool needListChunk =
+                haveListStats && maxSelectedListSize > kIvfExactCandidates;
+
+        if (needProbeChunk || needListChunk) {
+            const size_t maxProbePerChunk = needProbeChunk
+                    ? std::max<size_t>(1, kIvfExactCandidates / (size_t)k)
+                    : nprobe;
+            usedChunkedScan = true;
+            chunkMergedDist.resize((size_t)qCount * (size_t)k, isL2 ? inf : negInf);
+            chunkMergedIdx.resize((size_t)qCount * (size_t)k, -1);
+            ok = true;
+
+            const size_t listChunk = kIvfExactCandidates;
+            const size_t numListPass = needListChunk
+                    ? ((maxSelectedListSize + listChunk - 1) / listChunk)
+                    : 1;
+            // List-chunk remapping only updates list offset/length metadata.
+            // Interleaved offset metadata is list-base-relative, so force flat
+            // code path for list-chunked passes to keep ids/codes aligned.
+            id<MTLBuffer> chunkInterleavedCodes = needListChunk
+                    ? nil
+                    : gpuIvf_->interleavedCodesBuffer();
+            id<MTLBuffer> chunkInterleavedOffsets = needListChunk
+                    ? nil
+                    : gpuIvf_->interleavedCodesOffsetBuffer();
+            const uint32_t* baseListOffset = reinterpret_cast<const uint32_t*>(
+                    [gpuIvf_->listOffsetGpuBuffer() contents]);
+            const uint32_t* baseListLength = reinterpret_cast<const uint32_t*>(
+                    [gpuIvf_->listLengthGpuBuffer() contents]);
+            id<MTLBuffer> listOffsetPassBuf = nil;
+            id<MTLBuffer> listLengthPassBuf = nil;
+            std::vector<uint32_t> passOffset;
+            std::vector<uint32_t> passLength;
+            if (needListChunk) {
+                size_t metaBytes = (size_t)nlist * sizeof(uint32_t);
+                listOffsetPassBuf = [device newBufferWithLength:metaBytes
+                                                         options:MTLResourceStorageModeShared];
+                listLengthPassBuf = [device newBufferWithLength:metaBytes
+                                                         options:MTLResourceStorageModeShared];
+                if (!listOffsetPassBuf || !listLengthPassBuf) {
+                    ok = false;
+                } else {
+                    passOffset.resize((size_t)nlist);
+                    passLength.resize((size_t)nlist);
+                }
+            }
+
+            std::vector<int32_t> coarseChunk;
+            const int32_t* fullCoarse = reinterpret_cast<const int32_t*>([searchCoarseBuf_ contents]);
+
+            for (size_t p0 = 0; ok && p0 < nprobe; p0 += maxProbePerChunk) {
+                size_t chunkProbe = std::min(maxProbePerChunk, nprobe - p0);
+                coarseChunk.resize((size_t)qCount * chunkProbe);
+                for (idx_t qi = 0; qi < qCount; ++qi) {
+                    const size_t srcBase = (size_t)qi * nprobe + p0;
+                    const size_t dstBase = (size_t)qi * chunkProbe;
+                    std::memcpy(
+                            coarseChunk.data() + dstBase,
+                            fullCoarse + srcBase,
+                            chunkProbe * sizeof(int32_t));
+                }
+
+                size_t coarseChunkBytes = coarseChunk.size() * sizeof(int32_t);
+                ensureSearchBuf_(searchCoarseBuf_, searchCoarseCap_, coarseChunkBytes);
+                if (!searchCoarseBuf_) {
+                    ok = false;
+                    break;
+                }
+                std::memcpy([searchCoarseBuf_ contents], coarseChunk.data(), coarseChunkBytes);
+
+                size_t perListBytesChunk =
+                        (size_t)qCount * chunkProbe * (size_t)k * sizeof(float);
+                size_t perListIdxBytesChunk =
+                        (size_t)qCount * chunkProbe * (size_t)k * sizeof(int64_t);
+                ensureSearchBuf_(searchPerListDistBuf_, searchPerListDistCap_, perListBytesChunk);
+                ensureSearchBuf_(searchPerListIdxBuf_, searchPerListIdxCap_, perListIdxBytesChunk);
+                if (!searchPerListDistBuf_ || !searchPerListIdxBuf_) {
+                    ok = false;
+                    break;
+                }
+
+                const int chunkProbeI = checkedSizeToInt(
+                        chunkProbe,
+                        "MetalIndexIVFFlat::search_preassigned: chunk nprobe exceeds int range");
+                for (size_t lp = 0; ok && lp < numListPass; ++lp) {
+                    id<MTLBuffer> passListOffsetBuf = gpuIvf_->listOffsetGpuBuffer();
+                    id<MTLBuffer> passListLengthBuf = gpuIvf_->listLengthGpuBuffer();
+                    if (needListChunk) {
+                        const uint64_t shift = (uint64_t)lp * (uint64_t)listChunk;
+                        for (int li = 0; li < nlist; ++li) {
+                            uint32_t off = baseListOffset[li];
+                            uint32_t len = baseListLength[li];
+                            if (!usedLists[(size_t)li]) {
+                                passOffset[(size_t)li] = off;
+                                passLength[(size_t)li] = 0;
+                                continue;
+                            }
+                            if (shift >= len) {
+                                passOffset[(size_t)li] = off + len;
+                                passLength[(size_t)li] = 0;
+                                continue;
+                            }
+                            const uint32_t delta = (uint32_t)shift;
+                            const uint32_t rem = len - delta;
+                            passOffset[(size_t)li] = off + delta;
+                            passLength[(size_t)li] =
+                                    std::min<uint32_t>((uint32_t)listChunk, rem);
+                        }
+                        std::memcpy([listOffsetPassBuf contents],
+                                    passOffset.data(),
+                                    passOffset.size() * sizeof(uint32_t));
+                        std::memcpy([listLengthPassBuf contents],
+                                    passLength.data(),
+                                    passLength.size() * sizeof(uint32_t));
+                        passListOffsetBuf = listOffsetPassBuf;
+                        passListLengthBuf = listLengthPassBuf;
+                    }
+
+                    bool chunkOk = runMetalIVFFlatScan(
+                            device, queue,
+                            searchQueriesBuf_,
+                            gpuIvf_->codesBuffer(),
+                            gpuIvf_->idsBuffer(),
+                            passListOffsetBuf,
+                            passListLengthBuf,
+                            searchCoarseBuf_,
+                            qCountI, d, kI, chunkProbeI, isL2,
+                            searchOutDistBuf_, searchOutIdxBuf_,
+                            searchPerListDistBuf_, searchPerListIdxBuf_,
+                            chunkInterleavedCodes,
+                            chunkInterleavedOffsets);
+                    if (!chunkOk) {
+                        ok = false;
+                        break;
+                    }
+
+                    const float* chunkDist = reinterpret_cast<const float*>(
+                            [searchOutDistBuf_ contents]);
+                    const int64_t* chunkIdx = reinterpret_cast<const int64_t*>(
+                            [searchOutIdxBuf_ contents]);
+                    for (idx_t qi = 0; qi < qCount; ++qi) {
+                        float* bestDist = chunkMergedDist.data() + (size_t)qi * (size_t)k;
+                        int64_t* bestIdx = chunkMergedIdx.data() + (size_t)qi * (size_t)k;
+                        for (idx_t j = 0; j < k; ++j) {
+                            const size_t pos = (size_t)qi * (size_t)k + (size_t)j;
+                            insertTopKCandidate(
+                                    chunkDist[pos],
+                                    chunkIdx[pos],
+                                    isL2,
+                                    bestDist,
+                                    bestIdx,
+                                    kI);
+                        }
+                    }
+                }
+            }
+        } else {
+            ok = runMetalIVFFlatScan(
+                    device, queue,
+                    searchQueriesBuf_,
+                    gpuIvf_->codesBuffer(),
+                    gpuIvf_->idsBuffer(),
+                    gpuIvf_->listOffsetGpuBuffer(),
+                    gpuIvf_->listLengthGpuBuffer(),
+                    searchCoarseBuf_,
+                    qCountI, d, kI, nprobeI, isL2,
+                    searchOutDistBuf_, searchOutIdxBuf_,
+                    searchPerListDistBuf_, searchPerListIdxBuf_,
+                    gpuIvf_->interleavedCodesBuffer(),
+                    gpuIvf_->interleavedCodesOffsetBuffer());
+        }
+        if (!ok && !envelopeReason.empty() && !usedChunkedScan) {
+            fallbackOrThrow(qBase, qCount, envelopeReason.c_str());
+            continue;
+        }
 
         if (!ok) {
-            fallbackOrThrow(qBase, qCount, "GPU IVF scan failed");
+            fallbackOrThrow(qBase, qCount, "GPU IVF scan failed (runtime/kernel)");
+            continue;
+        }
+
+        if (usedChunkedScan) {
+            for (idx_t qi = 0; qi < qCount; ++qi) {
+                for (idx_t j = 0; j < k; ++j) {
+                    const size_t pos = (size_t)qi * (size_t)k + (size_t)j;
+                    const size_t globalPos = (size_t)(qBase + qi) * (size_t)k + (size_t)j;
+                    const int64_t globalId = chunkMergedIdx[pos];
+                    if (globalId < 0) {
+                        labels[globalPos] = -1;
+                    } else if (indicesOptions_ == faiss::gpu::INDICES_CPU) {
+                        labels[globalPos] = decodeCpuLabelFromPair(cpuIndex_.get(), globalId);
+                    } else if (indicesOptions_ == faiss::gpu::INDICES_32_BIT) {
+                        labels[globalPos] = (idx_t)(int32_t)globalId;
+                    } else {
+                        labels[globalPos] = (idx_t)globalId;
+                    }
+                    distances[globalPos] = chunkMergedDist[pos];
+                }
+            }
             continue;
         }
 

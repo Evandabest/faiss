@@ -1596,7 +1596,7 @@ TEST_F(AccMetalIndexIVFFlat, KAtUpperBound1024MatchesCpu) {
 
 TEST_F(AccMetalIndexIVFFlat, HighNprobeTimesKMatchesCpu) {
     const int dim = 32, nlist = 64, nb = 8000, nq = 24, k = 32;
-    const size_t nprobe = 64; // nprobe * k = 2048 > 1024 exactness envelope
+    const size_t nprobe = 64; // nprobe * k = 2048, covered by chunked-probe GPU scan
 
     std::vector<float> vecs((size_t)nb * dim), queries((size_t)nq * dim);
     faiss::float_rand(vecs.data(), vecs.size(), 441);
@@ -1615,7 +1615,16 @@ TEST_F(AccMetalIndexIVFFlat, HighNprobeTimesKMatchesCpu) {
     std::vector<float> refD((size_t)nq * k), testD((size_t)nq * k);
     std::vector<faiss::idx_t> refL((size_t)nq * k), testL((size_t)nq * k);
     cpuIdx->search(nq, queries.data(), k, refD.data(), refL.data());
-    metalRaw->search(nq, queries.data(), k, testD.data(), testL.data());
+    const char* oldFallbackEnv = std::getenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK");
+    std::string oldFallback = oldFallbackEnv ? oldFallbackEnv : "";
+    const bool hadOldFallback = oldFallbackEnv != nullptr;
+    setenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK", "0", 1);
+    EXPECT_NO_THROW(metalRaw->search(nq, queries.data(), k, testD.data(), testL.data()));
+    if (hadOldFallback) {
+        setenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK", oldFallback.c_str(), 1);
+    } else {
+        unsetenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK");
+    }
 
     expectRecall(nq, k, 1.0f, refL.data(), testL.data());
 
@@ -1643,7 +1652,16 @@ TEST_F(AccMetalIndexIVFFlat, SkewedSingleListMatchesCpu) {
     std::vector<float> refD((size_t)nq * k), testD((size_t)nq * k);
     std::vector<faiss::idx_t> refL((size_t)nq * k), testL((size_t)nq * k);
     cpuIdx->search(nq, queries.data(), k, refD.data(), refL.data());
-    metalRaw->search(nq, queries.data(), k, testD.data(), testL.data());
+    const char* oldFallbackEnv = std::getenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK");
+    std::string oldFallback = oldFallbackEnv ? oldFallbackEnv : "";
+    const bool hadOldFallback = oldFallbackEnv != nullptr;
+    setenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK", "0", 1);
+    EXPECT_NO_THROW(metalRaw->search(nq, queries.data(), k, testD.data(), testL.data()));
+    if (hadOldFallback) {
+        setenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK", oldFallback.c_str(), 1);
+    } else {
+        unsetenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK");
+    }
 
     expectRecall(nq, k, 1.0f, refL.data(), testL.data());
 
