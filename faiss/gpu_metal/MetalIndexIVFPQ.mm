@@ -423,7 +423,8 @@ void MetalIndexIVFPQ::search(
                     queue,
                     lookupTableBuf_,
                     lookupTableHalfBuf_,
-                    tableSize);
+                    tableSize,
+                    false);
             if (!ok) {
                 cpuIndex_->search(n, x, k, distances, labels);
                 return;

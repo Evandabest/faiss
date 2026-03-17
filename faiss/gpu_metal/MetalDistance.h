@@ -226,7 +226,8 @@ bool runMetalIVFSQScan(
         id<MTLBuffer> outDistances,
         id<MTLBuffer> outIndices,
         id<MTLBuffer> perListDistBuf,
-        id<MTLBuffer> perListIdxBuf);
+        id<MTLBuffer> perListIdxBuf,
+        bool waitForCompletion = true);
 
 /// IVF PQ scan: scans 8-bit PQ-encoded inverted lists on the GPU.
 ///
@@ -254,7 +255,8 @@ bool runMetalIVFPQScan(
         id<MTLBuffer> outDistances,
         id<MTLBuffer> outIndices,
         id<MTLBuffer> perListDistBuf,
-        id<MTLBuffer> perListIdxBuf);
+        id<MTLBuffer> perListIdxBuf,
+        bool waitForCompletion = true);
 
 /// Build IVFPQ lookup tables on GPU:
 /// outLookup layout is (nq * nprobe * M * 256) float.
@@ -305,7 +307,8 @@ bool runMetalConvertF32ToF16(
         id<MTLCommandQueue> queue,
         id<MTLBuffer> srcF32,
         id<MTLBuffer> dstF16,
-        size_t numElems);
+        size_t numElems,
+        bool waitForCompletion = true);
 
 /// Binary (Hamming) brute-force top-k search.
 ///
@@ -324,7 +327,8 @@ bool runMetalHammingDistance(
         int code_size,
         int k,
         id<MTLBuffer> outDist,
-        id<MTLBuffer> outIdx);
+        id<MTLBuffer> outIdx,
+        bool waitForCompletion = true);
 
 /// Compute ||v||² norms for each vector.  Result is written to normsBuf
 /// (nb float).  Useful for caching centroid norms across searches.

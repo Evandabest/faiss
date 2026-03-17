@@ -2427,7 +2427,8 @@ bool runMetalIVFSQScan(
         id<MTLBuffer> centroids,
         bool byResidual,
         id<MTLBuffer> outDistances, id<MTLBuffer> outIndices,
-        id<MTLBuffer> perListDistBuf, id<MTLBuffer> perListIdxBuf) {
+        id<MTLBuffer> perListDistBuf, id<MTLBuffer> perListIdxBuf,
+        bool waitForCompletion) {
     if (!device || !queue || !queries || !codes || !ids ||
         !listOffset || !listLength || !coarseAssign ||
         !outDistances || !outIndices ||
@@ -2487,6 +2488,9 @@ bool runMetalIVFSQScan(
 
     [enc endEncoding];
     [cmdBuf commit];
+    if (!waitForCompletion) {
+        return true;
+    }
     [cmdBuf waitUntilCompleted];
     return cmdBuf.status == MTLCommandBufferStatusCompleted;
 }
@@ -2529,7 +2533,8 @@ bool runMetalIVFPQScan(
         id<MTLBuffer> coarseAssign,
         int nq, int M, int k, int nprobe, int avgListLen, bool lookupFp16, bool isL2,
         id<MTLBuffer> outDistances, id<MTLBuffer> outIndices,
-        id<MTLBuffer> perListDistBuf, id<MTLBuffer> perListIdxBuf) {
+        id<MTLBuffer> perListDistBuf, id<MTLBuffer> perListIdxBuf,
+        bool waitForCompletion) {
     if (!device || !queue || !lookupTable || !codes || !ids ||
         !listOffset || !listLength || !coarseAssign ||
         !outDistances || !outIndices ||
@@ -2563,6 +2568,9 @@ bool runMetalIVFPQScan(
 
     [enc endEncoding];
     [cmdBuf commit];
+    if (!waitForCompletion) {
+        return true;
+    }
     [cmdBuf waitUntilCompleted];
     return cmdBuf.status == MTLCommandBufferStatusCompleted;
 }
@@ -2707,7 +2715,8 @@ bool runMetalConvertF32ToF16(
         id<MTLCommandQueue> queue,
         id<MTLBuffer> srcF32,
         id<MTLBuffer> dstF16,
-        size_t numElems) {
+        size_t numElems,
+        bool waitForCompletion) {
     if (!device || !queue || !srcF32 || !dstF16 || numElems == 0) return false;
     MetalKernels& K = getMetalKernels(device);
     if (!K.isValid()) return false;
@@ -2717,6 +2726,9 @@ bool runMetalConvertF32ToF16(
     K.encodeConvertF32ToF16(enc, srcF32, dstF16, numElems);
     [enc endEncoding];
     [cmdBuf commit];
+    if (!waitForCompletion) {
+        return true;
+    }
     [cmdBuf waitUntilCompleted];
     return cmdBuf.status == MTLCommandBufferStatusCompleted;
 }
@@ -2729,7 +2741,8 @@ bool runMetalHammingDistance(
         id<MTLDevice> device, id<MTLCommandQueue> queue,
         id<MTLBuffer> queries, id<MTLBuffer> database,
         int nq, int nb, int code_size, int k,
-        id<MTLBuffer> outDist, id<MTLBuffer> outIdx) {
+        id<MTLBuffer> outDist, id<MTLBuffer> outIdx,
+        bool waitForCompletion) {
     if (!device || !queue || !queries || !database ||
         !outDist || !outIdx)
         return false;
@@ -2752,6 +2765,9 @@ bool runMetalHammingDistance(
 
     [enc endEncoding];
     [cmdBuf commit];
+    if (!waitForCompletion) {
+        return true;
+    }
     [cmdBuf waitUntilCompleted];
     return cmdBuf.status == MTLCommandBufferStatusCompleted;
 }

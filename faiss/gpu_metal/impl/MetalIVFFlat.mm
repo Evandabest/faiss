@@ -29,6 +29,8 @@ inline uint32_t checkedToU32(size_t v, const char* what) {
 }
 
 constexpr size_t kDefaultMinTailShrinkVecs = 8192;
+constexpr size_t kMaxU32SizeT =
+        (size_t)std::numeric_limits<uint32_t>::max();
 
 size_t getTailShrinkMinVecs() {
     const char* env = std::getenv("FAISS_METAL_IVF_TAIL_SHRINK_MIN_VECS");
@@ -123,6 +125,9 @@ void MetalIVFFlatImpl::reserveMemory(idx_t totalVecs) {
         return;
     }
     size_t t = (size_t)totalVecs;
+    FAISS_THROW_IF_NOT_MSG(
+            t <= kMaxU32SizeT,
+            "MetalIVFFlatImpl::reserveMemory exceeds uint32 list-offset range");
     if (t <= totalCapacityVecs_) {
         return;
     }
@@ -233,6 +238,9 @@ bool MetalIVFFlatImpl::ensureCapacityForAppend_(
         while (cap < need) {
             cap *= 2;
         }
+        FAISS_THROW_IF_NOT_MSG(
+                cap <= kMaxU32SizeT,
+                "MetalIVFFlatImpl: list capacity exceeds uint32 range");
         newCap[l] = cap;
         anyMoved = true;
         if (movedLists) {
@@ -309,6 +317,9 @@ size_t MetalIVFFlatImpl::allocSegment_(size_t length) {
     }
 
     size_t out = totalCapacityVecs_;
+    FAISS_THROW_IF_NOT_MSG(
+            out <= kMaxU32SizeT && length <= (kMaxU32SizeT - out),
+            "MetalIVFFlatImpl: total capacity exceeds uint32 list-offset range");
     totalCapacityVecs_ += length;
     hostCodes_.resize(totalCapacityVecs_ * (size_t)dim_, 0.0f);
     hostIds_.resize(totalCapacityVecs_, (idx_t)-1);

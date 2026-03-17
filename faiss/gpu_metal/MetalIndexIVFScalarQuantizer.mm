@@ -178,7 +178,7 @@ void MetalIndexIVFScalarQuantizer::uploadCentroids_() const {
         if (centroidNormsBuf_) {
             id<MTLCommandQueue> queue = resources_->getCommandQueue();
             if (!runMetalComputeNorms(device, queue, centroidBuf_,
-                                      (int)nCentroids, d, centroidNormsBuf_)) {
+                                      (int)nCentroids, d, centroidNormsBuf_, false)) {
                 centroidNormsBuf_ = nil;
             }
         }
