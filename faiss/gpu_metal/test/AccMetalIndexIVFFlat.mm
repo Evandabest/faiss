@@ -1982,6 +1982,190 @@ TEST_F(AccMetalIndexIVFFlat, HighPressureStrictModeMatrixMatchesCpuRecall) {
     }
 }
 
+TEST_F(AccMetalIndexIVFFlat, ForcedChunkedSelectionMatchesDefault) {
+    const int dim = 64, nlist = 64, nb = 8000, nq = 24, k = 32;
+    const size_t nprobe = 16;
+
+    std::vector<float> vecs((size_t)nb * dim), queries((size_t)nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 9301);
+    faiss::float_rand(queries.data(), queries.size(), 9302);
+
+    faiss::gpu_metal::MetalIndexIVFFlat metalIdx(
+            resources_, dim, (faiss::idx_t)nlist, faiss::METRIC_L2);
+    metalIdx.train(nb, vecs.data());
+    metalIdx.add(nb, vecs.data());
+
+    faiss::IVFSearchParameters ivfParams;
+    ivfParams.nprobe = nprobe;
+
+    std::vector<float> dDefault((size_t)nq * k), dForced((size_t)nq * k);
+    std::vector<faiss::idx_t> lDefault((size_t)nq * k, -1), lForced((size_t)nq * k, -1);
+
+    const char* oldFallbackEnv = std::getenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK");
+    const bool hadOldFallback = oldFallbackEnv != nullptr;
+    std::string oldFallback = oldFallbackEnv ? oldFallbackEnv : "";
+    const char* oldForceEnv = std::getenv("FAISS_METAL_IVF_FORCE_CHUNKED_SELECTION");
+    const bool hadOldForce = oldForceEnv != nullptr;
+    std::string oldForce = oldForceEnv ? oldForceEnv : "";
+
+    setenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK", "0", 1);
+    unsetenv("FAISS_METAL_IVF_FORCE_CHUNKED_SELECTION");
+    metalIdx.search(nq, queries.data(), k, dDefault.data(), lDefault.data(), &ivfParams);
+
+    setenv("FAISS_METAL_IVF_FORCE_CHUNKED_SELECTION", "1", 1);
+    metalIdx.search(nq, queries.data(), k, dForced.data(), lForced.data(), &ivfParams);
+
+    if (hadOldForce) {
+        setenv("FAISS_METAL_IVF_FORCE_CHUNKED_SELECTION", oldForce.c_str(), 1);
+    } else {
+        unsetenv("FAISS_METAL_IVF_FORCE_CHUNKED_SELECTION");
+    }
+    if (hadOldFallback) {
+        setenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK", oldFallback.c_str(), 1);
+    } else {
+        unsetenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK");
+    }
+
+    expectExactResultsAllowingTiePermutations(
+            nq, k, dDefault.data(), lDefault.data(), dForced.data(), lForced.data());
+}
+
+TEST_F(AccMetalIndexIVFFlat, ReducedExactCandidateBudgetMatchesDefault) {
+    const int dim = 64, nlist = 64, nb = 8000, nq = 24, k = 32;
+    const size_t nprobe = 16;
+
+    std::vector<float> vecs((size_t)nb * dim), queries((size_t)nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 9331);
+    faiss::float_rand(queries.data(), queries.size(), 9332);
+
+    faiss::gpu_metal::MetalIndexIVFFlat metalIdx(
+            resources_, dim, (faiss::idx_t)nlist, faiss::METRIC_L2);
+    metalIdx.train(nb, vecs.data());
+    metalIdx.add(nb, vecs.data());
+
+    faiss::IVFSearchParameters ivfParams;
+    ivfParams.nprobe = nprobe;
+
+    std::vector<float> dDefault((size_t)nq * k), dBudget((size_t)nq * k);
+    std::vector<faiss::idx_t> lDefault((size_t)nq * k, -1), lBudget((size_t)nq * k, -1);
+
+    const char* oldFallbackEnv = std::getenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK");
+    const bool hadOldFallback = oldFallbackEnv != nullptr;
+    std::string oldFallback = oldFallbackEnv ? oldFallbackEnv : "";
+    const char* oldBudgetEnv = std::getenv("FAISS_METAL_IVF_EXACT_CANDIDATES");
+    const bool hadOldBudget = oldBudgetEnv != nullptr;
+    std::string oldBudget = oldBudgetEnv ? oldBudgetEnv : "";
+
+    setenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK", "0", 1);
+    unsetenv("FAISS_METAL_IVF_EXACT_CANDIDATES");
+    metalIdx.search(nq, queries.data(), k, dDefault.data(), lDefault.data(), &ivfParams);
+
+    setenv("FAISS_METAL_IVF_EXACT_CANDIDATES", "256", 1);
+    metalIdx.search(nq, queries.data(), k, dBudget.data(), lBudget.data(), &ivfParams);
+
+    if (hadOldBudget) {
+        setenv("FAISS_METAL_IVF_EXACT_CANDIDATES", oldBudget.c_str(), 1);
+    } else {
+        unsetenv("FAISS_METAL_IVF_EXACT_CANDIDATES");
+    }
+    if (hadOldFallback) {
+        setenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK", oldFallback.c_str(), 1);
+    } else {
+        unsetenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK");
+    }
+
+    expectExactResultsAllowingTiePermutations(
+            nq, k, dDefault.data(), lDefault.data(), dBudget.data(), lBudget.data());
+}
+
+TEST_F(AccMetalIndexIVFFlat, ExactL2HighEnvelopePressureMatchesCpu) {
+    // Stress selection envelope with large k and high nprobe. This forces
+    // probe chunking while requiring strict-mode GPU execution.
+    const int dim = 64, nlist = 128, nb = 24000, nq = 16, k = 256;
+    const size_t nprobe = 32; // nprobe * k = 8192
+
+    std::vector<float> vecs((size_t)nb * dim), queries((size_t)nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 9311);
+    faiss::float_rand(queries.data(), queries.size(), 9312);
+
+    auto cpuIdx = makeCpuIVFFlat(dim, nlist, faiss::METRIC_L2, nb, vecs.data());
+    cpuIdx->add(nb, vecs.data());
+    cpuIdx->nprobe = nprobe;
+
+    faiss::gpu_metal::StandardMetalResources stdRes;
+    faiss::gpu_metal::MetalClonerOptions opts;
+    faiss::Index* metalRaw = faiss::gpu_metal::index_cpu_to_metal_gpu(
+            &stdRes, 0, cpuIdx.get(), &opts);
+    ASSERT_NE(metalRaw, nullptr);
+
+    faiss::IVFSearchParameters ivfParams;
+    ivfParams.nprobe = nprobe;
+
+    std::vector<float> refD((size_t)nq * (size_t)k), testD((size_t)nq * (size_t)k);
+    std::vector<faiss::idx_t> refL((size_t)nq * (size_t)k, -1),
+            testL((size_t)nq * (size_t)k, -1);
+    cpuIdx->search(nq, queries.data(), k, refD.data(), refL.data());
+
+    const char* oldFallbackEnv = std::getenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK");
+    const bool hadOldFallback = oldFallbackEnv != nullptr;
+    std::string oldFallback = oldFallbackEnv ? oldFallbackEnv : "";
+    setenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK", "0", 1);
+    EXPECT_NO_THROW(
+            metalRaw->search(nq, queries.data(), k, testD.data(), testL.data(), &ivfParams));
+    if (hadOldFallback) {
+        setenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK", oldFallback.c_str(), 1);
+    } else {
+        unsetenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK");
+    }
+
+    expectRecall(nq, k, 1.0f, refL.data(), testL.data());
+    delete metalRaw;
+}
+
+TEST_F(AccMetalIndexIVFFlat, ExactIPHighEnvelopePressureMatchesCpu) {
+    // Mirror the L2 high-envelope stress under inner product metric.
+    const int dim = 64, nlist = 128, nb = 24000, nq = 16, k = 256;
+    const size_t nprobe = 32; // nprobe * k = 8192
+
+    std::vector<float> vecs((size_t)nb * dim), queries((size_t)nq * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 9321);
+    faiss::float_rand(queries.data(), queries.size(), 9322);
+
+    auto cpuIdx = makeCpuIVFFlat(
+            dim, nlist, faiss::METRIC_INNER_PRODUCT, nb, vecs.data());
+    cpuIdx->add(nb, vecs.data());
+    cpuIdx->nprobe = nprobe;
+
+    faiss::gpu_metal::StandardMetalResources stdRes;
+    faiss::gpu_metal::MetalClonerOptions opts;
+    faiss::Index* metalRaw = faiss::gpu_metal::index_cpu_to_metal_gpu(
+            &stdRes, 0, cpuIdx.get(), &opts);
+    ASSERT_NE(metalRaw, nullptr);
+
+    faiss::IVFSearchParameters ivfParams;
+    ivfParams.nprobe = nprobe;
+
+    std::vector<float> refD((size_t)nq * (size_t)k), testD((size_t)nq * (size_t)k);
+    std::vector<faiss::idx_t> refL((size_t)nq * (size_t)k, -1),
+            testL((size_t)nq * (size_t)k, -1);
+    cpuIdx->search(nq, queries.data(), k, refD.data(), refL.data());
+
+    const char* oldFallbackEnv = std::getenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK");
+    const bool hadOldFallback = oldFallbackEnv != nullptr;
+    std::string oldFallback = oldFallbackEnv ? oldFallbackEnv : "";
+    setenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK", "0", 1);
+    EXPECT_NO_THROW(
+            metalRaw->search(nq, queries.data(), k, testD.data(), testL.data(), &ivfParams));
+    if (hadOldFallback) {
+        setenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK", oldFallback.c_str(), 1);
+    } else {
+        unsetenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK");
+    }
+
+    expectRecall(nq, k, 1.0f, refL.data(), testL.data());
+    delete metalRaw;
+}
+
 TEST_F(AccMetalIndexIVFFlat, ClonerOptionsIndicesIVF) {
     const int dim = 32, nlist = 8, nb = 2000, nq = 16, k = 8;
     std::vector<float> vecs(nb * dim), queries(nq * dim);

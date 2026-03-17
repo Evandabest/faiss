@@ -30,6 +30,7 @@ constexpr size_t kDefaultIvfFullCoarseMaxBytes = 16ULL * 1024 * 1024;
 constexpr faiss::idx_t kIVFFlatSupportedMaxK = 1024;
 constexpr faiss::idx_t kAutoReserveMinBatch = 0;
 constexpr size_t kIvfExactCandidates = 1024;
+constexpr size_t kMinIvfExactCandidates = 64;
 
 size_t getIvfQueryTileBudgetBytes() {
     const char* envBytes = std::getenv("FAISS_METAL_IVF_QUERY_TILE_BYTES");
@@ -165,6 +166,34 @@ bool useFullCoarseGpuForIvf() {
     return true;
 }
 
+bool forceChunkedIvfSelectionPath() {
+    const char* env = std::getenv("FAISS_METAL_IVF_FORCE_CHUNKED_SELECTION");
+    if (!env || env[0] == '\0') {
+        return false;
+    }
+    if (env[0] == '0' || env[0] == 'n' || env[0] == 'N' || env[0] == 'f' ||
+        env[0] == 'F') {
+        return false;
+    }
+    return true;
+}
+
+size_t getIvfExactCandidateBudget() {
+    const char* env = std::getenv("FAISS_METAL_IVF_EXACT_CANDIDATES");
+    if (!env || env[0] == '\0') {
+        return kIvfExactCandidates;
+    }
+    char* end = nullptr;
+    unsigned long long v = std::strtoull(env, &end, 10);
+    if (end == env || v == 0) {
+        return kIvfExactCandidates;
+    }
+    size_t out = static_cast<size_t>(v);
+    out = std::max(out, kMinIvfExactCandidates);
+    out = std::min(out, kIvfExactCandidates);
+    return out;
+}
+
 struct ScopedIds {
     const faiss::InvertedLists* inv = nullptr;
     size_t listNo = 0;
@@ -271,6 +300,7 @@ bool assignedListsWithinLimit(
 std::string explainIvfScanFailureEnvelope(
         int d,
         faiss::idx_t k,
+        size_t exactCandidateBudget,
         size_t nprobe,
         bool useInterleaved,
         const faiss::IndexIVFFlat* cpuIndex,
@@ -282,8 +312,10 @@ std::string explainIvfScanFailureEnvelope(
     if (useInterleaved && (d % 4 != 0)) {
         return "scan envelope: interleaved layout requires d % 4 == 0";
     }
-    if (nprobe > 0 && (size_t)k > (kIvfExactCandidates / nprobe)) {
-        return "scan envelope: nprobe*k exceeds 1024 exact-candidate bound";
+    if (nprobe > 0 && (size_t)k > (exactCandidateBudget / nprobe)) {
+        return std::string("scan envelope: nprobe*k exceeds ") +
+                std::to_string(exactCandidateBudget) +
+                " exact-candidate bound";
     }
     faiss::idx_t badListId = -1;
     size_t badListSize = 0;
@@ -291,11 +323,12 @@ std::string explainIvfScanFailureEnvelope(
                 cpuIndex,
                 assign,
                 assignCount,
-                kIvfExactCandidates,
+                exactCandidateBudget,
                 badListId,
                 badListSize)) {
         if (badListSize > 0) {
-            return std::string("scan envelope: selected list size exceeds 1024 (list=") +
+            return std::string("scan envelope: selected list size exceeds ") +
+                    std::to_string(exactCandidateBudget) + " (list=" +
                     std::to_string((long long)badListId) +
                     ", size=" + std::to_string(badListSize) + ")";
         }
@@ -677,6 +710,8 @@ void MetalIndexIVFFlat::search(
     const bool allowCpuFallback = allowCpuFallbackForIvf();
     const bool logCpuFallback = logCpuFallbackForIvf();
     const bool logSyncProfile = logSyncProfileForIvf();
+    const bool forceChunkedSelection = forceChunkedIvfSelectionPath();
+    const size_t exactCandidateBudget = getIvfExactCandidateBudget();
     idx_t fallbackCount = 0;
     std::string firstFallbackReason;
     idx_t fullSearchCalls = 0;
@@ -750,6 +785,11 @@ void MetalIndexIVFFlat::search(
         bool tryFullCoarse = wantsFullCoarse && centroidBuf_ &&
                 nprobe <= (size_t)getMetalDistanceMaxK() &&
                 distMatBytes <= fullCoarseMaxBytes;
+        if (forceChunkedSelection) {
+            // Experimental path for selection-scalability work: skip monolithic
+            // full-search path and route through coarse+chunked scan/merge.
+            tryFullCoarse = false;
+        }
 
         ensureSearchBuf_(searchPerListDistBuf_, searchPerListDistCap_, perListBytes);
         ensureSearchBuf_(searchPerListIdxBuf_, searchPerListIdxCap_, perListIdxB);
@@ -834,6 +874,7 @@ void MetalIndexIVFFlat::search(
             const std::string envelopeReason = explainIvfScanFailureEnvelope(
                     d,
                     k,
+                    exactCandidateBudget,
                     nprobe,
                     useInterleaved,
                     cpuIndex_.get(),
@@ -853,10 +894,10 @@ void MetalIndexIVFFlat::search(
                     usedLists,
                     maxSelectedListSize,
                     badListId);
-            const bool needProbeChunk =
-                    nprobe > 0 && (size_t)k > (kIvfExactCandidates / nprobe);
-            const bool needListChunk =
-                    haveListStats && maxSelectedListSize > kIvfExactCandidates;
+                const bool needProbeChunk =
+                    nprobe > 0 && (size_t)k > (exactCandidateBudget / nprobe);
+                const bool needListChunk =
+                    haveListStats && maxSelectedListSize > exactCandidateBudget;
 
             if (needProbeChunk || needListChunk) {
                 usedChunkedScan = true;
@@ -865,9 +906,9 @@ void MetalIndexIVFFlat::search(
                 ok = true;
 
                 const size_t maxProbePerChunk = needProbeChunk
-                        ? std::max<size_t>(1, kIvfExactCandidates / (size_t)k)
+                        ? std::max<size_t>(1, exactCandidateBudget / (size_t)k)
                         : nprobe;
-                const size_t listChunk = kIvfExactCandidates;
+                const size_t listChunk = exactCandidateBudget;
                 const size_t numListPass = needListChunk
                         ? ((maxSelectedListSize + listChunk - 1) / listChunk)
                         : 1;
@@ -1382,6 +1423,7 @@ void MetalIndexIVFFlat::search_preassigned(
     const bool allowCpuFallback = allowCpuFallbackForIvf();
     const bool logCpuFallback = logCpuFallbackForIvf();
     const bool logSyncProfile = logSyncProfileForIvf();
+    const size_t exactCandidateBudget = getIvfExactCandidateBudget();
     idx_t fallbackCount = 0;
     std::string firstFallbackReason;
     idx_t scanCalls = 0;
@@ -1463,6 +1505,7 @@ void MetalIndexIVFFlat::search_preassigned(
         const std::string envelopeReason = explainIvfScanFailureEnvelope(
                 d,
                 k,
+                exactCandidateBudget,
                 nprobe,
                 useInterleaved,
                 cpuIndex_.get(),
@@ -1482,21 +1525,21 @@ void MetalIndexIVFFlat::search_preassigned(
                 usedLists,
                 maxSelectedListSize,
                 badListId);
-        const bool needProbeChunk =
-                nprobe > 0 && (size_t)k > (kIvfExactCandidates / nprobe);
-        const bool needListChunk =
-                haveListStats && maxSelectedListSize > kIvfExactCandidates;
+            const bool needProbeChunk =
+                nprobe > 0 && (size_t)k > (exactCandidateBudget / nprobe);
+            const bool needListChunk =
+                haveListStats && maxSelectedListSize > exactCandidateBudget;
 
         if (needProbeChunk || needListChunk) {
             const size_t maxProbePerChunk = needProbeChunk
-                    ? std::max<size_t>(1, kIvfExactCandidates / (size_t)k)
+                    ? std::max<size_t>(1, exactCandidateBudget / (size_t)k)
                     : nprobe;
             usedChunkedScan = true;
             chunkMergedDist.resize((size_t)qCount * (size_t)k, isL2 ? inf : negInf);
             chunkMergedIdx.resize((size_t)qCount * (size_t)k, -1);
             ok = true;
 
-            const size_t listChunk = kIvfExactCandidates;
+            const size_t listChunk = exactCandidateBudget;
             const size_t numListPass = needListChunk
                     ? ((maxSelectedListSize + listChunk - 1) / listChunk)
                     : 1;
