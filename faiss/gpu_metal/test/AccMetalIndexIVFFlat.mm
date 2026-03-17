@@ -476,6 +476,181 @@ TEST_F(AccMetalIndexIVFFlat, RejectsOutOfRangePreassignedListIds) {
             nullptr));
 }
 
+TEST_F(AccMetalIndexIVFFlat, SearchPreassignedRejectsStorePairs) {
+    const int dim = 32, nb = 512, nq = 2, nlist = 8, k = 4;
+    const int nprobe = 4;
+
+    std::vector<float> vecs((size_t)nb * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 8121);
+    std::vector<float> queries((size_t)nq * dim);
+    faiss::float_rand(queries.data(), queries.size(), 8122);
+
+    faiss::gpu_metal::MetalIndexIVFFlat metalIdx(
+            resources_, dim, (faiss::idx_t)nlist, faiss::METRIC_L2);
+    metalIdx.train(nb, vecs.data());
+    metalIdx.add(nb, vecs.data());
+
+    std::vector<float> distances((size_t)nq * k, 0.0f);
+    std::vector<faiss::idx_t> labels((size_t)nq * k, -1);
+    std::vector<faiss::idx_t> assign((size_t)nq * (size_t)nprobe, 0);
+    std::vector<float> centroidDistances((size_t)nq * (size_t)nprobe, 0.0f);
+
+    faiss::IVFSearchParameters params;
+    params.nprobe = nprobe;
+
+    EXPECT_ANY_THROW(metalIdx.search_preassigned(
+            nq,
+            queries.data(),
+            k,
+            assign.data(),
+            centroidDistances.data(),
+            distances.data(),
+            labels.data(),
+            true,
+            &params,
+            nullptr));
+}
+
+TEST_F(AccMetalIndexIVFFlat, SearchPreassignedRejectsStats) {
+    const int dim = 32, nb = 512, nq = 2, nlist = 8, k = 4;
+    const int nprobe = 4;
+
+    std::vector<float> vecs((size_t)nb * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 8131);
+    std::vector<float> queries((size_t)nq * dim);
+    faiss::float_rand(queries.data(), queries.size(), 8132);
+
+    faiss::gpu_metal::MetalIndexIVFFlat metalIdx(
+            resources_, dim, (faiss::idx_t)nlist, faiss::METRIC_L2);
+    metalIdx.train(nb, vecs.data());
+    metalIdx.add(nb, vecs.data());
+
+    std::vector<float> distances((size_t)nq * k, 0.0f);
+    std::vector<faiss::idx_t> labels((size_t)nq * k, -1);
+    std::vector<faiss::idx_t> assign((size_t)nq * (size_t)nprobe, 0);
+    std::vector<float> centroidDistances((size_t)nq * (size_t)nprobe, 0.0f);
+
+    faiss::IVFSearchParameters params;
+    params.nprobe = nprobe;
+    faiss::IndexIVFStats stats;
+
+    EXPECT_ANY_THROW(metalIdx.search_preassigned(
+            nq,
+            queries.data(),
+            k,
+            assign.data(),
+            centroidDistances.data(),
+            distances.data(),
+            labels.data(),
+            false,
+            &params,
+            &stats));
+}
+
+TEST_F(AccMetalIndexIVFFlat, SearchPreassignedRejectsMaxCodes) {
+    const int dim = 32, nb = 512, nq = 2, nlist = 8, k = 4;
+    const int nprobe = 4;
+
+    std::vector<float> vecs((size_t)nb * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 8141);
+    std::vector<float> queries((size_t)nq * dim);
+    faiss::float_rand(queries.data(), queries.size(), 8142);
+
+    faiss::gpu_metal::MetalIndexIVFFlat metalIdx(
+            resources_, dim, (faiss::idx_t)nlist, faiss::METRIC_L2);
+    metalIdx.train(nb, vecs.data());
+    metalIdx.add(nb, vecs.data());
+
+    std::vector<float> distances((size_t)nq * k, 0.0f);
+    std::vector<faiss::idx_t> labels((size_t)nq * k, -1);
+    std::vector<faiss::idx_t> assign((size_t)nq * (size_t)nprobe, 0);
+    std::vector<float> centroidDistances((size_t)nq * (size_t)nprobe, 0.0f);
+
+    faiss::IVFSearchParameters params;
+    params.nprobe = nprobe;
+    params.max_codes = 123;
+
+    EXPECT_ANY_THROW(metalIdx.search_preassigned(
+            nq,
+            queries.data(),
+            k,
+            assign.data(),
+            centroidDistances.data(),
+            distances.data(),
+            labels.data(),
+            false,
+            &params,
+            nullptr));
+}
+
+TEST_F(AccMetalIndexIVFFlat, StrictFallbackModeRejectsSearchFallback) {
+    const int dim = 32, nb = 8000, nq = 8, nlist = 64, k = 32;
+    const size_t nprobe = 64; // nprobe * k > 1024 => GPU path rejects
+
+    std::vector<float> vecs((size_t)nb * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 8151);
+    std::vector<float> queries((size_t)nq * dim);
+    faiss::float_rand(queries.data(), queries.size(), 8152);
+
+    faiss::gpu_metal::MetalIndexIVFFlat metalIdx(
+            resources_, dim, (faiss::idx_t)nlist, faiss::METRIC_L2);
+    metalIdx.train(nb, vecs.data());
+    metalIdx.add(nb, vecs.data());
+
+    faiss::IVFSearchParameters ivfParams;
+    ivfParams.nprobe = nprobe;
+
+    std::vector<float> d((size_t)nq * k);
+    std::vector<faiss::idx_t> l((size_t)nq * k, -1);
+
+    setenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK", "0", 1);
+    EXPECT_ANY_THROW(metalIdx.search(
+            nq, queries.data(), k, d.data(), l.data(), &ivfParams));
+    unsetenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK");
+}
+
+TEST_F(AccMetalIndexIVFFlat, StrictFallbackModeRejectsPreassignedFallback) {
+    const int dim = 32, nb = 8000, nq = 4, nlist = 64, k = 32;
+    const int nprobe = 64; // nprobe * k > 1024 => GPU path rejects
+
+    std::vector<float> vecs((size_t)nb * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 8161);
+    std::vector<float> queries((size_t)nq * dim);
+    faiss::float_rand(queries.data(), queries.size(), 8162);
+
+    faiss::gpu_metal::MetalIndexIVFFlat metalIdx(
+            resources_, dim, (faiss::idx_t)nlist, faiss::METRIC_L2);
+    metalIdx.train(nb, vecs.data());
+    metalIdx.add(nb, vecs.data());
+
+    std::vector<float> distances((size_t)nq * k, 0.0f);
+    std::vector<faiss::idx_t> labels((size_t)nq * k, -1);
+    std::vector<faiss::idx_t> assign((size_t)nq * (size_t)nprobe, 0);
+    std::vector<float> centroidDistances((size_t)nq * (size_t)nprobe, 0.0f);
+    for (int q = 0; q < nq; ++q) {
+        for (int p = 0; p < nprobe; ++p) {
+            assign[(size_t)q * (size_t)nprobe + (size_t)p] = p;
+        }
+    }
+
+    faiss::IVFSearchParameters params;
+    params.nprobe = nprobe;
+
+    setenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK", "0", 1);
+    EXPECT_ANY_THROW(metalIdx.search_preassigned(
+            nq,
+            queries.data(),
+            k,
+            assign.data(),
+            centroidDistances.data(),
+            distances.data(),
+            labels.data(),
+            false,
+            &params,
+            nullptr));
+    unsetenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK");
+}
+
 TEST_F(AccMetalIndexIVFFlat, ResetThenSearch) {
     const int dim = 32, nb = 1000, nq = 5, nlist = 8, k = 3;
 

@@ -2360,7 +2360,8 @@ bool runMetalIVFFlatScan(
         id<MTLBuffer> outDistances, id<MTLBuffer> outIndices,
         id<MTLBuffer> perListDistBuf, id<MTLBuffer> perListIdxBuf,
         id<MTLBuffer> interleavedCodes,
-        id<MTLBuffer> interleavedCodesOffset) {
+        id<MTLBuffer> interleavedCodesOffset,
+        bool waitForCompletion) {
     bool useIL = (interleavedCodes != nil && interleavedCodesOffset != nil);
     if (!device || !queue || !queries || (!codes && !useIL) || !ids ||
         !listOffset || !listLength || !coarseAssign ||
@@ -2404,6 +2405,9 @@ bool runMetalIVFFlatScan(
 
     [enc endEncoding];
     [cmdBuf commit];
+    if (!waitForCompletion) {
+        return true;
+    }
     [cmdBuf waitUntilCompleted];
     return cmdBuf.status == MTLCommandBufferStatusCompleted;
 }
@@ -2494,7 +2498,8 @@ bool runMetalIVFSQScan(
 bool runMetalComputeNorms(
         id<MTLDevice> device, id<MTLCommandQueue> queue,
         id<MTLBuffer> vectors, int nb, int d,
-        id<MTLBuffer> normsBuf) {
+        id<MTLBuffer> normsBuf,
+        bool waitForCompletion) {
     if (!device || !queue || !vectors || !normsBuf || nb <= 0 || d <= 0)
         return false;
     MetalKernels& K = getMetalKernels(device);
@@ -2505,6 +2510,9 @@ bool runMetalComputeNorms(
     K.encodeComputeNorms(enc, vectors, normsBuf, nb, d);
     [enc endEncoding];
     [cmdBuf commit];
+    if (!waitForCompletion) {
+        return true;
+    }
     [cmdBuf waitUntilCompleted];
     return cmdBuf.status == MTLCommandBufferStatusCompleted;
 }
@@ -2767,7 +2775,8 @@ bool runMetalIVFFlatFullSearch(
         int avgListLen,
         id<MTLBuffer> interleavedCodes,
         id<MTLBuffer> interleavedCodesOffset,
-        bool centroidsAreFP16) {
+        bool centroidsAreFP16,
+        bool waitForCompletion) {
     bool useIL = (interleavedCodes != nil && interleavedCodesOffset != nil);
     if (!device || !queue || !queries || !centroids || (!codes && !useIL) || !ids ||
         !listOffset || !listLength || !outDistances || !outIndices ||
@@ -2848,6 +2857,9 @@ bool runMetalIVFFlatFullSearch(
 
     [enc endEncoding];
     [cmdBuf commit];
+    if (!waitForCompletion) {
+        return true;
+    }
     [cmdBuf waitUntilCompleted];
     return cmdBuf.status == MTLCommandBufferStatusCompleted;
 }

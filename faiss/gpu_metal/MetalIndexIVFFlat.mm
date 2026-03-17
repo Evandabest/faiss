@@ -82,6 +82,18 @@ size_t chooseIvfPreassignedTileRows(
     return tile;
 }
 
+bool allowCpuFallbackForIvf() {
+    const char* env = std::getenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK");
+    if (!env || env[0] == '\0') {
+        return true;
+    }
+    if (env[0] == '0' || env[0] == 'n' || env[0] == 'N' || env[0] == 'f' ||
+        env[0] == 'F') {
+        return false;
+    }
+    return true;
+}
+
 void floatToHalf(const float* src, uint16_t* dst, size_t n) {
     for (size_t i = 0; i < n; ++i) {
         __fp16 h = (__fp16)src[i];
@@ -238,7 +250,7 @@ void MetalIndexIVFFlat::uploadCentroids_() const {
         if (centroidNormsBuf_) {
             id<MTLCommandQueue> queue = resources_->getCommandQueue();
             if (!runMetalComputeNorms(device, queue, centroidBuf_,
-                                      (int)nCentroids, d, centroidNormsBuf_)) {
+                                      (int)nCentroids, d, centroidNormsBuf_, false)) {
                 centroidNormsBuf_ = nil;
             }
         }
@@ -396,6 +408,18 @@ void MetalIndexIVFFlat::search(
             cpuIndex_->search(qCount, xTile, k, distancesTile, labelsTile);
         }
     };
+    const bool allowCpuFallback = allowCpuFallbackForIvf();
+    auto fallbackOrThrow = [&](idx_t qBase, idx_t qCount, const char* reason) {
+        if (!allowCpuFallback) {
+            FAISS_THROW_FMT(
+                    "MetalIndexIVFFlat::search requires GPU execution but hit fallback (%s) "
+                    "at qBase=%lld qCount=%lld",
+                    reason,
+                    (long long)qBase,
+                    (long long)qCount);
+        }
+        cpuFallbackSearch(qBase, qCount);
+    };
 
     id<MTLDevice>      device = resources_->getDevice();
     id<MTLCommandQueue> queue = resources_->getCommandQueue();
@@ -409,7 +433,7 @@ void MetalIndexIVFFlat::search(
     // Fall back to CPU if Metal is not available or GPU IVF storage not ready.
     if (!device || !queue || !gpuIvf_ || !hasScanCodes || !gpuIvf_->idsBuffer() ||
         !gpuIvf_->listOffsetGpuBuffer() || !gpuIvf_->listLengthGpuBuffer()) {
-        cpuFallbackSearch(0, n);
+        fallbackOrThrow(0, n, "missing Metal device/queue or IVF buffers");
         return;
     }
 
@@ -448,7 +472,7 @@ void MetalIndexIVFFlat::search(
         if (!searchQueriesBuf_ || !searchOutDistBuf_ || !searchOutIdxBuf_ ||
             !searchPerListDistBuf_ || !searchPerListIdxBuf_ ||
             !coarseOutDistBuf_ || !coarseOutIdxBuf_ || !distMatrixBuf_) {
-            cpuFallbackSearch(qBase, qCount);
+            fallbackOrThrow(qBase, qCount, "failed to allocate tiled search buffers");
             continue;
         }
 
@@ -491,7 +515,7 @@ void MetalIndexIVFFlat::search(
             size_t coarseBytes = (size_t)qCount * nprobe * sizeof(int32_t);
             ensureSearchBuf_(searchCoarseBuf_, searchCoarseCap_, coarseBytes);
             if (!searchCoarseBuf_) {
-                cpuFallbackSearch(qBase, qCount);
+                fallbackOrThrow(qBase, qCount, "failed to allocate coarse assign buffer");
                 continue;
             }
             auto* dst = reinterpret_cast<int32_t*>([searchCoarseBuf_ contents]);
@@ -520,7 +544,7 @@ void MetalIndexIVFFlat::search(
         }
 
         if (!ok) {
-            cpuFallbackSearch(qBase, qCount);
+            fallbackOrThrow(qBase, qCount, "GPU IVF scan failed");
             continue;
         }
 
@@ -564,6 +588,17 @@ void MetalIndexIVFFlat::search_preassigned(
     FAISS_THROW_IF_NOT(cpuIndex_);
     FAISS_THROW_IF_NOT(k > 0);
     FAISS_THROW_IF_NOT(assign);
+    FAISS_THROW_IF_NOT_MSG(stats == nullptr, "IVF stats not supported");
+    FAISS_THROW_IF_NOT_MSG(
+            !store_pairs,
+            "MetalIndexIVFFlat::search_preassigned does not currently support store_pairs");
+    if (params) {
+        FAISS_THROW_IF_NOT_FMT(
+                params->max_codes == 0,
+                "Metal IVF index does not currently support "
+                "SearchParametersIVF::max_codes (passed %zu, must be 0)",
+                params->max_codes);
+    }
     FAISS_THROW_IF_NOT_MSG(
             k <= kIVFFlatSupportedMaxK,
             "MetalIndexIVFFlat supports k <= 1024; larger k is not yet supported");
@@ -614,10 +649,22 @@ void MetalIndexIVFFlat::search_preassigned(
                 params,
                 stats);
     };
+    const bool allowCpuFallback = allowCpuFallbackForIvf();
+    auto fallbackOrThrow = [&](idx_t qBase, idx_t qCount, const char* reason) {
+        if (!allowCpuFallback) {
+            FAISS_THROW_FMT(
+                    "MetalIndexIVFFlat::search_preassigned requires GPU execution but hit "
+                    "fallback (%s) at qBase=%lld qCount=%lld",
+                    reason,
+                    (long long)qBase,
+                    (long long)qCount);
+        }
+        cpuFallbackSearch(qBase, qCount);
+    };
 
     if (!device || !queue || !gpuIvf_ || !hasScanCodes || !gpuIvf_->idsBuffer() ||
         !gpuIvf_->listOffsetGpuBuffer() || !gpuIvf_->listLengthGpuBuffer()) {
-        cpuFallbackSearch(0, n);
+        fallbackOrThrow(0, n, "missing Metal device/queue or IVF buffers");
         return;
     }
 
@@ -643,7 +690,7 @@ void MetalIndexIVFFlat::search_preassigned(
 
         if (!searchQueriesBuf_ || !searchOutDistBuf_ || !searchOutIdxBuf_ ||
             !searchPerListDistBuf_ || !searchPerListIdxBuf_ || !searchCoarseBuf_) {
-            cpuFallbackSearch(qBase, qCount);
+            fallbackOrThrow(qBase, qCount, "failed to allocate tiled preassigned buffers");
             continue;
         }
 
@@ -674,7 +721,7 @@ void MetalIndexIVFFlat::search_preassigned(
                 gpuIvf_->interleavedCodesOffsetBuffer());
 
         if (!ok) {
-            cpuFallbackSearch(qBase, qCount);
+            fallbackOrThrow(qBase, qCount, "GPU IVF scan failed");
             continue;
         }
 

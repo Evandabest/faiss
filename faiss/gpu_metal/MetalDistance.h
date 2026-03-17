@@ -192,7 +192,8 @@ bool runMetalIVFFlatScan(
         id<MTLBuffer> perListDistBuf,
         id<MTLBuffer> perListIdxBuf,
         id<MTLBuffer> interleavedCodes = nil,
-        id<MTLBuffer> interleavedCodesOffset = nil);
+        id<MTLBuffer> interleavedCodesOffset = nil,
+        bool waitForCompletion = true);
 
 /// SQ quantizer type for IVF SQ scan.
 enum class MetalSQType { SQ4, SQ6, SQ8, SQ8_DIRECT, FP16 };
@@ -333,7 +334,8 @@ bool runMetalComputeNorms(
         id<MTLBuffer> vectors,
         int nb,
         int d,
-        id<MTLBuffer> normsBuf);
+        id<MTLBuffer> normsBuf,
+        bool waitForCompletion = true);
 
 /// Full IVF search in a single command buffer: coarse quantisation (distance
 /// matrix + top-nprobe) followed by ivf_scan_list + ivf_merge_lists.  Avoids
@@ -376,7 +378,8 @@ bool runMetalIVFFlatFullSearch(
         int avgListLen = 256,
         id<MTLBuffer> interleavedCodes = nil,
         id<MTLBuffer> interleavedCodesOffset = nil,
-        bool centroidsAreFP16 = false);
+        bool centroidsAreFP16 = false,
+        bool waitForCompletion = true);
 
 // ============================================================
 //  Public brute-force k-NN on raw CPU pointers (mirrors CUDA bfKnn)
