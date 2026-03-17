@@ -903,6 +903,16 @@ void MetalIndexIVFFlat::search(
                     }
                 }
 
+                const bool canAsyncProbeBatch =
+                        needProbeChunk && !needListChunk && numListPass == 1;
+                struct ProbePass {
+                    size_t p0 = 0;
+                    size_t chunkProbe = 0;
+                    id<MTLBuffer> coarseBuf = nil;
+                    id<MTLBuffer> outDistBuf = nil;
+                    id<MTLBuffer> outIdxBuf = nil;
+                };
+                std::vector<ProbePass> probePasses;
                 std::vector<int32_t> coarseChunk;
                 for (size_t p0 = 0; ok && p0 < nprobe; p0 += maxProbePerChunk) {
                     size_t chunkProbe = std::min(maxProbePerChunk, nprobe - p0);
@@ -917,12 +927,24 @@ void MetalIndexIVFFlat::search(
                     }
 
                     size_t coarseChunkBytes = coarseChunk.size() * sizeof(int32_t);
-                    ensureSearchBuf_(searchCoarseBuf_, searchCoarseCap_, coarseChunkBytes);
-                    if (!searchCoarseBuf_) {
-                        ok = false;
-                        break;
+                    id<MTLBuffer> coarseChunkBuf = searchCoarseBuf_;
+                    if (canAsyncProbeBatch) {
+                        coarseChunkBuf =
+                                [device newBufferWithLength:coarseChunkBytes
+                                                    options:MTLResourceStorageModeShared];
+                        if (!coarseChunkBuf) {
+                            ok = false;
+                            break;
+                        }
+                    } else {
+                        ensureSearchBuf_(searchCoarseBuf_, searchCoarseCap_, coarseChunkBytes);
+                        coarseChunkBuf = searchCoarseBuf_;
+                        if (!coarseChunkBuf) {
+                            ok = false;
+                            break;
+                        }
                     }
-                    std::memcpy([searchCoarseBuf_ contents], coarseChunk.data(), coarseChunkBytes);
+                    std::memcpy([coarseChunkBuf contents], coarseChunk.data(), coarseChunkBytes);
 
                     size_t perListBytesChunk =
                             (size_t)qCount * chunkProbe * (size_t)k * sizeof(float);
@@ -938,6 +960,43 @@ void MetalIndexIVFFlat::search(
                     const int chunkProbeI = checkedSizeToInt(
                             chunkProbe,
                             "MetalIndexIVFFlat: chunk nprobe exceeds int range");
+                    if (canAsyncProbeBatch) {
+                        id<MTLBuffer> passOutDistBuf =
+                                [device newBufferWithLength:outDistBytes
+                                                    options:MTLResourceStorageModeShared];
+                        id<MTLBuffer> passOutIdxBuf =
+                                [device newBufferWithLength:outIdxBytes
+                                                    options:MTLResourceStorageModeShared];
+                        if (!passOutDistBuf || !passOutIdxBuf) {
+                            ok = false;
+                            break;
+                        }
+
+                        bool chunkOk = runMetalIVFFlatScan(
+                                device, queue,
+                                searchQueriesBuf_,
+                                gpuIvf_->codesBuffer(),
+                                gpuIvf_->idsBuffer(),
+                                gpuIvf_->listOffsetGpuBuffer(),
+                                gpuIvf_->listLengthGpuBuffer(),
+                                coarseChunkBuf,
+                                qCountI, d, kI, chunkProbeI, isL2,
+                                passOutDistBuf, passOutIdxBuf,
+                                searchPerListDistBuf_, searchPerListIdxBuf_,
+                                chunkInterleavedCodes,
+                                chunkInterleavedOffsets,
+                                false /* waitForCompletion */);
+                        ++scanCalls;
+                        ++asyncScanCalls;
+                        if (!chunkOk) {
+                            ok = false;
+                            break;
+                        }
+                        probePasses.push_back(
+                                ProbePass{p0, chunkProbe, coarseChunkBuf, passOutDistBuf, passOutIdxBuf});
+                        continue;
+                    }
+
                     if (needListChunk && numListPass > 1) {
                         std::vector<id<MTLBuffer>> passOutDistBufs(numListPass, nil);
                         std::vector<id<MTLBuffer>> passOutIdxBufs(numListPass, nil);
@@ -1114,6 +1173,36 @@ void MetalIndexIVFFlat::search(
                                             bestIdx,
                                             kI);
                                 }
+                            }
+                        }
+                    }
+                }
+                if (ok && canAsyncProbeBatch && !probePasses.empty()) {
+                    resources_->synchronize();
+                    ++asyncBatchSyncs;
+                    for (const auto& pass : probePasses) {
+                        (void)pass.p0;
+                        (void)pass.chunkProbe;
+                        (void)pass.coarseBuf;
+                        const float* chunkDist = reinterpret_cast<const float*>(
+                                [pass.outDistBuf contents]);
+                        const int64_t* chunkIdx = reinterpret_cast<const int64_t*>(
+                                [pass.outIdxBuf contents]);
+                        for (idx_t qi = 0; qi < qCount; ++qi) {
+                            float* bestDist =
+                                    chunkMergedDist.data() + (size_t)qi * (size_t)k;
+                            int64_t* bestIdx =
+                                    chunkMergedIdx.data() + (size_t)qi * (size_t)k;
+                            for (idx_t j = 0; j < k; ++j) {
+                                const size_t pos =
+                                        (size_t)qi * (size_t)k + (size_t)j;
+                                insertTopKCandidate(
+                                        chunkDist[pos],
+                                        chunkIdx[pos],
+                                        isL2,
+                                        bestDist,
+                                        bestIdx,
+                                        kI);
                             }
                         }
                     }

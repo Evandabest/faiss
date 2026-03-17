@@ -783,6 +783,58 @@ TEST_F(AccMetalIndexIVFFlat, ExactSearchPreassignedMatchesCpu) {
     expectExactResults(nq, k, refD.data(), refL.data(), testD.data(), testL.data());
 }
 
+TEST_F(AccMetalIndexIVFFlat, ExactSearchPreassignedChunkedListMatchesCpu) {
+    // Force preassigned list-chunking: one inverted list with len > 1024.
+    const int dim = 32, nb = 7000, nq = 10, nlist = 1, k = 64;
+    const size_t nprobe = 1;
+
+    std::vector<float> vecs((size_t)nb * dim);
+    faiss::float_rand(vecs.data(), vecs.size(), 8181);
+    std::vector<float> queries((size_t)nq * dim);
+    faiss::float_rand(queries.data(), queries.size(), 8182);
+
+    auto cpuIdx = makeCpuIVFFlat(dim, nlist, faiss::METRIC_L2, nb, vecs.data());
+    cpuIdx->nprobe = nprobe;
+    cpuIdx->add(nb, vecs.data());
+
+    faiss::gpu_metal::MetalIndexIVFFlat metalIdx(
+            resources_, dim, (faiss::idx_t)nlist, faiss::METRIC_L2);
+    metalIdx.train(nb, vecs.data());
+    metalIdx.add(nb, vecs.data());
+
+    std::vector<float> centroidDist((size_t)nq * nprobe, 0.0f);
+    std::vector<faiss::idx_t> assign((size_t)nq * nprobe, 0);
+    std::vector<float> refD((size_t)nq * k), testD((size_t)nq * k);
+    std::vector<faiss::idx_t> refL((size_t)nq * k, -1), testL((size_t)nq * k, -1);
+    faiss::IVFSearchParameters ivfParams;
+    ivfParams.nprobe = nprobe;
+
+    cpuIdx->search_preassigned(
+            nq,
+            queries.data(),
+            k,
+            assign.data(),
+            centroidDist.data(),
+            refD.data(),
+            refL.data(),
+            false,
+            &ivfParams,
+            nullptr);
+    metalIdx.search_preassigned(
+            nq,
+            queries.data(),
+            k,
+            assign.data(),
+            centroidDist.data(),
+            testD.data(),
+            testL.data(),
+            false,
+            &ivfParams,
+            nullptr);
+
+    expectExactResults(nq, k, refD.data(), refL.data(), testD.data(), testL.data());
+}
+
 TEST_F(AccMetalIndexIVFFlat, ExactSearchPreassignedInterleavedMatchesCpu) {
     const int dim = 40, nb = 6000, nq = 12, nlist = 32, k = 24;
     const size_t nprobe = 8;
@@ -1844,6 +1896,89 @@ TEST_F(AccMetalIndexIVFFlat, ScaleStressMatrixMatchesCpuRecall) {
                 &ivfParams);
 
         expectRecall(nq, c.k, c.minRecall, refL.data(), testL.data());
+    }
+}
+
+TEST_F(AccMetalIndexIVFFlat, HighPressureStrictModeMatrixMatchesCpuRecall) {
+    struct StressCase {
+        int d;
+        int nlist;
+        int nb;
+        int nq;
+        int k;
+        size_t nprobe;
+        faiss::MetricType metric;
+        bool skewed;
+        float minRecall;
+        int seed;
+    };
+
+    const std::vector<StressCase> cases = {
+            // Probe-chunked regime: nprobe * k > 1024.
+            {32, 64, 8000, 24, 32, 64, faiss::METRIC_L2, false, 1.00f, 9201},
+            {32, 64, 8000, 24, 32, 64, faiss::METRIC_INNER_PRODUCT, false, 0.99f, 9202},
+            // List-chunked regime: single list with len > 1024.
+            {24, 1, 7000, 20, 64, 1, faiss::METRIC_L2, false, 1.00f, 9203},
+            // Combined pressure with skewed data.
+            {24, 1, 7000, 20, 64, 1, faiss::METRIC_L2, true, 0.99f, 9204},
+    };
+
+    const char* oldFallbackEnv = std::getenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK");
+    std::string oldFallback = oldFallbackEnv ? oldFallbackEnv : "";
+    const bool hadOldFallback = oldFallbackEnv != nullptr;
+    setenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK", "0", 1);
+
+    for (const auto& c : cases) {
+        SCOPED_TRACE(testing::Message()
+                     << "d=" << c.d << " nlist=" << c.nlist << " nb=" << c.nb
+                     << " nq=" << c.nq << " k=" << c.k << " nprobe=" << c.nprobe
+                     << " metric="
+                     << (c.metric == faiss::METRIC_L2 ? "L2" : "IP")
+                     << " skewed=" << c.skewed);
+
+        std::vector<float> vecs((size_t)c.nb * c.d);
+        std::vector<float> queries((size_t)c.nq * c.d);
+        faiss::float_rand(vecs.data(), vecs.size(), c.seed);
+        faiss::float_rand(queries.data(), queries.size(), c.seed + 1000);
+
+        if (c.skewed) {
+            for (int i = 0; i < c.nb / 2; ++i) {
+                for (int j = 0; j < c.d; ++j) {
+                    vecs[(size_t)i * c.d + j] = vecs[j] + 0.0005f * (float)(i % 17);
+                }
+            }
+        }
+
+        auto cpuIdx = makeCpuIVFFlat(c.d, c.nlist, c.metric, c.nb, vecs.data());
+        cpuIdx->add(c.nb, vecs.data());
+        cpuIdx->nprobe = c.nprobe;
+
+        faiss::gpu_metal::MetalIndexIVFFlat metalIdx(
+                resources_, c.d, (faiss::idx_t)c.nlist, c.metric);
+        metalIdx.train(c.nb, vecs.data());
+        metalIdx.add(c.nb, vecs.data());
+
+        faiss::IVFSearchParameters ivfParams;
+        ivfParams.nprobe = c.nprobe;
+
+        std::vector<float> refD((size_t)c.nq * (size_t)c.k), testD((size_t)c.nq * (size_t)c.k);
+        std::vector<faiss::idx_t> refL((size_t)c.nq * (size_t)c.k, -1),
+                testL((size_t)c.nq * (size_t)c.k, -1);
+        cpuIdx->search(c.nq, queries.data(), c.k, refD.data(), refL.data());
+        EXPECT_NO_THROW(metalIdx.search(
+                c.nq,
+                queries.data(),
+                c.k,
+                testD.data(),
+                testL.data(),
+                &ivfParams));
+        expectRecall(c.nq, c.k, c.minRecall, refL.data(), testL.data());
+    }
+
+    if (hadOldFallback) {
+        setenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK", oldFallback.c_str(), 1);
+    } else {
+        unsetenv("FAISS_METAL_IVF_ALLOW_CPU_FALLBACK");
     }
 }
 
