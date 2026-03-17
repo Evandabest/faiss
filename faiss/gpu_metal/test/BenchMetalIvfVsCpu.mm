@@ -47,6 +47,31 @@ struct ScopedEnvVar {
     }
 };
 
+static bool useFullCoarseGpuForIvfBench() {
+    const char* env = std::getenv("FAISS_METAL_IVF_USE_FULL_COARSE");
+    if (!env || env[0] == '\0') {
+        return true;
+    }
+    if (env[0] == '0' || env[0] == 'n' || env[0] == 'N' || env[0] == 'f' ||
+        env[0] == 'F') {
+        return false;
+    }
+    return true;
+}
+
+static size_t getIvfFullCoarseMaxBytesBench() {
+    const char* env = std::getenv("FAISS_METAL_IVF_FULL_COARSE_MAX_BYTES");
+    if (!env || env[0] == '\0') {
+        return 16ULL * 1024 * 1024;
+    }
+    char* end = nullptr;
+    unsigned long long v = std::strtoull(env, &end, 10);
+    if (end == env) {
+        return 16ULL * 1024 * 1024;
+    }
+    return (size_t)v;
+}
+
 int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
@@ -74,6 +99,10 @@ int main(int argc, char** argv) {
     printf("Config: d=%d nb=%d nq=%d nlist=%d nprobe=%d\n", d, nb, nq, nlist, nprobe);
     printf("Supported k range (Metal IVFFlat): k <= 1024\n");
     printf("Fallback policy: strict GPU mode (FAISS_METAL_IVF_ALLOW_CPU_FALLBACK=0)\n");
+    printf(
+            "Coarse policy: full_matrix=%s max_bytes=%zu\n",
+            useFullCoarseGpuForIvfBench() ? "on" : "off",
+            getIvfFullCoarseMaxBytesBench());
     printf("Warmup: %d runs, Timed: %d runs\n\n", nWarmup, nRuns);
 
     std::vector<float> db(nb * d);

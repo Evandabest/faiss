@@ -25,6 +25,7 @@ namespace {
 constexpr size_t kDefaultIvfQueryTileBudgetBytes = 256ULL * 1024 * 1024;
 constexpr size_t kMinIvfQueryTileBudgetBytes = 16ULL * 1024 * 1024;
 constexpr size_t kMaxIvfQueryTileBudgetBytes = 4ULL * 1024 * 1024 * 1024;
+constexpr size_t kDefaultIvfFullCoarseMaxBytes = 16ULL * 1024 * 1024;
 constexpr faiss::idx_t kIVFFlatSupportedMaxK = 1024;
 constexpr faiss::idx_t kAutoReserveMinBatch = 0;
 constexpr size_t kIvfExactCandidates = 1024;
@@ -116,6 +117,31 @@ bool allowCpuFallbackForIvf() {
 
 bool logCpuFallbackForIvf() {
     const char* env = std::getenv("FAISS_METAL_IVF_LOG_CPU_FALLBACK");
+    if (!env || env[0] == '\0') {
+        return true;
+    }
+    if (env[0] == '0' || env[0] == 'n' || env[0] == 'N' || env[0] == 'f' ||
+        env[0] == 'F') {
+        return false;
+    }
+    return true;
+}
+
+size_t getIvfFullCoarseMaxBytes() {
+    const char* env = std::getenv("FAISS_METAL_IVF_FULL_COARSE_MAX_BYTES");
+    if (!env || env[0] == '\0') {
+        return kDefaultIvfFullCoarseMaxBytes;
+    }
+    char* end = nullptr;
+    unsigned long long v = std::strtoull(env, &end, 10);
+    if (end == env) {
+        return kDefaultIvfFullCoarseMaxBytes;
+    }
+    return static_cast<size_t>(v);
+}
+
+bool useFullCoarseGpuForIvf() {
+    const char* env = std::getenv("FAISS_METAL_IVF_USE_FULL_COARSE");
     if (!env || env[0] == '\0') {
         return true;
     }
@@ -662,15 +688,27 @@ void MetalIndexIVFFlat::search(
         ensureSearchBuf_(searchQueriesBuf_, searchQueriesCap_, queriesBytes);
         ensureSearchBuf_(searchOutDistBuf_, searchOutDistCap_, outDistBytes);
         ensureSearchBuf_(searchOutIdxBuf_, searchOutIdxCap_, outIdxBytes);
+        const bool wantsFullCoarse = useFullCoarseGpuForIvf();
+        const size_t fullCoarseMaxBytes = getIvfFullCoarseMaxBytes();
+        bool tryFullCoarse = wantsFullCoarse && centroidBuf_ &&
+                nprobe <= (size_t)getMetalDistanceMaxK() &&
+                distMatBytes <= fullCoarseMaxBytes;
+
         ensureSearchBuf_(searchPerListDistBuf_, searchPerListDistCap_, perListBytes);
         ensureSearchBuf_(searchPerListIdxBuf_, searchPerListIdxCap_, perListIdxB);
-        ensureSearchBuf_(coarseOutDistBuf_, coarseOutDistCap_, coarseDistBytes);
-        ensureSearchBuf_(coarseOutIdxBuf_, coarseOutIdxCap_, coarseIdxBytes);
-        ensureSearchBuf_(distMatrixBuf_, distMatrixCap_, distMatBytes);
+        if (tryFullCoarse) {
+            ensureSearchBuf_(coarseOutDistBuf_, coarseOutDistCap_, coarseDistBytes);
+            ensureSearchBuf_(coarseOutIdxBuf_, coarseOutIdxCap_, coarseIdxBytes);
+            ensureSearchBuf_(distMatrixBuf_, distMatrixCap_, distMatBytes);
+            if (!coarseOutDistBuf_ || !coarseOutIdxBuf_ || !distMatrixBuf_) {
+                // Fall back to CPU coarse assignment path if matrix scratch
+                // cannot be allocated for this tile.
+                tryFullCoarse = false;
+            }
+        }
 
         if (!searchQueriesBuf_ || !searchOutDistBuf_ || !searchOutIdxBuf_ ||
-            !searchPerListDistBuf_ || !searchPerListIdxBuf_ ||
-            !coarseOutDistBuf_ || !coarseOutIdxBuf_ || !distMatrixBuf_) {
+            !searchPerListDistBuf_ || !searchPerListIdxBuf_) {
             fallbackOrThrow(qBase, qCount, "failed to allocate tiled search buffers");
             continue;
         }
@@ -683,7 +721,7 @@ void MetalIndexIVFFlat::search(
                 nprobe, "MetalIndexIVFFlat: nprobe exceeds int range");
 
         bool ok = false;
-        if (centroidBuf_ && nprobe <= (size_t)getMetalDistanceMaxK()) {
+        if (tryFullCoarse) {
             ok = runMetalIVFFlatFullSearch(
                     device, queue,
                     searchQueriesBuf_,

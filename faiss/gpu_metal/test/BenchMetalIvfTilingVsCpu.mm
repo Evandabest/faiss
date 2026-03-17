@@ -72,6 +72,31 @@ size_t choosePredictedTileRows(
     return tile;
 }
 
+size_t getIvfFullCoarseMaxBytesBench() {
+    const char* env = std::getenv("FAISS_METAL_IVF_FULL_COARSE_MAX_BYTES");
+    if (!env || env[0] == '\0') {
+        return 16ULL * 1024 * 1024;
+    }
+    char* end = nullptr;
+    unsigned long long v = std::strtoull(env, &end, 10);
+    if (end == env) {
+        return 16ULL * 1024 * 1024;
+    }
+    return (size_t)v;
+}
+
+bool useFullCoarseGpuForIvfBench() {
+    const char* env = std::getenv("FAISS_METAL_IVF_USE_FULL_COARSE");
+    if (!env || env[0] == '\0') {
+        return true;
+    }
+    if (env[0] == '0' || env[0] == 'n' || env[0] == 'N' || env[0] == 'f' ||
+        env[0] == 'F') {
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -122,6 +147,12 @@ int main(int argc, char** argv) {
             nWarmup,
             nRuns);
     printf("Fallback policy: strict GPU mode (FAISS_METAL_IVF_ALLOW_CPU_FALLBACK=0)\n\n");
+    const bool fullCoarseEnabled = useFullCoarseGpuForIvfBench();
+    const size_t fullCoarseMaxBytes = getIvfFullCoarseMaxBytesBench();
+    printf(
+            "Coarse policy: full_matrix=%s max_bytes=%zu\n\n",
+            fullCoarseEnabled ? "on" : "off",
+            fullCoarseMaxBytes);
 
     auto metalRes = std::make_shared<faiss::gpu_metal::StandardMetalResources>();
     if (!metalRes->getResources() || !metalRes->getResources()->isAvailable()) {
@@ -182,12 +213,18 @@ int main(int argc, char** argv) {
         const size_t tileRows = choosePredictedTileRows(
                 (size_t)nq, d, k, (size_t)nprobe, nlist, budget);
         const size_t numTiles = ((size_t)nq + tileRows - 1) / tileRows;
+        const size_t coarseMatrixBytes = tileRows * (size_t)nlist * sizeof(float);
+        const bool predictedFullCoarse = fullCoarseEnabled && coarseMatrixBytes <= fullCoarseMaxBytes;
 
         printf("Budget: %zu MB\n", budget / (1024 * 1024));
         printf(
                 "  predicted tile rows: %zu (%zu tiles)\n",
                 tileRows,
                 numTiles);
+        printf(
+                "  predicted coarse path: %s (tile coarse bytes=%zu)\n",
+                predictedFullCoarse ? "full_matrix" : "non_matrix",
+                coarseMatrixBytes);
         printf(
                 "  Metal: %.3f ms/search (qps=%.0f) speedup(CPU/Metal)=%.3fx\n",
                 metalMs,
@@ -196,7 +233,8 @@ int main(int argc, char** argv) {
         printf(
                 "SUMMARY,index=IVFFlatTiling,metric=L2,d=%d,nb=%d,nq=%d,nlist=%d,nprobe=%d,k=%d,"
                 "tile_budget_bytes=%zu,predicted_tile_rows=%zu,predicted_num_tiles=%zu,"
-                "cpu_ms=%.6f,metal_ms=%.6f,speedup_cpu_over_metal=%.6f\n",
+                "coarse_full_enabled=%d,coarse_full_max_bytes=%zu,coarse_matrix_bytes=%zu,"
+                "predicted_full_coarse=%d,cpu_ms=%.6f,metal_ms=%.6f,speedup_cpu_over_metal=%.6f\n",
                 d,
                 nb,
                 nq,
@@ -206,6 +244,10 @@ int main(int argc, char** argv) {
                 budget,
                 tileRows,
                 numTiles,
+                fullCoarseEnabled ? 1 : 0,
+                fullCoarseMaxBytes,
+                coarseMatrixBytes,
+                predictedFullCoarse ? 1 : 0,
                 cpuMs,
                 metalMs,
                 speedup);
