@@ -24,6 +24,7 @@ constexpr size_t kDefaultIvfQueryTileBudgetBytes = 256ULL * 1024 * 1024;
 constexpr size_t kMinIvfQueryTileBudgetBytes = 16ULL * 1024 * 1024;
 constexpr size_t kMaxIvfQueryTileBudgetBytes = 4ULL * 1024 * 1024 * 1024;
 constexpr faiss::idx_t kIVFFlatSupportedMaxK = 1024;
+constexpr faiss::idx_t kAutoReserveMinBatch = 1024;
 
 size_t getIvfQueryTileBudgetBytes() {
     const char* envBytes = std::getenv("FAISS_METAL_IVF_QUERY_TILE_BYTES");
@@ -38,6 +39,22 @@ size_t getIvfQueryTileBudgetBytes() {
         }
     }
     return kDefaultIvfQueryTileBudgetBytes;
+}
+
+faiss::idx_t getIvfAutoReserveMinBatch() {
+    const char* env = std::getenv("FAISS_METAL_IVF_AUTO_RESERVE_MIN_BATCH");
+    if (!env || env[0] == '\0') {
+        return kAutoReserveMinBatch;
+    }
+    char* end = nullptr;
+    unsigned long long v = std::strtoull(env, &end, 10);
+    if (end == env) {
+        return kAutoReserveMinBatch;
+    }
+    if (v > (unsigned long long)std::numeric_limits<faiss::idx_t>::max()) {
+        return std::numeric_limits<faiss::idx_t>::max();
+    }
+    return (faiss::idx_t)v;
 }
 
 size_t chooseIvfSearchTileRows(
@@ -293,6 +310,11 @@ void MetalIndexIVFFlat::add(idx_t n, const float* x) {
     cpuIndex_->quantizer->assign(n, x, list_nos.data());
 
     idx_t oldNt = cpuIndex_->ntotal;
+    const idx_t autoReserveMinBatch = getIvfAutoReserveMinBatch();
+    if (gpuIvf_ && autoReserveMinBatch > 0 && n >= autoReserveMinBatch) {
+        // Pre-reserve before append to reduce relayout spikes on large batches.
+        gpuIvf_->reserveMemory(oldNt + n);
+    }
     cpuIndex_->add(n, x);
     ntotal = cpuIndex_->ntotal;
 
@@ -312,6 +334,13 @@ void MetalIndexIVFFlat::add_with_ids(idx_t n, const float* x, const idx_t* xids)
         return;
     }
     FAISS_THROW_IF_NOT(xids != nullptr);
+
+    idx_t oldNt = cpuIndex_->ntotal;
+    const idx_t autoReserveMinBatch = getIvfAutoReserveMinBatch();
+    if (gpuIvf_ && autoReserveMinBatch > 0 && n >= autoReserveMinBatch) {
+        // Pre-reserve before append to reduce relayout spikes on large batches.
+        gpuIvf_->reserveMemory(oldNt + n);
+    }
 
     // Compute list assignments for this batch.
     std::vector<idx_t> list_nos(n);
@@ -423,6 +452,9 @@ void MetalIndexIVFFlat::search(
 
     id<MTLDevice>      device = resources_->getDevice();
     id<MTLCommandQueue> queue = resources_->getCommandQueue();
+    if (gpuIvf_) {
+        gpuIvf_->ensureInterleavedLayoutUpToDate();
+    }
 
     const bool hasFlatCodes = gpuIvf_ && gpuIvf_->codesBuffer();
     const bool hasInterleavedCodes =
@@ -623,6 +655,9 @@ void MetalIndexIVFFlat::search_preassigned(
 
     id<MTLDevice>       device = resources_->getDevice();
     id<MTLCommandQueue> queue  = resources_->getCommandQueue();
+    if (gpuIvf_) {
+        gpuIvf_->ensureInterleavedLayoutUpToDate();
+    }
 
     const bool hasFlatCodes = gpuIvf_ && gpuIvf_->codesBuffer();
     const bool hasInterleavedCodes =

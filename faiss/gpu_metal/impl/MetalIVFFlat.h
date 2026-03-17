@@ -109,6 +109,8 @@ public:
     bool interleavedLayout() const {
         return interleavedLayout_;
     }
+    /// Rebuild interleaved buffers from host storage if they are stale.
+    void ensureInterleavedLayoutUpToDate();
 
 private:
     bool ensureCapacityForAppend_(const std::vector<size_t>& addPerList);
@@ -116,6 +118,7 @@ private:
             const std::vector<size_t>& oldLength,
             const std::vector<size_t>& addPerList,
             bool forceFullUpload);
+    void rebuildInterleavedBuffers_();
 
     std::shared_ptr<MetalResources> resources_;
 
@@ -146,6 +149,7 @@ private:
     // Interleaved codes layout (blocks of 32 vectors, dims interleaved)
     id<MTLBuffer> interleavedCodesBuf_;
     id<MTLBuffer> interleavedCodesOffsetBuf_; // (nlist) uint32_t, float offsets
+    bool interleavedDirty_ = true;
 
     static constexpr int kInterleavedGroupSize = 32;
 };

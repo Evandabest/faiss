@@ -9,10 +9,12 @@
  */
 
 #import <chrono>
+#import <cstdlib>
 #import <cstdio>
 #import <cstring>
 #import <memory>
 #import <numeric>
+#import <string>
 #import <vector>
 
 #include <faiss/IndexFlat.h>
@@ -38,6 +40,31 @@ struct AppendStats {
     double vecsPerSec = 0.0;
     int numBatches = 0;
 };
+
+std::vector<int> parseIntList(const char* s) {
+    std::vector<int> out;
+    if (!s || s[0] == '\0') {
+        return out;
+    }
+    std::string str(s);
+    size_t start = 0;
+    while (start < str.size()) {
+        size_t comma = str.find(',', start);
+        std::string tok =
+                (comma == std::string::npos) ? str.substr(start) : str.substr(start, comma - start);
+        if (!tok.empty()) {
+            int v = std::atoi(tok.c_str());
+            if (v >= 0) {
+                out.push_back(v);
+            }
+        }
+        if (comma == std::string::npos) {
+            break;
+        }
+        start = comma + 1;
+    }
+    return out;
+}
 
 AppendStats summarizeBatchTimes(
         const std::vector<double>& batchMs,
@@ -124,6 +151,8 @@ int main(int argc, char** argv) {
     int trainVecs = 65536;
     int maxBatches = 256;
     std::vector<int> batchSizes = {128, 512, 2048, 8192};
+    std::vector<int> autoReserveSweep = {0, 512, 1024, 2048, 4096};
+    int singleAutoReserveMinBatch = -1;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--total") == 0 && i + 1 < argc) {
@@ -136,7 +165,19 @@ int main(int argc, char** argv) {
             nlist = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--max-batches") == 0 && i + 1 < argc) {
             maxBatches = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--auto-reserve-min-batch") == 0 &&
+                   i + 1 < argc) {
+            singleAutoReserveMinBatch = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--auto-reserve-sweep") == 0 &&
+                   i + 1 < argc) {
+            autoReserveSweep = parseIntList(argv[++i]);
         }
+    }
+    if (singleAutoReserveMinBatch >= 0) {
+        autoReserveSweep = {singleAutoReserveMinBatch};
+    }
+    if (autoReserveSweep.empty()) {
+        autoReserveSweep = {1024};
     }
 
     printf("=== Faiss Metal vs CPU IVFFlat Append Benchmark ===\n\n");
@@ -144,6 +185,10 @@ int main(int argc, char** argv) {
     printf("Batch sizes:");
     for (int bs : batchSizes) {
         printf(" %d", bs);
+    }
+    printf("\nAuto-reserve sweep:");
+    for (int t : autoReserveSweep) {
+        printf(" %d", t);
     }
     printf("\n\n");
 
@@ -181,10 +226,6 @@ int main(int argc, char** argv) {
         faiss::IndexIVFFlat cpuIndex(&coarseCpu, d, nlist, faiss::METRIC_L2);
         cpuIndex.train(trainVecs, trainData.data());
 
-        faiss::gpu_metal::MetalIndexIVFFlat metalIndex(
-                metalRes->getResources(), d, nlist, faiss::METRIC_L2, 0.0f);
-        metalIndex.train(trainVecs, trainData.data());
-
         AppendStats cpuStats = runAppendBatches(
                 [&](int n, const float* x, const faiss::idx_t* ids) {
                     cpuIndex.add_with_ids(n, x, ids);
@@ -195,33 +236,57 @@ int main(int argc, char** argv) {
                 totalVecs,
                 batchSize);
 
-        AppendStats metalStats = runAppendBatches(
-                [&](int n, const float* x, const faiss::idx_t* ids) {
-                    metalIndex.add_with_ids(n, x, ids);
-                },
-                addData,
-                addIds,
-                d,
-                totalVecs,
-                batchSize);
-
         printStats("cpu", d, nlist, totalVecs, batchSize, cpuStats);
-        printStats("metal", d, nlist, totalVecs, batchSize, metalStats);
-        const double speedup =
-                (metalStats.avgBatchMs > 0.0)
-                ? (cpuStats.avgBatchMs / metalStats.avgBatchMs)
-                : 0.0;
-        printf("speedup (CPU/Metal): %.3fx\n", speedup);
-        printf(
-                "SUMMARY,index=IVFFlatAddCompare,d=%d,nlist=%d,total=%d,batch=%d,"
-                "speedup_cpu_over_metal=%.6f,cpu_q4_over_q1=%.6f,metal_q4_over_q1=%.6f\n",
-                d,
-                nlist,
-                totalVecs,
-                batchSize,
-                speedup,
-                cpuStats.lastOverFirst,
-                metalStats.lastOverFirst);
+
+        const char* oldThresholdEnv = std::getenv("FAISS_METAL_IVF_AUTO_RESERVE_MIN_BATCH");
+        std::string oldThreshold = oldThresholdEnv ? oldThresholdEnv : "";
+        const bool hadOldThreshold = oldThresholdEnv != nullptr;
+
+        for (int threshold : autoReserveSweep) {
+            char thresholdBuf[32];
+            std::snprintf(thresholdBuf, sizeof(thresholdBuf), "%d", threshold);
+            setenv("FAISS_METAL_IVF_AUTO_RESERVE_MIN_BATCH", thresholdBuf, 1);
+
+            faiss::gpu_metal::MetalIndexIVFFlat thresholdMetalIndex(
+                    metalRes->getResources(), d, nlist, faiss::METRIC_L2, 0.0f);
+            thresholdMetalIndex.train(trainVecs, trainData.data());
+
+            AppendStats metalStats = runAppendBatches(
+                    [&](int n, const float* x, const faiss::idx_t* ids) {
+                        thresholdMetalIndex.add_with_ids(n, x, ids);
+                    },
+                    addData,
+                    addIds,
+                    d,
+                    totalVecs,
+                    batchSize);
+
+            printf("auto_reserve_min_batch=%d\n", threshold);
+            printStats("metal", d, nlist, totalVecs, batchSize, metalStats);
+            const double speedup =
+                    (metalStats.avgBatchMs > 0.0)
+                    ? (cpuStats.avgBatchMs / metalStats.avgBatchMs)
+                    : 0.0;
+            printf("speedup (CPU/Metal): %.3fx\n", speedup);
+            printf(
+                    "SUMMARY,index=IVFFlatAddCompare,d=%d,nlist=%d,total=%d,batch=%d,"
+                    "auto_reserve_min_batch=%d,speedup_cpu_over_metal=%.6f,"
+                    "cpu_q4_over_q1=%.6f,metal_q4_over_q1=%.6f\n",
+                    d,
+                    nlist,
+                    totalVecs,
+                    batchSize,
+                    threshold,
+                    speedup,
+                    cpuStats.lastOverFirst,
+                    metalStats.lastOverFirst);
+        }
+
+        if (hadOldThreshold) {
+            setenv("FAISS_METAL_IVF_AUTO_RESERVE_MIN_BATCH", oldThreshold.c_str(), 1);
+        } else {
+            unsetenv("FAISS_METAL_IVF_AUTO_RESERVE_MIN_BATCH");
+        }
         printf("\n");
     }
 
