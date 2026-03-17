@@ -33,6 +33,18 @@ namespace gpu_metal {
 /// may move list scanning to GPU.
 class MetalIndexIVFFlat : public MetalIndex {
 public:
+    struct AppendDebugStats {
+        size_t relayoutEvents = 0;
+        size_t movedLists = 0;
+        size_t movedVectors = 0;
+        size_t reusedSegmentAllocs = 0;
+        size_t tailSegmentAllocs = 0;
+        size_t reusedCapacityVecs = 0;
+        size_t tailCapacityVecs = 0;
+        size_t tailShrinkEvents = 0;
+        size_t tailShrunkVecs = 0;
+    };
+
     /// Construct empty IVFFlat index with its own CPU quantizer.
     MetalIndexIVFFlat(
             std::shared_ptr<MetalResources> resources,
@@ -124,6 +136,8 @@ public:
     size_t nprobe() const;
     bool interleavedLayout() const;
     faiss::gpu::IndicesOptions indicesOptions() const;
+    AppendDebugStats appendDebugStats() const;
+    void resetAppendDebugStats();
 
 private:
     std::unique_ptr<faiss::IndexIVFFlat> cpuIndex_;

@@ -247,19 +247,25 @@ int main(int argc, char** argv) {
             std::snprintf(thresholdBuf, sizeof(thresholdBuf), "%d", threshold);
             setenv("FAISS_METAL_IVF_AUTO_RESERVE_MIN_BATCH", thresholdBuf, 1);
 
-            faiss::gpu_metal::MetalIndexIVFFlat thresholdMetalIndex(
-                    metalRes->getResources(), d, nlist, faiss::METRIC_L2, 0.0f);
-            thresholdMetalIndex.train(trainVecs, trainData.data());
+            AppendStats metalStats;
+            faiss::gpu_metal::MetalIndexIVFFlat::AppendDebugStats dbg;
+            @autoreleasepool {
+                faiss::gpu_metal::MetalIndexIVFFlat thresholdMetalIndex(
+                        metalRes->getResources(), d, nlist, faiss::METRIC_L2, 0.0f);
+                thresholdMetalIndex.train(trainVecs, trainData.data());
+                thresholdMetalIndex.resetAppendDebugStats();
 
-            AppendStats metalStats = runAppendBatches(
-                    [&](int n, const float* x, const faiss::idx_t* ids) {
-                        thresholdMetalIndex.add_with_ids(n, x, ids);
-                    },
-                    addData,
-                    addIds,
-                    d,
-                    totalVecs,
-                    batchSize);
+                metalStats = runAppendBatches(
+                        [&](int n, const float* x, const faiss::idx_t* ids) {
+                            thresholdMetalIndex.add_with_ids(n, x, ids);
+                        },
+                        addData,
+                        addIds,
+                        d,
+                        totalVecs,
+                        batchSize);
+                dbg = thresholdMetalIndex.appendDebugStats();
+            }
 
             printf("auto_reserve_min_batch=%d\n", threshold);
             printStats("metal", d, nlist, totalVecs, batchSize, metalStats);
@@ -269,9 +275,25 @@ int main(int argc, char** argv) {
                     : 0.0;
             printf("speedup (CPU/Metal): %.3fx\n", speedup);
             printf(
+                    "allocator: relayouts=%zu moved_lists=%zu moved_vecs=%zu "
+                    "reuse_allocs=%zu tail_allocs=%zu reuse_vecs=%zu tail_vecs=%zu "
+                    "tail_shrink_events=%zu tail_shrunk_vecs=%zu\n",
+                    dbg.relayoutEvents,
+                    dbg.movedLists,
+                    dbg.movedVectors,
+                    dbg.reusedSegmentAllocs,
+                    dbg.tailSegmentAllocs,
+                    dbg.reusedCapacityVecs,
+                    dbg.tailCapacityVecs,
+                    dbg.tailShrinkEvents,
+                    dbg.tailShrunkVecs);
+            printf(
                     "SUMMARY,index=IVFFlatAddCompare,d=%d,nlist=%d,total=%d,batch=%d,"
                     "auto_reserve_min_batch=%d,speedup_cpu_over_metal=%.6f,"
-                    "cpu_q4_over_q1=%.6f,metal_q4_over_q1=%.6f\n",
+                    "cpu_q4_over_q1=%.6f,metal_q4_over_q1=%.6f,"
+                    "relayouts=%zu,moved_lists=%zu,moved_vecs=%zu,"
+                    "reuse_allocs=%zu,tail_allocs=%zu,reuse_vecs=%zu,tail_vecs=%zu,"
+                    "tail_shrink_events=%zu,tail_shrunk_vecs=%zu\n",
                     d,
                     nlist,
                     totalVecs,
@@ -279,7 +301,16 @@ int main(int argc, char** argv) {
                     threshold,
                     speedup,
                     cpuStats.lastOverFirst,
-                    metalStats.lastOverFirst);
+                    metalStats.lastOverFirst,
+                    dbg.relayoutEvents,
+                    dbg.movedLists,
+                    dbg.movedVectors,
+                    dbg.reusedSegmentAllocs,
+                    dbg.tailSegmentAllocs,
+                    dbg.reusedCapacityVecs,
+                    dbg.tailCapacityVecs,
+                    dbg.tailShrinkEvents,
+                    dbg.tailShrunkVecs);
         }
 
         if (hadOldThreshold) {

@@ -24,7 +24,7 @@ constexpr size_t kDefaultIvfQueryTileBudgetBytes = 256ULL * 1024 * 1024;
 constexpr size_t kMinIvfQueryTileBudgetBytes = 16ULL * 1024 * 1024;
 constexpr size_t kMaxIvfQueryTileBudgetBytes = 4ULL * 1024 * 1024 * 1024;
 constexpr faiss::idx_t kIVFFlatSupportedMaxK = 1024;
-constexpr faiss::idx_t kAutoReserveMinBatch = 1024;
+constexpr faiss::idx_t kAutoReserveMinBatch = 0;
 
 size_t getIvfQueryTileBudgetBytes() {
     const char* envBytes = std::getenv("FAISS_METAL_IVF_QUERY_TILE_BYTES");
@@ -844,6 +844,30 @@ bool MetalIndexIVFFlat::interleavedLayout() const {
 
 faiss::gpu::IndicesOptions MetalIndexIVFFlat::indicesOptions() const {
     return indicesOptions_;
+}
+
+MetalIndexIVFFlat::AppendDebugStats MetalIndexIVFFlat::appendDebugStats() const {
+    AppendDebugStats out{};
+    if (!gpuIvf_) {
+        return out;
+    }
+    const auto& s = gpuIvf_->appendDebugStats();
+    out.relayoutEvents = s.relayoutEvents;
+    out.movedLists = s.movedLists;
+    out.movedVectors = s.movedVectors;
+    out.reusedSegmentAllocs = s.reusedSegmentAllocs;
+    out.tailSegmentAllocs = s.tailSegmentAllocs;
+    out.reusedCapacityVecs = s.reusedCapacityVecs;
+    out.tailCapacityVecs = s.tailCapacityVecs;
+    out.tailShrinkEvents = s.tailShrinkEvents;
+    out.tailShrunkVecs = s.tailShrunkVecs;
+    return out;
+}
+
+void MetalIndexIVFFlat::resetAppendDebugStats() {
+    if (gpuIvf_) {
+        gpuIvf_->resetAppendDebugStats();
+    }
 }
 
 void MetalIndexIVFFlat::copyFrom(const faiss::IndexIVFFlat* src) {

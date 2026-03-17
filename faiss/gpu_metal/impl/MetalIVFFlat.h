@@ -31,6 +31,18 @@ namespace gpu_metal {
 /// lists are described by (listOffset[list], listLength[list]).
 class MetalIVFFlatImpl {
 public:
+    struct AppendDebugStats {
+        size_t relayoutEvents = 0;
+        size_t movedLists = 0;
+        size_t movedVectors = 0;
+        size_t reusedSegmentAllocs = 0;
+        size_t tailSegmentAllocs = 0;
+        size_t reusedCapacityVecs = 0;
+        size_t tailCapacityVecs = 0;
+        size_t tailShrinkEvents = 0;
+        size_t tailShrunkVecs = 0;
+    };
+
     MetalIVFFlatImpl(
             std::shared_ptr<MetalResources> resources,
             int dim,
@@ -111,14 +123,32 @@ public:
     }
     /// Rebuild interleaved buffers from host storage if they are stale.
     void ensureInterleavedLayoutUpToDate();
+    const AppendDebugStats& appendDebugStats() const {
+        return appendStats_;
+    }
+    void resetAppendDebugStats() {
+        appendStats_ = AppendDebugStats{};
+    }
 
 private:
-    bool ensureCapacityForAppend_(const std::vector<size_t>& addPerList);
+    struct FreeSegment {
+        size_t offset = 0;
+        size_t length = 0;
+    };
+
+    bool ensureCapacityForAppend_(
+            const std::vector<size_t>& addPerList,
+            std::vector<uint8_t>* movedLists);
     void uploadToGpu_(
             const std::vector<size_t>& oldLength,
             const std::vector<size_t>& addPerList,
+            const std::vector<uint8_t>& movedLists,
             bool forceFullUpload);
     void rebuildInterleavedBuffers_();
+    size_t allocSegment_(size_t length);
+    void freeSegment_(size_t offset, size_t length, bool allowTailShrink = true);
+    void coalesceFreeSegments_();
+    void tryShrinkTail_();
 
     std::shared_ptr<MetalResources> resources_;
 
@@ -137,6 +167,8 @@ private:
     // Host copies of IVF data (flat layout)
     std::vector<float> hostCodes_; // size = totalVecs_ * dim_
     std::vector<idx_t> hostIds_;   // size = totalVecs_
+    std::vector<FreeSegment> freeSegments_;
+    AppendDebugStats appendStats_;
     size_t totalVecs_;
     size_t totalCapacityVecs_;
 

@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <utility>
 
 #include <faiss/impl/FaissAssert.h>
 #include <faiss/invlists/DirectMap.h>
@@ -25,6 +26,21 @@ inline uint32_t checkedToU32(size_t v, const char* what) {
         FAISS_THROW_MSG(what);
     }
     return static_cast<uint32_t>(v);
+}
+
+constexpr size_t kDefaultMinTailShrinkVecs = 8192;
+
+size_t getTailShrinkMinVecs() {
+    const char* env = std::getenv("FAISS_METAL_IVF_TAIL_SHRINK_MIN_VECS");
+    if (!env || env[0] == '\0') {
+        return kDefaultMinTailShrinkVecs;
+    }
+    char* end = nullptr;
+    unsigned long long v = std::strtoull(env, &end, 10);
+    if (end == env) {
+        return kDefaultMinTailShrinkVecs;
+    }
+    return (size_t)v;
 }
 } // namespace
 
@@ -66,6 +82,8 @@ MetalIVFFlatImpl::~MetalIVFFlatImpl() {
 void MetalIVFFlatImpl::reset() {
     hostCodes_.clear();
     hostIds_.clear();
+    freeSegments_.clear();
+    appendStats_ = AppendDebugStats{};
     totalVecs_ = 0;
     totalCapacityVecs_ = 0;
 
@@ -105,27 +123,23 @@ void MetalIVFFlatImpl::reserveMemory(idx_t totalVecs) {
         return;
     }
     size_t t = (size_t)totalVecs;
-    if (t <= totalVecs_) {
+    if (t <= totalCapacityVecs_) {
         return;
     }
-    // Distribute reserve evenly across lists and over-allocate by one on the first
-    // rem lists to preserve total target.
-    size_t base = (nlist_ > 0) ? (t / (size_t)nlist_) : 0;
-    size_t rem = (nlist_ > 0) ? (t % (size_t)nlist_) : 0;
-
-    std::vector<size_t> reservePerList((size_t)nlist_, 0);
-    for (size_t l = 0; l < (size_t)nlist_; ++l) {
-        size_t target = base + (l < rem ? 1 : 0);
-        reservePerList[l] =
-                target > listLength_[l] ? (target - listLength_[l]) : 0;
-    }
-    ensureCapacityForAppend_(reservePerList);
+    const size_t oldCap = totalCapacityVecs_;
+    const size_t extra = t - oldCap;
+    hostCodes_.resize(t * (size_t)dim_, 0.0f);
+    hostIds_.resize(t, (idx_t)-1);
+    totalCapacityVecs_ = t;
+    // Add reserved tail as a reusable free segment for future list growth.
+    freeSegment_(oldCap, extra, false);
 
     // Materialize GPU allocations up-front so future appends can avoid
     // reallocating until reserved capacity is exceeded.
     std::vector<size_t> oldLength((size_t)nlist_, 0);
     std::vector<size_t> addPerList((size_t)nlist_, 0);
-    uploadToGpu_(oldLength, addPerList, true);
+    std::vector<uint8_t> movedLists((size_t)nlist_, 0);
+    uploadToGpu_(oldLength, addPerList, movedLists, true);
 }
 
 void MetalIVFFlatImpl::appendVectors(
@@ -158,7 +172,8 @@ void MetalIVFFlatImpl::appendVectors(
     }
 
     const std::vector<size_t> oldLength = listLength_;
-    bool forceFullUpload = ensureCapacityForAppend_(addPerList);
+    std::vector<uint8_t> movedLists((size_t)nlist_, 0);
+    bool forceFullUpload = ensureCapacityForAppend_(addPerList, &movedLists);
 
     for (idx_t i = 0; i < n; ++i) {
         idx_t list = list_nos[i];
@@ -196,103 +211,181 @@ void MetalIVFFlatImpl::appendVectors(
     }
 
     totalVecs_ += batchNew;
-    uploadToGpu_(oldLength, addPerList, forceFullUpload);
+    uploadToGpu_(oldLength, addPerList, movedLists, forceFullUpload);
 }
 
 bool MetalIVFFlatImpl::ensureCapacityForAppend_(
-        const std::vector<size_t>& addPerList) {
-    std::vector<size_t> required((size_t)nlist_, 0);
-    std::vector<size_t> newCapacity = listCapacity_;
-    bool needsRelayout = false;
-    size_t requiredTotal = 0;
+        const std::vector<size_t>& addPerList,
+        std::vector<uint8_t>* movedLists) {
+    if (movedLists) {
+        movedLists->assign((size_t)nlist_, 0);
+    }
+
+    std::vector<size_t> newCap((size_t)nlist_, 0);
+    bool anyMoved = false;
 
     for (size_t l = 0; l < (size_t)nlist_; ++l) {
-        required[l] = listLength_[l] + addPerList[l];
-        requiredTotal += required[l];
-        if (required[l] <= newCapacity[l]) {
+        size_t need = listLength_[l] + addPerList[l];
+        if (need <= listCapacity_[l]) {
             continue;
         }
-
-        size_t cap = std::max<size_t>(1, newCapacity[l]);
-        while (cap < required[l]) {
+        size_t cap = std::max<size_t>(1, listCapacity_[l]);
+        while (cap < need) {
             cap *= 2;
         }
-        newCapacity[l] = cap;
-        needsRelayout = true;
+        newCap[l] = cap;
+        anyMoved = true;
+        if (movedLists) {
+            (*movedLists)[l] = 1;
+        }
     }
 
-    if (!needsRelayout) {
+    if (!anyMoved) {
         return false;
     }
-
-    // When we relayout, reserve global headroom so lists don't overflow one-by-one.
-    size_t minCapacityTotal = 0;
-    for (size_t l = 0; l < (size_t)nlist_; ++l) {
-        minCapacityTotal += std::max(newCapacity[l], required[l]);
-    }
-    size_t targetCapacityTotal =
-            std::max(minCapacityTotal, std::max<size_t>(requiredTotal, totalCapacityVecs_) * 2);
-    size_t slack = targetCapacityTotal - minCapacityTotal;
-    if (slack > 0 && nlist_ > 0) {
-        size_t weightSum = 0;
-        for (size_t l = 0; l < (size_t)nlist_; ++l) {
-            weightSum += std::max<size_t>(required[l], 1);
-        }
-        if (weightSum > 0) {
-            size_t distributed = 0;
-            for (size_t l = 0; l < (size_t)nlist_; ++l) {
-                size_t w = std::max<size_t>(required[l], 1);
-                size_t extra = (slack * w) / weightSum;
-                newCapacity[l] += extra;
-                distributed += extra;
-            }
-            size_t rem = slack - distributed;
-            for (size_t l = 0; l < (size_t)nlist_ && rem > 0; ++l, --rem) {
-                newCapacity[l] += 1;
-            }
-        }
-    }
-
-    std::vector<size_t> newOffset((size_t)nlist_, 0);
-    size_t prefix = 0;
-    for (size_t l = 0; l < (size_t)nlist_; ++l) {
-        newOffset[l] = prefix;
-        prefix += newCapacity[l];
-    }
-    size_t newTotalCapacity = prefix;
-
-    std::vector<float> newCodes(newTotalCapacity * (size_t)dim_, 0.0f);
-    std::vector<idx_t> newIds(newTotalCapacity, (idx_t)-1);
+    appendStats_.relayoutEvents += 1;
 
     for (size_t l = 0; l < (size_t)nlist_; ++l) {
-        size_t len = listLength_[l];
-        if (len == 0) {
+        if (newCap[l] == 0) {
             continue;
         }
+
+        size_t len = listLength_[l];
         size_t oldOff = listOffset_[l];
-        size_t newOff = newOffset[l];
-        std::memcpy(
-                newCodes.data() + newOff * (size_t)dim_,
-                hostCodes_.data() + oldOff * (size_t)dim_,
-                len * (size_t)dim_ * sizeof(float));
-        std::memcpy(
-                newIds.data() + newOff,
-                hostIds_.data() + oldOff,
-                len * sizeof(idx_t));
+        size_t oldCap = listCapacity_[l];
+        size_t newOff = allocSegment_(newCap[l]);
+        appendStats_.movedLists += 1;
+        appendStats_.movedVectors += len;
+
+        if (len > 0) {
+            std::memcpy(
+                    hostCodes_.data() + newOff * (size_t)dim_,
+                    hostCodes_.data() + oldOff * (size_t)dim_,
+                    len * (size_t)dim_ * sizeof(float));
+            std::memcpy(
+                    hostIds_.data() + newOff,
+                    hostIds_.data() + oldOff,
+                    len * sizeof(idx_t));
+        }
+
+        listOffset_[l] = newOff;
+        listCapacity_[l] = newCap[l];
+        freeSegment_(oldOff, oldCap, true);
     }
 
-    hostCodes_.swap(newCodes);
-    hostIds_.swap(newIds);
-    listOffset_.swap(newOffset);
-    listCapacity_.swap(newCapacity);
-    totalCapacityVecs_ = newTotalCapacity;
-
     return true;
+}
+
+size_t MetalIVFFlatImpl::allocSegment_(size_t length) {
+    if (length == 0) {
+        return 0;
+    }
+
+    size_t bestIdx = (size_t)-1;
+    size_t bestLen = std::numeric_limits<size_t>::max();
+    for (size_t i = 0; i < freeSegments_.size(); ++i) {
+        const auto& seg = freeSegments_[i];
+        if (seg.length < length) {
+            continue;
+        }
+        if (seg.length < bestLen) {
+            bestLen = seg.length;
+            bestIdx = i;
+        }
+    }
+
+    if (bestIdx != (size_t)-1) {
+        auto seg = freeSegments_[bestIdx];
+        size_t out = seg.offset;
+        if (seg.length == length) {
+            freeSegments_.erase(freeSegments_.begin() + (long)bestIdx);
+        } else {
+            freeSegments_[bestIdx].offset += length;
+            freeSegments_[bestIdx].length -= length;
+        }
+        appendStats_.reusedSegmentAllocs += 1;
+        appendStats_.reusedCapacityVecs += length;
+        return out;
+    }
+
+    size_t out = totalCapacityVecs_;
+    totalCapacityVecs_ += length;
+    hostCodes_.resize(totalCapacityVecs_ * (size_t)dim_, 0.0f);
+    hostIds_.resize(totalCapacityVecs_, (idx_t)-1);
+    appendStats_.tailSegmentAllocs += 1;
+    appendStats_.tailCapacityVecs += length;
+    return out;
+}
+
+void MetalIVFFlatImpl::freeSegment_(
+        size_t offset,
+        size_t length,
+        bool allowTailShrink) {
+    if (length == 0) {
+        return;
+    }
+    freeSegments_.push_back({offset, length});
+    coalesceFreeSegments_();
+    if (allowTailShrink) {
+        tryShrinkTail_();
+    }
+}
+
+void MetalIVFFlatImpl::coalesceFreeSegments_() {
+    if (freeSegments_.empty()) {
+        return;
+    }
+    std::sort(
+            freeSegments_.begin(),
+            freeSegments_.end(),
+            [](const FreeSegment& a, const FreeSegment& b) {
+                return a.offset < b.offset;
+            });
+
+    std::vector<FreeSegment> merged;
+    merged.reserve(freeSegments_.size());
+    merged.push_back(freeSegments_[0]);
+    for (size_t i = 1; i < freeSegments_.size(); ++i) {
+        auto& back = merged.back();
+        const auto& cur = freeSegments_[i];
+        if (back.offset + back.length == cur.offset) {
+            back.length += cur.length;
+        } else {
+            merged.push_back(cur);
+        }
+    }
+    freeSegments_.swap(merged);
+}
+
+void MetalIVFFlatImpl::tryShrinkTail_() {
+    const size_t minTailShrinkVecs = getTailShrinkMinVecs();
+    if (minTailShrinkVecs == 0) {
+        return;
+    }
+    if (freeSegments_.empty()) {
+        return;
+    }
+    while (!freeSegments_.empty()) {
+        const auto& tail = freeSegments_.back();
+        if (tail.offset + tail.length != totalCapacityVecs_) {
+            break;
+        }
+        if (tail.length < minTailShrinkVecs) {
+            break;
+        }
+        totalCapacityVecs_ = tail.offset;
+        appendStats_.tailShrinkEvents += 1;
+        appendStats_.tailShrunkVecs += tail.length;
+        freeSegments_.pop_back();
+    }
+    hostCodes_.resize(totalCapacityVecs_ * (size_t)dim_);
+    hostIds_.resize(totalCapacityVecs_);
 }
 
 void MetalIVFFlatImpl::uploadToGpu_(
         const std::vector<size_t>& oldLength,
         const std::vector<size_t>& addPerList,
+        const std::vector<uint8_t>& movedLists,
         bool forceFullUpload) {
     if (!resources_ || !resources_->isAvailable()) {
         return;
@@ -368,20 +461,25 @@ void MetalIVFFlatImpl::uploadToGpu_(
     } else {
         for (size_t l = 0; l < (size_t)nlist_; ++l) {
             size_t add = addPerList[l];
-            if (add == 0) {
+            bool moved = (l < movedLists.size() && movedLists[l] != 0);
+            if (add == 0 && !moved) {
                 continue;
             }
-            size_t start = listOffset_[l] + oldLength[l];
+            size_t start = moved ? listOffset_[l] : (listOffset_[l] + oldLength[l]);
+            size_t count = moved ? listLength_[l] : add;
+            if (count == 0) {
+                continue;
+            }
 
             std::memcpy(
                     reinterpret_cast<idx_t*>([idsBuffer_ contents]) + start,
                     hostIds_.data() + start,
-                    add * sizeof(idx_t));
+                    count * sizeof(idx_t));
             std::memcpy(
                     reinterpret_cast<float*>([codesBuffer_ contents]) +
                             start * (size_t)dim_,
                     hostCodes_.data() + start * (size_t)dim_,
-                    add * (size_t)dim_ * sizeof(float));
+                    count * (size_t)dim_ * sizeof(float));
         }
     }
 
