@@ -9,7 +9,6 @@
 # Only included when FAISS_ENABLE_METAL=ON and platform is Apple.
 
 set(FAISS_METAL_SRC
-  MetalStub.mm
   MetalResources.mm
   MetalIndex.mm
   MetalFlatKernels.mm
