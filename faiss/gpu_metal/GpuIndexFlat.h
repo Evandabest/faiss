@@ -6,7 +6,7 @@
  * LICENSE file in the root directory of this source tree.
  *
  * Unified name for flat GPU index when Metal backend is built.
- * Include this when using the Metal backend for API parity with 
+ * Include this when using the Metal backend for API parity with
  * faiss::gpu::GpuIndexFlat.
  */
 

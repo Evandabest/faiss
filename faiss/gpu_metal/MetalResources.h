@@ -5,15 +5,16 @@
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *
- * This header uses Objective-C types (Metal framework: id, nil, MTLDevice, etc.).
- * For correct IDE/linter behavior, associate this file with "Objective-C++":
+ * This header uses Objective-C types (Metal framework: id, nil, MTLDevice,
+ * etc.). For correct IDE/linter behavior, associate this file with
+ * "Objective-C++":
  *
  */
 
 #pragma once
 
-#import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
 
 #include <cstddef>
 
@@ -34,7 +35,7 @@ enum MetalAllocType {
 /// Owns Metal device, command queue, and provides buffer allocation.
 /// Mirrors the roles of faiss::gpu::GpuResources for the Metal backend.
 class MetalResources {
-public:
+   public:
     MetalResources();
     ~MetalResources();
 
@@ -42,10 +43,14 @@ public:
     MetalResources& operator=(const MetalResources&) = delete;
 
     /// Returns the Metal device (nil if no Metal-capable device is available).
-    id<MTLDevice> getDevice() const { return device_; }
+    id<MTLDevice> getDevice() const {
+        return device_;
+    }
 
     /// Returns the command queue for the device (nil if device is nil).
-    id<MTLCommandQueue> getCommandQueue() const { return commandQueue_; }
+    id<MTLCommandQueue> getCommandQueue() const {
+        return commandQueue_;
+    }
 
     /// Allocates a buffer of the given size (bytes). Caller owns the returned
     /// buffer and must call deallocBuffer when done, or the buffer will leak.
@@ -56,13 +61,16 @@ public:
     /// not use the buffer after this call.
     void deallocBuffer(id<MTLBuffer> buffer, MetalAllocType type);
 
-    /// Blocks until all work submitted to the default command queue has completed.
+    /// Blocks until all work submitted to the default command queue has
+    /// completed.
     void synchronize();
 
     /// Returns true if the Metal device and queue are available.
-    bool isAvailable() const { return device_ != nil && commandQueue_ != nil; }
+    bool isAvailable() const {
+        return device_ != nil && commandQueue_ != nil;
+    }
 
-private:
+   private:
     id<MTLDevice> device_;
     id<MTLCommandQueue> commandQueue_;
 };

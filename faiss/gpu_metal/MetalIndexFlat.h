@@ -27,7 +27,7 @@ namespace gpu_metal {
 /// Flat index that stores vectors in an MTLBuffer. Supports L2 and inner
 /// product. Search runs on GPU via Metal compute (distance + top-k kernels).
 class MetalIndexFlat : public MetalIndex {
-public:
+   public:
     MetalIndexFlat(
             std::shared_ptr<MetalResources> resources,
             int dims,
@@ -51,7 +51,7 @@ public:
     /// Copy vectors to a CPU IndexFlat (e.g. for index_metal_gpu_to_cpu).
     void copyTo(::faiss::IndexFlat* index) const;
 
-private:
+   private:
     /// Ensures vector buffer can hold at least \p newNtotal vectors; grows
     /// buffer if necessary.
     void ensureCapacity(idx_t newNtotal);

@@ -18,12 +18,16 @@ namespace gpu_metal {
 
 /// Default Metal resources (single device). Use with index_cpu_to_metal_gpu.
 class StandardMetalResources {
-public:
+   public:
     StandardMetalResources();
-    std::shared_ptr<MetalResources> getResources() const { return res_; }
-    bool isAvailable() const { return res_ && res_->isAvailable(); }
+    std::shared_ptr<MetalResources> getResources() const {
+        return res_;
+    }
+    bool isAvailable() const {
+        return res_ && res_->isAvailable();
+    }
 
-private:
+   private:
     std::shared_ptr<MetalResources> res_;
 };
 

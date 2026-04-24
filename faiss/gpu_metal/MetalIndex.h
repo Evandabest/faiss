@@ -24,7 +24,7 @@ struct MetalIndexConfig {
 
 /// Base class for Metal-backed indexes. Mirrors faiss::gpu::GpuIndex.
 class MetalIndex : public faiss::Index {
-public:
+   public:
     MetalIndex(
             std::shared_ptr<MetalResources> resources,
             int dims,
@@ -32,13 +32,17 @@ public:
             float metricArg,
             MetalIndexConfig config = MetalIndexConfig());
 
-    int getDevice() const { return config_.device; }
-    std::shared_ptr<MetalResources> getResources() { return resources_; }
+    int getDevice() const {
+        return config_.device;
+    }
+    std::shared_ptr<MetalResources> getResources() {
+        return resources_;
+    }
     std::shared_ptr<const MetalResources> getResources() const {
         return resources_;
     }
 
-protected:
+   protected:
     std::shared_ptr<MetalResources> resources_;
     MetalIndexConfig config_;
 };
