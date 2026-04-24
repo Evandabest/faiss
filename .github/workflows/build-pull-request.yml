@@ -138,21 +138,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Install dependencies
-        run: brew install cmake libomp
-      - name: Build
-        run: |
-          cmake -B build \
-                -DFAISS_ENABLE_METAL=ON \
-                -DFAISS_ENABLE_GPU=OFF \
-                -DFAISS_ENABLE_PYTHON=OFF \
-                -DBUILD_TESTING=ON \
-                -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_PREFIX_PATH="$(brew --prefix libomp)" \
-                .
-          cmake --build build --target faiss_metal TestMetalIndexFlat -j$(sysctl -n hw.logicalcpu)
-      - name: Test
-        run: cd build && ctest -R TestMetalIndexFlat --output-on-failure
+      - name: Build and Test (cmake)
+        uses: ./.github/actions/build_cmake
+        with:
+          metal: ON
+          setup_conda: 'false'
+          upload_artifacts: 'false'
   linux-arm64-SVE-cmake:
     name: Linux arm64 SVE (cmake)
     needs: linux-x86_64-cmake
