@@ -64,24 +64,14 @@ void MetalIndexFlat::add(idx_t n, const float* x) {
     ensureCapacity(ntotal + n);
     float* ptr = (float*)[vectorsBuffer_ contents];
     std::memcpy(ptr + (size_t)ntotal * (size_t)d, x, (size_t)n * (size_t)d * sizeof(float));
-    for (idx_t i = 0; i < n; ++i) {
-        ids_.push_back(ntotal + i);
-    }
     ntotal += n;
 }
 
-void MetalIndexFlat::add_with_ids(idx_t n, const float* x, const idx_t* xids) {
-    if (n == 0) {
-        return;
-    }
-    FAISS_THROW_IF_NOT(xids != nullptr);
-    ensureCapacity(ntotal + n);
-    float* ptr = (float*)[vectorsBuffer_ contents];
-    std::memcpy(ptr + (size_t)ntotal * (size_t)d, x, (size_t)n * (size_t)d * sizeof(float));
-    for (idx_t i = 0; i < n; ++i) {
-        ids_.push_back(xids[i]);
-    }
-    ntotal += n;
+void MetalIndexFlat::add_with_ids(
+        idx_t /*n*/,
+        const float* /*x*/,
+        const idx_t* /*xids*/) {
+    FAISS_THROW_MSG("add_with_ids not supported");
 }
 
 void MetalIndexFlat::reset() {
@@ -90,7 +80,6 @@ void MetalIndexFlat::reset() {
         vectorsBuffer_ = nil;
     }
     capacityVecs_ = 0;
-    ids_.clear();
     ntotal = 0;
 }
 
@@ -156,7 +145,7 @@ void MetalIndexFlat::search(
     const int32_t* idxPtr = (const int32_t*)[outIdxBuf contents];
     for (idx_t i = 0; i < n * k; ++i) {
         int32_t idx = idxPtr[i];
-        labels[i] = (idx >= 0 && idx < (int32_t)ntotal) ? ids_[idx] : -1;
+        labels[i] = (idx >= 0 && idx < (int32_t)ntotal) ? (idx_t)idx : -1;
     }
 
     resources_->deallocBuffer(outDistBuf, MetalAllocType::TemporaryMemoryBuffer);

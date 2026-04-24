@@ -106,11 +106,9 @@ TEST_F(TestMetalIndexFlat, IP_AddAndSearch) {
     compareSearchResults(numQuery, k, refDist.data(), refLab.data(), testDist.data(), testLab.data());
 }
 
-TEST_F(TestMetalIndexFlat, AddWithIds) {
+TEST_F(TestMetalIndexFlat, AddWithIdsThrows) {
     const int dim = 4;
-    const int numVecs = 20;
-    const int numQuery = 3;
-    const int k = 2;
+    const int numVecs = 10;
 
     std::vector<float> vecs((size_t)numVecs * dim);
     faiss::float_rand(vecs.data(), vecs.size(), 42);
@@ -118,27 +116,12 @@ TEST_F(TestMetalIndexFlat, AddWithIds) {
     for (int i = 0; i < numVecs; ++i) {
         ids[i] = 1000 + (faiss::idx_t)i;
     }
-    std::vector<float> queries((size_t)numQuery * dim);
-    faiss::float_rand(queries.data(), queries.size(), 43);
 
-    faiss::IndexFlatL2 cpuIndex(dim);
     faiss::gpu_metal::MetalIndexFlat metalIndex(
             resources_, dim, faiss::METRIC_L2, 0.0f);
-    cpuIndex.add(numVecs, vecs.data());
-    metalIndex.add_with_ids(numVecs, vecs.data(), ids.data());
-
-    std::vector<float> refDist((size_t)numQuery * k);
-    std::vector<faiss::idx_t> refLab((size_t)numQuery * k, -1);
-    std::vector<float> testDist((size_t)numQuery * k);
-    std::vector<faiss::idx_t> testLab((size_t)numQuery * k, -1);
-
-    cpuIndex.search(numQuery, queries.data(), k, refDist.data(), refLab.data());
-    metalIndex.search(numQuery, queries.data(), k, testDist.data(), testLab.data());
-
-    for (int i = 0; i < numQuery * k; ++i) {
-        EXPECT_NEAR(refDist[i], testDist[i], kTolerance * (std::fabs(refDist[i]) + 1.0f));
-        EXPECT_EQ(testLab[i], ids[refLab[i]]) << "Metal should return stored ids";
-    }
+    EXPECT_THROW(
+            metalIndex.add_with_ids(numVecs, vecs.data(), ids.data()),
+            faiss::FaissException);
 }
 
 TEST_F(TestMetalIndexFlat, Reset) {

@@ -19,7 +19,6 @@ namespace faiss {
 struct IndexFlat;
 }
 #include <memory>
-#include <vector>
 
 namespace faiss {
 namespace gpu_metal {
@@ -60,9 +59,6 @@ class MetalIndexFlat : public MetalIndex {
     id<MTLBuffer> vectorsBuffer_;
     /// Capacity of vectorsBuffer_ in number of vectors (0 if buffer is nil).
     size_t capacityVecs_;
-    /// Stored ids for each vector (size ntotal). Used to map internal indices
-    /// to user-facing ids in search.
-    std::vector<idx_t> ids_;
 };
 
 } // namespace gpu_metal
