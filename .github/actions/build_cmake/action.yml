@@ -167,7 +167,7 @@ runs:
     - name: Setup macOS Metal environment
       if: inputs.metal == 'ON'
       shell: bash
-      run: brew install cmake libomp
+      run: brew install cmake libomp gflags
     - name: Build all targets
       if: inputs.metal != 'ON'
       shell: bash
@@ -198,7 +198,6 @@ runs:
               -DFAISS_ENABLE_METAL=ON \
               -DFAISS_ENABLE_GPU=OFF \
               -DFAISS_ENABLE_PYTHON=OFF \
-              -DFAISS_ENABLE_EXTRAS=OFF \
               -DBUILD_TESTING=ON \
               -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_PREFIX_PATH="$(brew --prefix libomp)" \
