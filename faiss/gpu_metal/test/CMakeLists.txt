@@ -10,7 +10,7 @@
 find_package(GTest CONFIG REQUIRED)
 include(GoogleTest)
 
-add_executable(TestMetalIndexFlat TestMetalIndexFlat.mm)
+add_executable(TestMetalIndexFlat TestMetalIndexFlat.cpp)
 target_link_libraries(TestMetalIndexFlat PRIVATE
     faiss_metal
     faiss
@@ -19,9 +19,5 @@ target_link_libraries(TestMetalIndexFlat PRIVATE
 target_include_directories(TestMetalIndexFlat PRIVATE
     ${PROJECT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../..
-)
-set_target_properties(TestMetalIndexFlat PROPERTIES
-    OBJCXX_STANDARD 17
-    OBJCXX_STANDARD_REQUIRED ON
 )
 gtest_discover_tests(TestMetalIndexFlat)
