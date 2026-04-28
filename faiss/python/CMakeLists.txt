@@ -57,6 +57,10 @@ macro(configure_swigfaiss source)
         COMPILE_DEFINITIONS FAISS_ENABLE_CUVS
       )
     endif()
+  elseif(FAISS_ENABLE_METAL)
+    set_source_files_properties(${source} PROPERTIES
+      COMPILE_DEFINITIONS FAISS_ENABLE_METAL
+    )
   endif()
 endmacro()
 
@@ -235,6 +239,8 @@ if(FAISS_ENABLE_GPU)
     target_link_libraries(swigfaiss_avx512_spr PRIVATE CUDA::cudart $<$<BOOL:${FAISS_ENABLE_CUVS}>:cuvs::cuvs>)
     target_link_libraries(swigfaiss_sve PRIVATE CUDA::cudart $<$<BOOL:${FAISS_ENABLE_CUVS}>:cuvs::cuvs>)
   endif()
+elseif(FAISS_ENABLE_METAL)
+  target_link_libraries(swigfaiss PRIVATE faiss_metal)
 endif()
 
 find_package(OpenMP REQUIRED)
