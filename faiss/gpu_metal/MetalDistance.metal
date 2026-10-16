@@ -2616,7 +2616,8 @@ kernel void ivfsq_scan(
     device const float* ranges [[buffer(7)]],
     device float* distances [[buffer(8)]],
     device long* labels [[buffer(9)]],
-    constant uint* p [[buffer(10)]],
+    device const float* coarseScores [[buffer(10)]],
+    constant uint* p [[buffer(11)]],
     uint qi [[threadgroup_position_in_grid]],
     uint tid [[thread_position_in_threadgroup]]) {
     uint d = p[1], k = p[2], nprobe = p[3];
@@ -2638,7 +2639,7 @@ kernel void ivfsq_scan(
                 for (uint dim = 0; dim < d; ++dim) {
                     float decoded = p[5]
                         ? float(as_type<half>(ushort(ushort(code[2*dim]) | (ushort(code[2*dim+1]) << 8))))
-                        : ranges[dim] + (float(code[dim]) + 0.5f) * ranges[d + dim] / 255.0f;
+                        : ranges[dim] + ((float(code[dim]) + 0.5f) / 255.0f) * ranges[d + dim];
                     float q = queries[ulong(qi) * d + dim];
                     // L2 follows the CPU residual-query formula; IP adds the
                     // coarse dot product after accumulating decoded residuals.
@@ -2646,12 +2647,8 @@ kernel void ivfsq_scan(
                     float delta = q - decoded;
                     score += l2 ? delta * delta : q * decoded;
                 }
-                if (p[6] && !l2) {
-                    float coarse = 0;
-                    for (uint dim = 0; dim < d; ++dim)
-                        coarse += queries[ulong(qi)*d+dim] * centroids[ulong(list)*d+dim];
-                    score += coarse;
-                }
+                if (p[6] && !l2)
+                    score += coarseScores[ulong(qi)*nprobe+probe];
                 ds[kept+j] = score;
                 ix[kept+j] = ids[v];
             }

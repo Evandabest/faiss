@@ -27,10 +27,11 @@ void MetalKernels::encodeIVFSQScan(id<MTLComputeCommandEncoder> encoder,
                                   const uint32_t* params) {
     auto state = pipeline("ivfsq_scan");
     FAISS_THROW_IF_NOT(state && state.maxTotalThreadsPerThreadgroup >= 256);
+    FAISS_THROW_IF_NOT(state.staticThreadgroupMemoryLength <= device_.maxThreadgroupMemoryLength);
     [encoder setComputePipelineState:state];
-    for (NSUInteger i = 0; i < 10; ++i)
+    for (NSUInteger i = 0; i < 11; ++i)
         [encoder setBuffer:buffers[i] offset:0 atIndex:i];
-    [encoder setBytes:params length:9*sizeof(uint32_t) atIndex:10];
+    [encoder setBytes:params length:9*sizeof(uint32_t) atIndex:11];
     [encoder dispatchThreadgroups:MTLSizeMake(params[0],1,1)
            threadsPerThreadgroup:MTLSizeMake(256,1,1)];
 }
