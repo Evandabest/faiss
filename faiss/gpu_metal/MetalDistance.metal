@@ -1737,8 +1737,15 @@ constant constexpr uint PQPRE_MAX_K = 512;
 constant constexpr uint PQPRE_CAND = PQPRE_MAX_K + PQPRE_SEG; // 1024
 constant constexpr uint PQPRE_LUT_MAX = 16 * 256; // M <= 16
 
+// Invalid candidates always sort after valid labels, including infinite scores.
+inline bool ivfsq_before(float a, long ai, float b, long bi, uint want_min) {
+    if (ai < 0) return false;
+    if (bi < 0) return true;
+    return a == b ? ai < bi : (want_min ? a < b : a > b);
+}
+
 // Bitonic sort over tgDist/tgIdx[0..n), n a power of two. Sorted best-first.
-template <typename IndexT, uint ThreadgroupSize = PQPRE_TG>
+template <typename IndexT, uint ThreadgroupSize = PQPRE_TG, bool Exact = false>
 inline void ivf_tg_bitonic(
     threadgroup float* tgDist,
     threadgroup IndexT* tgIdx,
@@ -1752,10 +1759,10 @@ inline void ivf_tg_bitonic(
                 uint partner = idx ^ j;
                 if (partner < n && partner > idx) {
                     bool ascending = ((idx & k2) == 0);
-                    bool pB = ivf_better(
+                    bool pB = Exact ? ivfsq_before(tgDist[partner], tgIdx[partner], tgDist[idx], tgIdx[idx], want_min) : ivf_better(
                             tgDist[partner], tgIdx[partner],
                             tgDist[idx], tgIdx[idx], want_min);
-                    bool iB = ivf_better(
+                    bool iB = Exact ? ivfsq_before(tgDist[idx], tgIdx[idx], tgDist[partner], tgIdx[partner], want_min) : ivf_better(
                             tgDist[idx], tgIdx[idx],
                             tgDist[partner], tgIdx[partner], want_min);
                     if (ascending ? pB : iB) {
@@ -2592,5 +2599,77 @@ kernel void hamming_distance_topk(
         outDist[ulong(qi) * k + i] = bestDist[i];
         outIdx[ulong(qi) * k + i] =
                 bestIds[i] == 0xffffffffu ? -1L : long(bestIds[i]);
+    }
+}
+
+// Exact SQ scan: one threadgroup per query, retaining top-k across segments
+// and probes. No dimension-sized threadgroup arrays or candidate truncation.
+// params: nq, d, k, nprobe, nlist, fp16, residual, L2, code_size.
+kernel void ivfsq_scan(
+    device const float* queries [[buffer(0)]],
+    device const uchar* codes [[buffer(1)]],
+    device const long* ids [[buffer(2)]],
+    device const uint* offsets [[buffer(3)]],
+    device const uint* lengths [[buffer(4)]],
+    device const int* assignments [[buffer(5)]],
+    device const float* centroids [[buffer(6)]],
+    device const float* ranges [[buffer(7)]],
+    device float* distances [[buffer(8)]],
+    device long* labels [[buffer(9)]],
+    constant uint* p [[buffer(10)]],
+    uint qi [[threadgroup_position_in_grid]],
+    uint tid [[thread_position_in_threadgroup]]) {
+    uint d = p[1], k = p[2], nprobe = p[3];
+    bool l2 = p[7];
+    float sentinel = l2 ? MAXFLOAT : -MAXFLOAT;
+    threadgroup float ds[1024];
+    threadgroup long ix[1024];
+    uint kept = 0;
+    for (uint probe = 0; probe < nprobe; ++probe) {
+        int list = assignments[ulong(qi) * nprobe + probe];
+        if (list < 0 || uint(list) >= p[4]) continue;
+        uint len = lengths[list];
+        for (uint start = 0; start < len;) {
+            uint count = min(512u, len - start);
+            for (uint j = tid; j < count; j += 256) {
+                ulong v = ulong(offsets[list]) + start + j;
+                device const uchar* code = codes + v * p[8];
+                float score = 0;
+                for (uint dim = 0; dim < d; ++dim) {
+                    float decoded = p[5]
+                        ? float(as_type<half>(ushort(ushort(code[2*dim]) | (ushort(code[2*dim+1]) << 8))))
+                        : ranges[dim] + (float(code[dim]) + 0.5f) * ranges[d + dim] / 255.0f;
+                    float q = queries[ulong(qi) * d + dim];
+                    // L2 follows the CPU residual-query formula; IP adds the
+                    // coarse dot product after accumulating decoded residuals.
+                    if (p[6] && l2) q -= centroids[ulong(list) * d + dim];
+                    float delta = q - decoded;
+                    score += l2 ? delta * delta : q * decoded;
+                }
+                if (p[6] && !l2) {
+                    float coarse = 0;
+                    for (uint dim = 0; dim < d; ++dim)
+                        coarse += queries[ulong(qi)*d+dim] * centroids[ulong(list)*d+dim];
+                    score += coarse;
+                }
+                ds[kept+j] = score;
+                ix[kept+j] = ids[v];
+            }
+            uint total = kept + count;
+            uint padded = ivf_next_pow2(total);
+            for (uint j = total + tid; j < padded; j += 256) {
+                ds[j] = sentinel;
+                ix[j] = -1;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            ivf_tg_bitonic<long, 256, true>(ds, ix, padded, tid, l2);
+            kept = min(k, total);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            start += count;
+        }
+    }
+    for (uint j = tid; j < k; j += 256) {
+        distances[ulong(qi)*k+j] = j < kept ? ds[j] : sentinel;
+        labels[ulong(qi)*k+j] = j < kept ? ix[j] : -1;
     }
 }

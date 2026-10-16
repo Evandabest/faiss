@@ -22,6 +22,20 @@
 namespace faiss {
 namespace gpu_metal {
 
+void MetalKernels::encodeIVFSQScan(id<MTLComputeCommandEncoder> encoder,
+                                  id<MTLBuffer> __unsafe_unretained const* buffers,
+                                  const uint32_t* params) {
+    auto state = pipeline("ivfsq_scan");
+    FAISS_THROW_IF_NOT(state && state.maxTotalThreadsPerThreadgroup >= 256);
+    [encoder setComputePipelineState:state];
+    for (NSUInteger i = 0; i < 10; ++i)
+        [encoder setBuffer:buffers[i] offset:0 atIndex:i];
+    [encoder setBytes:params length:9*sizeof(uint32_t) atIndex:10];
+    [encoder dispatchThreadgroups:MTLSizeMake(params[0],1,1)
+           threadsPerThreadgroup:MTLSizeMake(256,1,1)];
+}
+
+
 namespace {
 
 static const char* kThreadgroupNames[] = {
