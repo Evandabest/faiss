@@ -5,18 +5,19 @@
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *
- * Objective-C++ header (uses MetalResources).
+ * C++ API; MetalResources is opaque here.
  */
 
 #pragma once
 
 #include <faiss/Index.h>
 #include <faiss/gpu/GpuIndicesOptions.h>
-#include <faiss/gpu_metal/MetalResources.h>
 #include <memory>
 
 namespace faiss {
 namespace gpu_metal {
+
+class MetalResources;
 
 /// Configuration for Metal index (mirrors GpuIndexConfig roles).
 struct MetalIndexConfig {

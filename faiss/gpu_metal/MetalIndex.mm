@@ -7,6 +7,7 @@
  */
 
 #import "MetalIndex.h"
+#import "MetalResources.h"
 #include <faiss/impl/FaissAssert.h>
 
 namespace faiss {

@@ -7,6 +7,7 @@
  */
 
 #import "MetalIndexFlat.h"
+#include <faiss/gpu_metal/MetalResources.h>
 #include <faiss/IndexFlat.h>
 #include <faiss/impl/FaissAssert.h>
 #include <cstring>
